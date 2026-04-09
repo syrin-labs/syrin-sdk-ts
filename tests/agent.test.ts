@@ -9,7 +9,7 @@ import {
   withWorkflow,
   withSwarm,
   getRunContext,
-} from '../src/agent.js';
+} from '@/agent';
 
 afterEach(() => {
   // AsyncLocalStorage clears itself automatically per async context.

@@ -6,13 +6,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { SyrinConfig, SyrinEvent } from '../src/types.js';
-import { SessionStore } from '../src/session.js';
-import { Emitter } from '../src/emitter.js';
-import { OTelBridge } from '../src/otel.js';
-import { CheckpointClient } from '../src/checkpoint.js';
-import { SyrinCore } from '../src/core.js';
-import { patchWithModule, unpatch } from '../src/adapters/openai.js';
+import type { SyrinConfig, SyrinEvent } from '@/types';
+import { SessionStore } from '@/session';
+import { Emitter } from '@/emitter';
+import { OTelBridge } from '@/otel';
+import { CheckpointClient } from '@/checkpoint';
+import { SyrinCore } from '@/core';
+import { patchWithModule, unpatch } from '@/adapters/openai';
 
 // Mock openai module — create is on the prototype to match real SDK v4 behavior
 vi.mock('openai', () => {

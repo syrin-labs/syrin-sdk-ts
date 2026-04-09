@@ -2,6 +2,11 @@ import { defineConfig } from 'vitest/config';
 import { resolve } from 'path';
 
 export default defineConfig({
+  esbuild: {
+    // Enable legacy decorator support for @tunable decorator syntax in tests
+    target: 'es2022',
+    keepNames: true,
+  },
   test: {
     environment: 'node',
     globals: true,
@@ -15,23 +20,9 @@ export default defineConfig({
     hookTimeout: 10000,
   },
   resolve: {
-    // Resolve .js extensions to .ts for ESM-style imports in tests
-    extensions: ['.ts', '.mts', '.js', '.mjs'],
     alias: {
-      // Allow tests to import from src without .js extension issues
+      '@': resolve(__dirname, 'src'),
     },
+    extensions: ['.ts', '.mts', '.js', '.mjs'],
   },
-  plugins: [
-    {
-      // Plugin to resolve .js -> .ts for TypeScript source files
-      name: 'resolve-ts-extensions',
-      resolveId(id, importer) {
-        if (importer && id.endsWith('.js') && !id.includes('node_modules')) {
-          const tsPath = id.replace(/\.js$/, '.ts');
-          return null; // Let vite handle it with the extensions array
-        }
-        return null;
-      },
-    },
-  ],
 });

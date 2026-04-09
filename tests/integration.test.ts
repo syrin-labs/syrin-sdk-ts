@@ -5,7 +5,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-import type { IngestPayload, SyrinEvent } from '../src/types.js';
+import type { IngestPayload, SyrinEvent } from '@/types';
 
 // Mock openai — create on prototype (matches real SDK v4 structure)
 vi.mock('openai', () => {

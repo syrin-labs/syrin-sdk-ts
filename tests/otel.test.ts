@@ -5,8 +5,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import type { SyrinConfig, CallInfo } from '../src/types.js';
-import { OTelBridge } from '../src/otel.js';
+import type { SyrinConfig, CallInfo } from '@/types';
+import { OTelBridge, BaggageSpanProcessor, recordMetrics } from '@/otel';
 
 // We use OTel's in-memory exporter directly
 import {
@@ -146,42 +146,55 @@ describe('OTelBridge', () => {
     expect(attrs['syrin.config_applied']).toBe(false);
   });
 
-  it('adds span events for content when captureContent=true', () => {
+  it('emits per-message and choice events (gen_ai.{role}.message, gen_ai.choice) when captureContent=true', () => {
     const config = makeConfig({ captureContent: true });
-    const tracer = provider.getTracer('syrin-sdk-test');
+    const bridge = new OTelBridge(config);
+    // Inject test tracer so recordSpan uses our in-memory exporter
+    (bridge as unknown as Record<string, unknown>)['tracer'] = provider.getTracer('syrin-sdk');
 
-    const messages = [{ role: 'user', content: 'Hello, world!' }];
-    const responseText = 'Hi there!';
-
-    tracer.startActiveSpan('chat gpt-4o', (span) => {
-      // Simulate captureContent behavior
-      span.addEvent('gen_ai.content.prompt', {
-        'gen_ai.prompt': JSON.stringify(messages),
-      });
-      span.addEvent('gen_ai.content.completion', {
-        'gen_ai.completion': responseText,
-      });
-      span.end();
-    });
+    bridge.recordSpan(makeCallInfo({
+      messages: [
+        { role: 'system', content: 'You are helpful.' },
+        { role: 'user', content: 'Hello, world!' },
+      ],
+      responseText: 'Hi there!',
+    }));
 
     const spans = exporter.getFinishedSpans();
     const events = spans[0]!.events;
+    const eventNames = events.map((e) => e.name);
 
-    expect(events).toHaveLength(2);
-    expect(events[0]!.name).toBe('gen_ai.content.prompt');
-    expect(events[1]!.name).toBe('gen_ai.content.completion');
+    // Deprecated events must NOT appear
+    expect(eventNames).not.toContain('gen_ai.content.prompt');
+    expect(eventNames).not.toContain('gen_ai.content.completion');
+
+    // Per-message events
+    expect(eventNames).toContain('gen_ai.system.message');
+    expect(eventNames).toContain('gen_ai.user.message');
+    expect(eventNames).toContain('gen_ai.choice');
+
+    const systemEvent = events.find((e) => e.name === 'gen_ai.system.message')!;
+    expect(systemEvent.attributes?.['gen_ai.system.message']).toBe('You are helpful.');
+    const choiceEvent = events.find((e) => e.name === 'gen_ai.choice')!;
+    expect(choiceEvent.attributes?.['gen_ai.choice.message.content']).toBe('Hi there!');
+    expect(choiceEvent.attributes?.['gen_ai.choice.message.role']).toBe('assistant');
   });
 
   it('does NOT add content events when captureContent=false', () => {
-    const tracer = provider.getTracer('syrin-sdk-test');
+    const config = makeConfig({ captureContent: false });
+    const bridge = new OTelBridge(config);
+    (bridge as unknown as Record<string, unknown>)['tracer'] = provider.getTracer('syrin-sdk');
 
-    tracer.startActiveSpan('chat gpt-4o', (span) => {
-      // No events added — captureContent is false
-      span.end();
-    });
+    bridge.recordSpan(makeCallInfo({
+      messages: [{ role: 'user', content: 'Secret' }],
+      responseText: 'Secret response',
+    }));
 
     const spans = exporter.getFinishedSpans();
-    expect(spans[0]!.events).toHaveLength(0);
+    const eventNames = spans[0]!.events.map((e) => e.name);
+    expect(eventNames).not.toContain('gen_ai.user.message');
+    expect(eventNames).not.toContain('gen_ai.choice');
+    expect(eventNames).not.toContain('gen_ai.content.prompt');
   });
 
   it('records error span on API exception', () => {
@@ -218,5 +231,120 @@ describe('OTelBridge', () => {
     const bridge = new OTelBridge(config);
     bridge.setup();
     await expect(bridge.shutdown()).resolves.not.toThrow();
+  });
+
+  it('sets optional request attributes: top_p, frequency_penalty, presence_penalty, stop_sequences', () => {
+    const config = makeConfig();
+    const bridge = new OTelBridge(config);
+    (bridge as unknown as Record<string, unknown>)['tracer'] = provider.getTracer('syrin-sdk');
+
+    bridge.recordSpan(makeCallInfo({
+      topP: 0.9,
+      frequencyPenalty: 0.5,
+      presencePenalty: 0.3,
+      stop: ['\n', 'END'],
+    }));
+
+    const spans = exporter.getFinishedSpans();
+    const attrs = spans[0]!.attributes;
+    expect(attrs['gen_ai.request.top_p']).toBe(0.9);
+    expect(attrs['gen_ai.request.frequency_penalty']).toBe(0.5);
+    expect(attrs['gen_ai.request.presence_penalty']).toBe(0.3);
+    expect(attrs['gen_ai.request.stop_sequences']).toEqual(['\n', 'END']);
+  });
+
+  it('stop string is wrapped in an array', () => {
+    const config = makeConfig();
+    const bridge = new OTelBridge(config);
+    (bridge as unknown as Record<string, unknown>)['tracer'] = provider.getTracer('syrin-sdk');
+
+    bridge.recordSpan(makeCallInfo({ stop: 'STOP' }));
+
+    const spans = exporter.getFinishedSpans();
+    expect(spans[0]!.attributes['gen_ai.request.stop_sequences']).toEqual(['STOP']);
+  });
+
+  it('sets framework context attributes', () => {
+    const config = makeConfig();
+    const bridge = new OTelBridge(config);
+    (bridge as unknown as Record<string, unknown>)['tracer'] = provider.getTracer('syrin-sdk');
+
+    bridge.recordSpan(makeCallInfo({
+      framework: 'langgraph',
+      langgraphGraphId: 'research-graph',
+      langgraphNodeName: 'search_node',
+    }));
+
+    const attrs = exporter.getFinishedSpans()[0]!.attributes;
+    expect(attrs['syrin.framework']).toBe('langgraph');
+    expect(attrs['langgraph.graph_id']).toBe('research-graph');
+    expect(attrs['langgraph.node_name']).toBe('search_node');
+  });
+
+  it('sets telemetry signal attributes', () => {
+    const config = makeConfig();
+    const bridge = new OTelBridge(config);
+    (bridge as unknown as Record<string, unknown>)['tracer'] = provider.getTracer('syrin-sdk');
+
+    bridge.recordSpan(makeCallInfo({
+      callIndex: 3,
+      contextUtilization: 0.45,
+      conversationHash: 'abc123def456',
+      systemPromptHash: 'deadbeef1234',
+      toolSetHash: 'feedcafe5678',
+      modelConfigHash: 'cafebabe9012',
+      messageCount: 5,
+      repeatedToolCalls: 2,
+    }));
+
+    const attrs = exporter.getFinishedSpans()[0]!.attributes;
+    expect(attrs['syrin.call_index']).toBe(3);
+    expect(attrs['syrin.context_utilization']).toBeCloseTo(0.45);
+    expect(attrs['syrin.conversation_hash']).toBe('abc123def456');
+    expect(attrs['syrin.system_prompt_hash']).toBe('deadbeef1234');
+    expect(attrs['syrin.tool_set_hash']).toBe('feedcafe5678');
+    expect(attrs['syrin.model_config_hash']).toBe('cafebabe9012');
+    expect(attrs['syrin.message_count']).toBe(5);
+    expect(attrs['syrin.repeated_tool_calls']).toBe(2);
+  });
+
+  it('finish_reasons is always recorded as an array', () => {
+    const config = makeConfig();
+    const bridge = new OTelBridge(config);
+    (bridge as unknown as Record<string, unknown>)['tracer'] = provider.getTracer('syrin-sdk');
+
+    bridge.recordSpan(makeCallInfo({ finishReason: 'stop' }));
+
+    const attrs = exporter.getFinishedSpans()[0]!.attributes;
+    const reasons = attrs['gen_ai.response.finish_reasons'];
+    expect(Array.isArray(reasons)).toBe(true);
+    expect(reasons).toContain('stop');
+  });
+
+  it('BaggageSpanProcessor.onStart copies baggage to span attributes', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { propagation, ROOT_CONTEXT } = require('@opentelemetry/api') as typeof import('@opentelemetry/api');
+
+    const bag = propagation.createBaggage({
+      'syrin.session_id': { value: 'ses_abc123' },
+      'syrin.agent_id': { value: 'my-agent' },
+    });
+    const ctx = propagation.setBaggage(ROOT_CONTEXT, bag);
+
+    const processor = new BaggageSpanProcessor();
+    const capturedAttrs: Record<string, unknown> = {};
+    const mockSpan = {
+      setAttribute(key: string, val: unknown) { capturedAttrs[key] = val; },
+      end() {},
+    };
+
+    processor.onStart(mockSpan as unknown as import('@opentelemetry/api').Span, ctx);
+
+    expect(capturedAttrs['syrin.session_id']).toBe('ses_abc123');
+    expect(capturedAttrs['syrin.agent_id']).toBe('my-agent');
+  });
+
+  it('recordMetrics does not throw', () => {
+    expect(() => recordMetrics(makeCallInfo())).not.toThrow();
   });
 });

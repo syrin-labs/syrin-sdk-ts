@@ -2,7 +2,7 @@
  * Syrin SDK — Configuration management
  */
 
-import type { SyrinConfig } from './types.js';
+import type { SyrinConfig } from '@/types';
 
 const SDK_VERSION = '0.1.0';
 

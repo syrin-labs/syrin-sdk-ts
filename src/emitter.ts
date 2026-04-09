@@ -7,11 +7,11 @@
  *      the first queued event when a full batch hasn't triggered first.
  */
 
-import type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse } from './types.js';
-import type { SessionStore } from './session.js';
-import { SDK_VERSION } from './config.js';
-import { GovernanceResponse } from './governance.js';
-import { fireConfigChange, fireAlert } from './hooks.js';
+import type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse } from '@/types';
+import type { SessionStore } from '@/session';
+import { SDK_VERSION } from '@/config';
+import { GovernanceResponse } from '@/governance';
+import { fireConfigChange, fireAlert } from '@/hooks';
 
 const MAX_QUEUE_SIZE = 1000;
 

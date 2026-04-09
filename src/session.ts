@@ -3,8 +3,8 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
-import type { SessionState } from './types.js';
-import { generateId, nowIso } from './utils.js';
+import type { SessionState } from '@/types';
+import { generateId, nowIso } from '@/utils';
 
 /**
  * AsyncLocalStorage for per-call session scoping.

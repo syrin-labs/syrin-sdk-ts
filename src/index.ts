@@ -7,27 +7,35 @@
  *   // All existing openai calls are now instrumented
  */
 
-import { createConfig } from './config.js';
-import { SessionStore, sessionStorage, resolveSessionId } from './session.js';
-import { Emitter } from './emitter.js';
-import { OTelBridge } from './otel.js';
-import { CheckpointClient } from './checkpoint.js';
-import { SyrinCore } from './core.js';
-import { OpenAIAdapter, unpatch, isPatched } from './adapters/openai.js';
-import { clearHooks } from './hooks.js';
-import { generateId } from './utils.js';
-import type { SyrinConfig, SyrinSDK } from './types.js';
-import type { SyrinAdapter } from './adapters/types.js';
+import { createConfig } from '@/config';
+import { SessionStore, sessionStorage, resolveSessionId } from '@/session';
+import { Emitter } from '@/emitter';
+import { OTelBridge } from '@/otel';
+import { CheckpointClient } from '@/checkpoint';
+import { SyrinCore } from '@/core';
+import { OpenAIAdapter, unpatch, isPatched } from '@/adapters/openai';
+import { clearHooks } from '@/hooks';
+import { generateId } from '@/utils';
+import type { SyrinConfig, SyrinSDK } from '@/types';
+import type { SyrinAdapter } from '@/adapters/types';
 
 
-export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData } from './types.js';
-export { withAgent, withWorkflow, withSwarm, getRunContext } from './agent.js';
-export { GovernanceStopError } from './governance.js';
-export type { Checkpoint } from './checkpoint.js';
-export { onConfigChange, onAlert } from './hooks.js';
-export { SyrinCore } from './core.js';
-export type { SyrinAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore } from './adapters/types.js';
-export { OpenAIAdapter } from './adapters/openai.js';
+export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData } from '@/types';
+export { withAgent, withWorkflow, withSwarm, getRunContext } from '@/agent';
+export { GovernanceStopError } from '@/governance';
+export type { Checkpoint } from '@/checkpoint';
+export { onConfigChange, onAlert } from '@/hooks';
+export { SyrinCore } from '@/core';
+export type { SyrinAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore } from '@/adapters/types';
+export { OpenAIAdapter } from '@/adapters/openai';
+export { ConfigStore } from '@/config-store';
+export type { FieldSchema } from '@/config-store';
+export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry } from '@/tunable';
+export { AnthropicAdapter } from '@/adapters/anthropic';
+export { LangChainAdapter } from '@/adapters/langchain';
+export { LangGraphAdapter } from '@/adapters/langgraph';
+export { BaseFrameworkAdapter } from '@/adapters/types';
+export type { FrameworkAdapter } from '@/adapters/types';
 
 export interface SyrinInitOptions {
   apiKey?: string;
@@ -43,6 +51,7 @@ export interface SyrinInitOptions {
   batchSize?: number;
   toolValidation?: boolean;
   sessionTtlMs?: number;
+  adapters?: import('./adapters/types.js').SyrinAdapter[];
 }
 
 export class SyrinSDKInstance implements SyrinSDK {
@@ -221,6 +230,30 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
 
   // Register the built-in OpenAI adapter (loads openai module lazily)
   await core.registerAdapter(new OpenAIAdapter());
+
+  // Wire ConfigStore into core so framework adapters can read config
+  const { ConfigStore } = await import('./config-store.js');
+  const configStore = new ConfigStore();
+  (core as unknown as Record<string, unknown>)['_configStore'] = configStore;
+
+  // Wire global TunableRegistry into core
+  const { globalRegistry } = await import('./tunable.js');
+  (core as unknown as Record<string, unknown>)['_tunableRegistry'] = globalRegistry;
+
+  // Try to auto-install Anthropic adapter if @anthropic-ai/sdk is available
+  try {
+    const { AnthropicAdapter } = await import('./adapters/anthropic.js');
+    await core.registerAdapter(new AnthropicAdapter());
+  } catch {
+    // @anthropic-ai/sdk not installed — skip silently
+  }
+
+  // Register user-provided adapters
+  if (options.adapters) {
+    for (const adapter of options.adapters) {
+      await core.registerAdapter(adapter);
+    }
+  }
 
   const instance = new SyrinSDKInstance(config, sessionStore, emitter, otelBridge, core);
   _instance = instance;

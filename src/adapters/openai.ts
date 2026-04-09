@@ -17,7 +17,7 @@
  *   - Streaming chunk accumulation
  */
 
-import type { ISyrinCore, SyrinAdapter, BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from './types.js';
+import type { ISyrinCore, SyrinAdapter, BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types';
 
 // Minimal interfaces for the optional openai module (avoid direct import of optional dep)
 interface CompletionsInstance {

@@ -14,8 +14,8 @@
  * resolve without an extra network round-trip.
  */
 
-import { generateId, nowIso } from './utils.js';
-import type { SyrinConfig } from './types.js';
+import { generateId, nowIso } from '@/utils';
+import type { SyrinConfig } from '@/types';
 
 export interface Checkpoint {
   checkpointId: string;

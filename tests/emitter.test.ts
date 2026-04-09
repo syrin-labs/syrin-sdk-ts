@@ -7,10 +7,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-import type { SyrinConfig, SyrinEvent, IngestPayload } from '../src/types.js';
-import { Emitter } from '../src/emitter.js';
-import { SessionStore } from '../src/session.js';
-import { generateId, nowIso } from '../src/utils.js';
+import type { SyrinConfig, SyrinEvent, IngestPayload } from '@/types';
+import { Emitter } from '@/emitter';
+import { SessionStore } from '@/session';
+import { generateId, nowIso } from '@/utils';
 
 // Mock server
 const server = setupServer();

@@ -141,3 +141,66 @@ export interface SyrinAdapter {
   /** Whether this adapter is currently installed. */
   isInstalled(): boolean;
 }
+
+/**
+ * Base interface for Tier 2 framework adapters (LangGraph, LangChain, Mastra, etc.)
+ * Framework adapters set FrameworkContext and emit framework-level events.
+ * They do NOT emit LLM_CALL events — that's Tier 1's responsibility.
+ */
+export interface FrameworkAdapter extends SyrinAdapter {
+  /** Emit a framework event via the core emitter */
+  emitEvent(event: Record<string, unknown>): void;
+  /** Read current config section */
+  getConfig(namespace: string): Record<string, unknown>;
+}
+
+/**
+ * Abstract base class implementing FrameworkAdapter helpers.
+ * Subclasses implement _doInstall() and _doUninstall().
+ */
+export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
+  abstract readonly name: string;
+  protected _core: ISyrinCore | null = null;
+  private _installed = false;
+
+  async install(core: ISyrinCore): Promise<void> {
+    if (this._installed) return;
+    this._core = core;
+    await this._doInstall(core);
+    this._installed = true;
+  }
+
+  uninstall(): void {
+    if (!this._installed) return;
+    this._doUninstall();
+    this._core = null;
+    this._installed = false;
+  }
+
+  isInstalled(): boolean {
+    return this._installed;
+  }
+
+  protected abstract _doInstall(core: ISyrinCore): void | Promise<void>;
+  protected abstract _doUninstall(): void;
+
+  emitEvent(event: Record<string, unknown>): void {
+    if (this._core) {
+      (this._core as unknown as { _emitter: { emit: (e: unknown, s: string) => void } })
+        ._emitter.emit(event as never, this.sessionId ?? 'unknown');
+    }
+  }
+
+  getConfig(namespace: string): Record<string, unknown> {
+    const cs = (this._core as unknown as { _configStore?: import('../config-store.js').ConfigStore })?._configStore;
+    return cs ? cs.getSection(namespace) : {};
+  }
+
+  get sessionId(): string | undefined {
+    return (this._core as unknown as { config: { sessionId?: string } })?.config?.sessionId;
+  }
+
+  get agentId(): string | undefined {
+    return (this._core as unknown as { config: { agentId?: string } })?.config?.agentId;
+  }
+}

@@ -3,8 +3,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createConfig, fromEnv } from '../src/config.js';
-import type { SyrinConfig } from '../src/types.js';
+import { createConfig, fromEnv } from '@/config';
+import type { SyrinConfig } from '@/types';
 
 describe('createConfig', () => {
   const baseOptions = { apiKey: 'syrin_test_key' };

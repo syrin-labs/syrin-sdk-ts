@@ -14,12 +14,12 @@
  * to plug any LLM SDK into this engine without re-implementing any of the above.
  */
 
-import type { SyrinConfig, SyrinEvent } from './types.js';
-import type { SessionStore } from './session.js';
-import { sessionStorage } from './session.js';
-import type { Emitter } from './emitter.js';
-import type { OTelBridge } from './otel.js';
-import type { CheckpointClient } from './checkpoint.js';
+import type { SyrinConfig, SyrinEvent } from '@/types';
+import type { SessionStore } from '@/session';
+import { sessionStorage } from '@/session';
+import type { Emitter } from '@/emitter';
+import type { OTelBridge } from '@/otel';
+import type { CheckpointClient } from '@/checkpoint';
 import type {
   SyrinAdapter,
   ISyrinCore,
@@ -27,9 +27,10 @@ import type {
   NormalizedCallResult,
   BeforeCallResult,
   NormalizedMessage,
-} from './adapters/types.js';
-import { agentStorage } from './agent.js';
-import { GovernanceStopError } from './governance.js';
+} from '@/adapters/types';
+import { agentStorage } from '@/agent';
+import { GovernanceStopError } from '@/governance';
+import { getFrameworkContext } from '@/framework-context';
 import {
   generateId,
   nowIso,
@@ -44,10 +45,10 @@ import {
   contextSize,
   detectRefusal,
   stableHash,
-} from './utils.js';
+} from '@/utils';
 
 // Re-export for convenience
-export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from './adapters/types.js';
+export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types';
 
 export class SyrinCore implements ISyrinCore {
   private readonly _adapters = new Map<string, SyrinAdapter>();
@@ -363,6 +364,11 @@ export class SyrinCore implements ISyrinCore {
       response_char_count: responseText?.length,
       has_refusal: detectRefusal(responseText),
       last_checkpoint_id: updatedSession?.lastCheckpointId,
+      // Full content — only when capture_content=true (off by default for privacy)
+      ...(this.config.captureContent ? {
+        prompt_messages: modifiedMessages,
+        ...(responseText != null ? { completion_text: responseText } : {}),
+      } : {}),
     };
 
     this._emitter.emit(event, sessionId);
@@ -373,11 +379,18 @@ export class SyrinCore implements ISyrinCore {
       });
     }
 
+    // Read framework context for OTel attributes
+    const fwCtx = getFrameworkContext();
+
     this._otelBridge.recordSpan({
       model,
       provider,
       temperature: tempUnsupported ? undefined : (modifiedRaw['temperature'] as number | undefined),
       maxTokens: modifiedRaw['max_tokens'] as number | undefined,
+      topP: modifiedRaw['top_p'] as number | undefined,
+      frequencyPenalty: modifiedRaw['frequency_penalty'] as number | undefined,
+      presencePenalty: modifiedRaw['presence_penalty'] as number | undefined,
+      stop: modifiedRaw['stop'] as string | string[] | undefined,
       inputTokens,
       outputTokens,
       finishReason,
@@ -388,7 +401,19 @@ export class SyrinCore implements ISyrinCore {
       sessionId,
       configApplied,
       messages: this.config.captureContent ? (modifiedMessages as unknown[]) : undefined,
-      responseText,
+      responseText: this.config.captureContent ? responseText : undefined,
+      // Framework context
+      framework: fwCtx?.framework,
+      langgraphGraphId: fwCtx?.graphId,
+      langgraphNodeName: fwCtx?.nodeName,
+      // Telemetry signal attributes
+      callIndex: updatedSession?.callIndex ?? 0,
+      contextUtilization: ctxSize ? parseFloat((totalTokens / ctxSize).toFixed(4)) : undefined,
+      conversationHash,
+      systemPromptHash: event.system_prompt_hash,
+      toolSetHash: event.tool_set_hash,
+      modelConfigHash: event.model_config_hash,
+      messageCount: modifiedMessages.length,
     });
   }
 }

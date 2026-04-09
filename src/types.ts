@@ -133,6 +133,10 @@ export interface CallInfo {
   provider: string;
   temperature?: number;
   maxTokens?: number;
+  topP?: number;
+  frequencyPenalty?: number;
+  presencePenalty?: number;
+  stop?: string | string[];
   inputTokens: number;
   outputTokens: number;
   finishReason: string;
@@ -145,4 +149,17 @@ export interface CallInfo {
   error?: Error;
   messages?: unknown[];
   responseText?: string;
+  // Framework context
+  framework?: string;
+  langgraphGraphId?: string;
+  langgraphNodeName?: string;
+  // Telemetry signal attributes
+  callIndex?: number;
+  contextUtilization?: number;
+  conversationHash?: string;
+  systemPromptHash?: string;
+  toolSetHash?: string;
+  modelConfigHash?: string;
+  messageCount?: number;
+  repeatedToolCalls?: number;
 }
