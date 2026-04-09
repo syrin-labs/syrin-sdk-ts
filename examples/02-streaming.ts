@@ -18,8 +18,9 @@ async function main() {
   const sdk = await init({
     apiKey: process.env['SYRIN_API_KEY'] ?? 'syrin_demo_key',
     agentId: 'example-agent-streaming',
-    backendUrl: process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4318',
+    backendUrl: process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4000',
     debug: true,
+    captureContent: true,
   });
 
   console.log(`Session ID: ${sdk.sessionId}`);

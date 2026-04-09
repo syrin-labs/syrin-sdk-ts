@@ -17,7 +17,7 @@
 import { init, shutdown, withAgent, withWorkflow, withSwarm } from '../src/index.js';
 
 const REAL_OPENAI = Boolean(process.env['OPENAI_API_KEY']?.startsWith('sk-'));
-const BACKEND_URL = process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4318';
+const BACKEND_URL = process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4000';
 
 // ---------------------------------------------------------------------------
 // Initialise SDK
@@ -29,6 +29,7 @@ const sdk = await init({
   debug: true,
   offline: !REAL_OPENAI,
   idleFlushMs: 2_000,
+  captureContent: true,
 });
 
 console.log('='.repeat(60));

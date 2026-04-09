@@ -18,9 +18,9 @@ async function main() {
   await init({
     apiKey: process.env['SYRIN_API_KEY'] ?? 'syrin_demo_key',
     agentId: 'example-agent-basic-chat',
-    backendUrl: process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4318',
+    backendUrl: process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4000',
     debug: true,
-    captureContent: false, // Set to true to capture prompts/responses in spans
+    captureContent: true, // Captures full prompts/responses in telemetry events
   });
 
   // --- Your existing OpenAI code — completely unchanged ---

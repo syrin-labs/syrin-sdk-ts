@@ -7,43 +7,44 @@
  *
  * How to run
  * ----------
- * Terminal 1 — start mock backend:
- *   cd syrin-sdk/mock-backend && python server.py
+ * Terminal 1 — start the backend:
+ *   cd syrin-backend && npm run dev   (or docker compose up)
  *
  * Terminal 2 — run this example:
- *   SYRIN_API_KEY=syrin_test OPENAI_API_KEY=sk-... \
+ *   SYRIN_API_KEY=syrin_test SYRIN_BACKEND_URL=http://localhost:4000 \
+ *   OPENAI_API_KEY=sk-... \
  *     npx tsx examples/03-remote-config.ts
  *
  * Between rounds, inject config changes from Terminal 3:
  *
  *   # Swap model + tighten temperature:
- *   curl -X POST http://localhost:4318/control/config \
+ *   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
  *        -H "Content-Type: application/json" \
- *        -d '{"temperature": 0.1, "model": "gpt-4o-mini"}'
+ *        -H "Authorization: Bearer syrin_test" \
+ *        -d '{"overrides": {"temperature": 0.1, "model": "gpt-4o-mini"}}'
  *
  *   # Cap output length:
- *   curl -X POST http://localhost:4318/control/config \
+ *   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
  *        -H "Content-Type: application/json" \
- *        -d '{"max_tokens": 30}'
+ *        -H "Authorization: Bearer syrin_test" \
+ *        -d '{"overrides": {"max_tokens": 30}}'
  *
- *   # Disable a tool for a specific agent (Round 5):
- *   curl -X POST http://localhost:4318/control/config \
+ *   # Disable a tool (Round 5):
+ *   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
  *        -H "Content-Type: application/json" \
- *        -d '{"disabled_tools": ["send_email"]}'
- *
- *   # Restrict agent to only one tool (allowlist):
- *   curl -X POST http://localhost:4318/control/config \
- *        -H "Content-Type: application/json" \
- *        -d '{"enabled_tools": ["search_web"]}'
+ *        -H "Authorization: Bearer syrin_test" \
+ *        -d '{"overrides": {"disabled_tools": ["send_email"]}}'
  *
  *   # Reset everything:
- *   curl -X DELETE http://localhost:4318/control/config
+ *   curl -X DELETE http://localhost:4000/agents/remote-config-demo/config \
+ *        -H "Authorization: Bearer syrin_test"
  */
 
 import OpenAI from 'openai';
 import { init, shutdown, withSession, withAgent, getInstance, getToolValidation } from '../src/index.js';
 
-const BACKEND_URL = process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4318';
+const BACKEND_URL = process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4000';
+const AGENT_ID = 'remote-config-demo';
 
 // ---------------------------------------------------------------------------
 // Init
@@ -57,6 +58,7 @@ const sdk = await init({
   idleFlushMs: 1_500,
   batchSize: 1,
   toolValidation: true,
+  captureContent: true,
 });
 
 const openai = new OpenAI({
@@ -84,18 +86,25 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function injectConfig(updates: Record<string, unknown>): Promise<void> {
-  await fetch(`${BACKEND_URL}/control/config`, {
+  const apiKey = process.env['SYRIN_API_KEY'] ?? 'syrin_demo';
+  await fetch(`${BACKEND_URL}/agents/${AGENT_ID}/config`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(updates),
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ overrides: updates }),
   });
 }
 
 async function clearConfig(): Promise<void> {
-  await fetch(`${BACKEND_URL}/control/config`, { method: 'DELETE' });
+  await injectConfig({
+    system_prompt: null, temperature: null, model: null,
+    max_tokens: null, disabled_tools: null, enabled_tools: null,
+  });
 }
 
-async function wait(secs = 4): Promise<void> {
+async function wait(secs = 1): Promise<void> {
   console.log(`\n  ⏳ Waiting ${secs}s — inject a config change now if you want!`);
   await sleep(secs * 1000);
 }
@@ -285,14 +294,14 @@ async function roundMultiTurn(): Promise<void> {
 // Try while Round 5 is running:
 //
 //   Block send_email:
-//   curl -X POST http://localhost:4318/control/config \
-//        -H "Content-Type: application/json" \
-//        -d '{"disabled_tools": ["send_email"]}'
+//   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
+//        -H "Content-Type: application/json" -H "Authorization: Bearer syrin_test" \
+//        -d '{"overrides": {"disabled_tools": ["send_email"]}}'
 //
 //   Restrict to search only:
-//   curl -X POST http://localhost:4318/control/config \
-//        -H "Content-Type: application/json" \
-//        -d '{"enabled_tools": ["search_web"]}'
+//   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
+//        -H "Content-Type: application/json" -H "Authorization: Bearer syrin_test" \
+//        -d '{"overrides": {"enabled_tools": ["search_web"]}}'
 // ---------------------------------------------------------------------------
 
 const AGENT_RESEARCHER_TOOLS = [TOOLS_ALL[0]!, TOOLS_ALL[1]!]; // search_web + send_email
@@ -352,9 +361,9 @@ async function roundPerAgentTools(): Promise<void> {
 
   console.log('\n  agent-researcher  tools: search_web, send_email');
   console.log('  agent-writer      tools: search_web, create_document');
-  console.log('\n  Inject config_updates to toggle tools per-agent:');
-  console.log('    disabled_tools: ["send_email"]     — blocks send_email for next call');
-  console.log('    enabled_tools:  ["search_web"]     — restricts to search only\n');
+  console.log('\n  Inject config via real backend API to toggle tools per-agent:');
+  console.log('    POST /agents/remote-config-demo/config  {"overrides": {"disabled_tools": ["send_email"]}}');
+  console.log('    POST /agents/remote-config-demo/config  {"overrides": {"enabled_tools": ["search_web"]}}\n');
 
   for (let i = 1; i <= 3; i++) {
     console.log(`  ── Iteration ${i}/3 ──`);
@@ -374,7 +383,7 @@ async function roundPerAgentTools(): Promise<void> {
       ),
     ]);
 
-    if (i < 3) await wait(4);
+    if (i < 3) await wait();
   }
 }
 
@@ -532,22 +541,22 @@ async function main(): Promise<void> {
 `);
 
   await roundBasicChat();
-  await wait(4);
+  await wait();
 
   await roundStreaming();
-  await wait(4);
+  await wait();
 
   await roundToolCalling();
-  await wait(4);
+  await wait();
 
   await roundMultiTurn();
-  await wait(4);
+  await wait();
 
   await roundPerAgentTools();
-  await wait(4);
+  await wait();
 
   await roundSystemPrompt();
-  await wait(4);
+  await wait();
 
   await roundToolValidation();
 
