@@ -17,6 +17,12 @@
  *   npx tsx examples/09-mastra.ts
  */
 
+// Load .env from the examples/ directory (OPENAI_API_KEY, SYRIN_API_KEY, etc.)
+import { config as loadEnv } from 'dotenv';
+import { fileURLToPath } from 'node:url';
+import { join, dirname } from 'node:path';
+loadEnv({ path: join(dirname(fileURLToPath(import.meta.url)), '.env') });
+
 // ---------------------------------------------------------------------------
 // Check @mastra/core and @ai-sdk/openai are installed
 // ---------------------------------------------------------------------------
