@@ -34,6 +34,8 @@ export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry }
 export { AnthropicAdapter } from '@/adapters/anthropic';
 export { LangChainAdapter } from '@/adapters/langchain';
 export { LangGraphAdapter } from '@/adapters/langgraph';
+export { MastraAdapter } from '@/adapters/mastra';
+export { VercelAIAdapter } from '@/adapters/vercel-ai';
 export { BaseFrameworkAdapter } from '@/adapters/types';
 export type { FrameworkAdapter } from '@/adapters/types';
 
