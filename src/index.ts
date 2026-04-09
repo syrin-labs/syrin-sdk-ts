@@ -26,7 +26,7 @@ export { GovernanceStopError } from '@/governance';
 export type { Checkpoint } from '@/checkpoint';
 export { onConfigChange, onAlert } from '@/hooks';
 export { SyrinCore } from '@/core';
-export type { SyrinAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore } from '@/adapters/types';
+export type { SyrinAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore, SchemaField as AdapterSchemaField } from '@/adapters/types';
 export { OpenAIAdapter } from '@/adapters/openai';
 export { ConfigStore } from '@/config-store';
 export type { FieldSchema } from '@/config-store';
@@ -256,6 +256,9 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
       await core.registerAdapter(adapter);
     }
   }
+
+  // POST config schema to backend so the dashboard knows what's remotely configurable
+  await core.register();
 
   const instance = new SyrinSDKInstance(config, sessionStore, emitter, otelBridge, core);
   _instance = instance;

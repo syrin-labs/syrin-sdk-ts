@@ -154,6 +154,17 @@ export interface FrameworkAdapter extends SyrinAdapter {
   getConfig(namespace: string): Record<string, unknown>;
 }
 
+// ---------------------------------------------------------------------------
+// Schema types — used for /agents/:id/register
+// ---------------------------------------------------------------------------
+
+export interface SchemaField {
+  name: string;
+  type: 'str' | 'float' | 'int' | 'bool';
+  default?: unknown;
+  constraints?: { ge?: number; le?: number; gt?: number; lt?: number; enum?: unknown[] };
+}
+
 /**
  * Abstract base class implementing FrameworkAdapter helpers.
  * Subclasses implement _doInstall() and _doUninstall().
@@ -202,5 +213,16 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
 
   get agentId(): string | undefined {
     return (this._core as unknown as { config: { agentId?: string } })?.config?.agentId;
+  }
+
+  /**
+   * Return the config schema sections this adapter exposes.
+   * Keys are section names (e.g. "llm", "langgraph").
+   * Values are arrays of SchemaField descriptors.
+   *
+   * Override in subclasses to declare tunable fields.
+   */
+  configSchema(): Record<string, SchemaField[]> {
+    return {};
   }
 }

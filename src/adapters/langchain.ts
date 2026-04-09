@@ -34,7 +34,7 @@ import { generateId, nowIso } from '@/utils';
 import { withFrameworkContext } from '@/framework-context';
 import type { FrameworkContext } from '@/framework-context';
 import { BaseFrameworkAdapter } from '@/adapters/types';
-import type { ISyrinCore } from '@/adapters/types';
+import type { ISyrinCore, SchemaField } from '@/adapters/types';
 
 // ---------------------------------------------------------------------------
 // SyrinLangChainCallback — duck-typed callback handler
@@ -127,6 +127,16 @@ interface RunnableLike {
  */
 export class LangChainAdapter extends BaseFrameworkAdapter {
   readonly name = 'langchain';
+
+  override configSchema(): Record<string, SchemaField[]> {
+    return {
+      llm: [
+        { name: 'model', type: 'str', default: null },
+        { name: 'temperature', type: 'float', default: null, constraints: { ge: 0.0, le: 2.0 } },
+        { name: 'max_tokens', type: 'int', default: null, constraints: { ge: 1 } },
+      ],
+    };
+  }
 
   protected _doInstall(_core: ISyrinCore): void {
     // No global patching — callback-based approach, nothing to patch

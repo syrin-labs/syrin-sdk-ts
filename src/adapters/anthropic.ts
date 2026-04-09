@@ -24,6 +24,7 @@ import type {
   BeforeCallResult,
   NormalizedCallParams,
   NormalizedCallResult,
+  SchemaField,
 } from '@/adapters/types';
 import { detectProvider } from '@/provider';
 
@@ -73,6 +74,16 @@ export class AnthropicAdapter implements SyrinAdapter {
   readonly name = 'anthropic';
 
   constructor(private readonly _anthropicModule?: AnthropicModule | null) {}
+
+  configSchema(): Record<string, SchemaField[]> {
+    return {
+      llm: [
+        { name: 'model', type: 'str', default: null },
+        { name: 'temperature', type: 'float', default: null, constraints: { ge: 0.0, le: 2.0 } },
+        { name: 'max_tokens', type: 'int', default: null, constraints: { ge: 1 } },
+      ],
+    };
+  }
 
   async install(core: ISyrinCore): Promise<void> {
     // If a null module was explicitly passed (e.g. for testing missing package),

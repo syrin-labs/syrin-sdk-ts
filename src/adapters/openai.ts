@@ -17,7 +17,7 @@
  *   - Streaming chunk accumulation
  */
 
-import type { ISyrinCore, SyrinAdapter, BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types';
+import type { ISyrinCore, SyrinAdapter, BeforeCallResult, NormalizedCallParams, NormalizedCallResult, SchemaField } from '@/adapters/types';
 
 // Minimal interfaces for the optional openai module (avoid direct import of optional dep)
 interface CompletionsInstance {
@@ -42,6 +42,16 @@ export class OpenAIAdapter implements SyrinAdapter {
   readonly name = 'openai';
 
   constructor(private readonly _openaiModule?: OpenAIModule) {}
+
+  configSchema(): Record<string, SchemaField[]> {
+    return {
+      llm: [
+        { name: 'model', type: 'str', default: null },
+        { name: 'temperature', type: 'float', default: null, constraints: { ge: 0.0, le: 2.0 } },
+        { name: 'max_tokens', type: 'int', default: null, constraints: { ge: 1 } },
+      ],
+    };
+  }
 
   async install(core: ISyrinCore): Promise<void> {
     const mod = this._openaiModule ?? (await _loadOpenAI(core.config.debug));

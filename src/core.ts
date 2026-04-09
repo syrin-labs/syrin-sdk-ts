@@ -15,6 +15,7 @@
  */
 
 import type { SyrinConfig, SyrinEvent } from '@/types';
+import { SDK_VERSION } from '@/config';
 import type { SessionStore } from '@/session';
 import { sessionStorage } from '@/session';
 import type { Emitter } from '@/emitter';
@@ -27,6 +28,7 @@ import type {
   NormalizedCallResult,
   BeforeCallResult,
   NormalizedMessage,
+  SchemaField,
 } from '@/adapters/types';
 import { agentStorage } from '@/agent';
 import { GovernanceStopError } from '@/governance';
@@ -82,6 +84,98 @@ export class SyrinCore implements ISyrinCore {
 
   isAdapterInstalled(name: string): boolean {
     return this._adapters.get(name)?.isInstalled() ?? false;
+  }
+
+  // ── Schema registration ──────────────────────────────────────────────────
+
+  /**
+   * Merge configSchema() from all installed adapters that expose it.
+   * First-writer wins: if two adapters declare the same section+field, the first one wins.
+   */
+  buildSchema(): Record<string, unknown> {
+    const sections: Record<string, Record<string, SchemaField>> = {};
+
+    for (const adapter of this._adapters.values()) {
+      const schemaFn = (adapter as unknown as { configSchema?: () => Record<string, SchemaField[]> }).configSchema;
+      if (typeof schemaFn !== 'function') continue;
+      const adapterSchema = schemaFn.call(adapter);
+      for (const [sectionName, fields] of Object.entries(adapterSchema)) {
+        if (!sections[sectionName]) sections[sectionName] = {};
+        for (const field of fields) {
+          if (!sections[sectionName][field.name]) {
+            sections[sectionName][field.name] = field;
+          }
+        }
+      }
+    }
+
+    return {
+      agent_id: this.config.agentId,
+      sections: Object.fromEntries(
+        Object.entries(sections).map(([sec, fields]) => [
+          sec,
+          { fields: Object.values(fields) },
+        ])
+      ),
+    };
+  }
+
+  /**
+   * POST the agent's config schema to the backend.
+   * Applies any configDelta returned by the backend into the ConfigStore.
+   * Non-fatal — network errors are silently swallowed.
+   */
+  async register(): Promise<void> {
+    const agentId = this.config.agentId;
+    if (!agentId) return;
+
+    const schema = this.buildSchema();
+    const payload = {
+      agent_id: agentId,
+      agent_framework: this._detectFramework(),
+      sdk: { language: 'typescript', version: SDK_VERSION },
+      schema,
+    };
+
+    const url = `${this.config.backendUrl}/agents/${agentId}/register`;
+
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.config.apiKey}`,
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const body = await res.json() as { configDelta?: Record<string, unknown> };
+        const delta = body.configDelta ?? {};
+        const configStore = (this as unknown as { _configStore?: { set(ns: string, key: string, value: unknown): void } })._configStore;
+        if (configStore) {
+          for (const [path, value] of Object.entries(delta)) {
+            const dot = path.indexOf('.');
+            if (dot !== -1) {
+              const section = path.slice(0, dot);
+              const key = path.slice(dot + 1);
+              configStore.set(section, key, value);
+            }
+          }
+        }
+      }
+    } catch {
+      // Non-fatal — backend unreachable at startup is acceptable
+    }
+  }
+
+  private _detectFramework(): string | undefined {
+    for (const adapter of this._adapters.values()) {
+      if (adapter.name !== 'openai' && adapter.name !== 'anthropic') {
+        return adapter.name;
+      }
+    }
+    return undefined;
   }
 
   // ── Call lifecycle ───────────────────────────────────────────────────────

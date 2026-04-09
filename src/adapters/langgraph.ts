@@ -25,7 +25,7 @@ import { createHash } from 'crypto';
 import { BaseFrameworkAdapter } from '@/adapters/types';
 import { withFrameworkContext } from '@/framework-context';
 import { generateId, nowIso } from '@/utils';
-import type { ISyrinCore } from '@/adapters/types';
+import type { ISyrinCore, SchemaField } from '@/adapters/types';
 
 // ---------------------------------------------------------------------------
 // AsyncLocalStorage to pass graph run_id to node wrappers
@@ -75,6 +75,22 @@ function _hashState(state: unknown): string {
 
 export class LangGraphAdapter extends BaseFrameworkAdapter {
   readonly name = 'langgraph';
+
+  override configSchema(): Record<string, SchemaField[]> {
+    return {
+      llm: [
+        { name: 'model', type: 'str', default: null },
+        { name: 'temperature', type: 'float', default: null, constraints: { ge: 0.0, le: 2.0 } },
+        { name: 'max_tokens', type: 'int', default: null, constraints: { ge: 1 } },
+      ],
+      langgraph: [
+        { name: 'recursion_limit', type: 'int', default: 25, constraints: { ge: 1, le: 1000 } },
+        { name: 'interrupt_before', type: 'str', default: null },
+        { name: 'interrupt_after', type: 'str', default: null },
+        { name: 'thread_id', type: 'str', default: null },
+      ],
+    };
+  }
 
   protected async _doInstall(_core: ISyrinCore): Promise<void> {
     await this._patchStateGraph();

@@ -20,7 +20,7 @@
 import { BaseFrameworkAdapter } from '@/adapters/types';
 import { withFrameworkContext } from '@/framework-context';
 import { generateId, nowIso } from '@/utils';
-import type { ISyrinCore } from '@/adapters/types';
+import type { ISyrinCore, SchemaField } from '@/adapters/types';
 
 // ---------------------------------------------------------------------------
 // Module-level patch state (singleton per process)
@@ -60,6 +60,16 @@ function _extractModel(model: unknown): { modelId: string; provider: string } {
 
 export class MastraAdapter extends BaseFrameworkAdapter {
   readonly name = 'mastra';
+
+  override configSchema(): Record<string, SchemaField[]> {
+    return {
+      llm: [
+        { name: 'model', type: 'str', default: null },
+        { name: 'temperature', type: 'float', default: null, constraints: { ge: 0.0, le: 2.0 } },
+        { name: 'max_tokens', type: 'int', default: null, constraints: { ge: 1 } },
+      ],
+    };
+  }
 
   protected async _doInstall(_core: ISyrinCore): Promise<void> {
     await this._patchAgent();
