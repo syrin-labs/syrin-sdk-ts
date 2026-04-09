@@ -7,7 +7,6 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ConfigStore } from '@/config-store';
-import { getFrameworkContext } from '@/framework-context';
 
 // ---------------------------------------------------------------------------
 // Mock @mastra/core — Agent class created once and referenced by tests
@@ -20,10 +19,10 @@ class FakeAgent {
   async generate(
     _prompt: string,
     _opts?: Record<string, unknown>,
-  ): Promise<{ text: string; usage: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
+  ): Promise<{ text: string; usage: { inputTokens: number; outputTokens: number; totalTokens: number } }> {
     return {
       text: 'Hello from FakeAgent',
-      usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
+      usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
     };
   }
 
@@ -37,7 +36,7 @@ class FakeAgent {
   }
 }
 
-vi.mock('@mastra/core', () => ({
+vi.mock('@mastra/core/agent', () => ({
   Agent: FakeAgent,
 }));
 
@@ -86,11 +85,15 @@ function makeCore(configStoreOverrides: Record<string, Record<string, unknown>> 
 
 describe('MastraAdapter', () => {
   let MastraAdapter: typeof import('../src/adapters/mastra.js').MastraAdapter;
+  let getFrameworkContext: typeof import('../src/framework-context.js').getFrameworkContext;
 
   beforeEach(async () => {
+    vi.resetModules();
     vi.clearAllMocks();
     const mod = await import('../src/adapters/mastra.js');
     MastraAdapter = mod.MastraAdapter;
+    const fwCtxMod = await import('../src/framework-context.js');
+    getFrameworkContext = fwCtxMod.getFrameworkContext;
   });
 
   afterEach(() => {
@@ -319,20 +322,24 @@ describe('MastraAdapter', () => {
       const adapter = new MastraAdapter();
       await adapter.install(core as never);
 
-      const agent = new FakeAgent();
-      const chunks: string[] = [];
-      for await (const chunk of agent.stream('Hello!')) {
-        chunks.push(chunk);
+      try {
+        const agent = new FakeAgent();
+        const chunks: string[] = [];
+        // Mastra v1.x: stream() returns Promise<{ textStream, ... }>; fallback: AsyncGenerator
+        const streamResult = await agent.stream('Hello!') as AsyncIterable<string>;
+        for await (const chunk of streamResult) {
+          chunks.push(chunk);
+        }
+
+        expect(chunks).toEqual(['Hello', ' from', ' stream']);
+
+        const ev = emitted.find(
+          (e) => (e as Record<string, unknown>)['event_type'] === 'LLM_CALL',
+        );
+        expect(ev).toBeDefined();
+      } finally {
+        adapter.uninstall();
       }
-
-      adapter.uninstall();
-
-      expect(chunks).toEqual(['Hello', ' from', ' stream']);
-
-      const ev = emitted.find(
-        (e) => (e as Record<string, unknown>)['event_type'] === 'LLM_CALL',
-      );
-      expect(ev).toBeDefined();
     });
 
     it('stream() LLM_CALL has framework="mastra"', async () => {
@@ -340,19 +347,22 @@ describe('MastraAdapter', () => {
       const adapter = new MastraAdapter();
       await adapter.install(core as never);
 
-      const agent = new FakeAgent();
-      // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      for await (const _chunk of agent.stream('Hello!')) {
-        // consume all
+      try {
+        const agent = new FakeAgent();
+        const streamResult = await agent.stream('Hello!') as AsyncIterable<string>;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        for await (const _chunk of streamResult) {
+          // consume all
+        }
+
+        const ev = emitted.find(
+          (e) => (e as Record<string, unknown>)['event_type'] === 'LLM_CALL',
+        ) as Record<string, unknown>;
+        expect(ev).toBeDefined();
+        expect(ev['framework']).toBe('mastra');
+      } finally {
+        adapter.uninstall();
       }
-
-      adapter.uninstall();
-
-      const ev = emitted.find(
-        (e) => (e as Record<string, unknown>)['event_type'] === 'LLM_CALL',
-      ) as Record<string, unknown>;
-      expect(ev).toBeDefined();
-      expect(ev['framework']).toBe('mastra');
     });
   });
 
@@ -371,7 +381,7 @@ describe('MastraAdapter', () => {
         capturedOpts = opts;
         return {
           text: 'ok',
-          usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+          usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
         };
       };
 
@@ -397,7 +407,7 @@ describe('MastraAdapter', () => {
         capturedOpts = opts;
         return {
           text: 'ok',
-          usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+          usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
         };
       };
 
@@ -429,7 +439,7 @@ describe('MastraAdapter', () => {
         capturedCtx = getFrameworkContext();
         return {
           text: 'ok',
-          usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 },
+          usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
         };
       };
 

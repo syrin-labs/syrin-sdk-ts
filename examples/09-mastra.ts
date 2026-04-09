@@ -1,44 +1,60 @@
 /**
  * Example 9: Mastra Adapter
  *
- * Demonstrates Syrin's Mastra instrumentation:
+ * Demonstrates Syrin's Mastra instrumentation (requires @mastra/core v1.x):
  *   - Demo 1: Basic agent.generate() — LLM_CALL emitted with framework=mastra
  *   - Demo 2: Streaming agent.stream() — LLM_CALL emitted after stream completes
- *   - Demo 3: Config injection — temperature merged transparently into call opts
+ *   - Demo 3: Remote config injection — push temperature via backend, applied transparently
  *   - Demo 4: Multiple agents — separate agent_name per LLM_CALL event
  *
  * Requirements:
- *   npm install @mastra/core
+ *   npm install @mastra/core @ai-sdk/openai
  *
- * Run with mock backend:
+ * Run:
  *   OPENAI_API_KEY=sk-... \
- *   SYRIN_API_KEY=syrin_test \
+ *   SYRIN_API_KEY=syrin_... \
  *   SYRIN_BACKEND_URL=http://localhost:4000 \
  *   npx tsx examples/09-mastra.ts
  */
 
 // ---------------------------------------------------------------------------
-// Check @mastra/core is installed
+// Check @mastra/core and @ai-sdk/openai are installed
 // ---------------------------------------------------------------------------
 
-let Agent: typeof import('@mastra/core').Agent;
+let Agent: (new (opts: {
+  name: string;
+  instructions: string;
+  model: unknown;
+}) => {
+  name: string;
+  model: unknown;
+  generate(messages: unknown[], opts?: unknown): Promise<{ text?: string; usage?: { promptTokens?: number; completionTokens?: number } }>;
+  stream(messages: unknown[], opts?: unknown): AsyncIterable<{ text?: string }>;
+});
+
+let openai: (modelId: string) => unknown;
 
 try {
-  const mastra = await import('@mastra/core');
-  Agent = mastra.Agent;
+  const mod = await import('@mastra/core/agent');
+  Agent = mod.Agent as typeof Agent;
 } catch {
-  console.error(
-    '[example-09] @mastra/core is not installed.\n' +
-    'Install it with:\n' +
-    '  npm install @mastra/core\n' +
-    'Then re-run this example.'
-  );
+  console.error('[example-09] @mastra/core is not installed. Run: npm install @mastra/core @ai-sdk/openai');
   process.exit(0);
 }
 
-import { init, shutdown, MastraAdapter, ConfigStore } from '../src/index.js';
+try {
+  const mod = await import('@ai-sdk/openai');
+  openai = mod.openai as typeof openai;
+} catch {
+  console.error('[example-09] @ai-sdk/openai is not installed. Run: npm install @ai-sdk/openai');
+  process.exit(0);
+}
+
+import { init, shutdown, MastraAdapter } from '../src/index.js';
 
 const BACKEND_URL = process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4000';
+const SYRIN_API_KEY = process.env['SYRIN_API_KEY'] ?? 'syrin_demo';
+const MODEL = process.env['OPENAI_MODEL_NAME'] ?? 'gpt-4o-mini';
 
 // ---------------------------------------------------------------------------
 // Initialize SDK with MastraAdapter
@@ -47,7 +63,7 @@ const BACKEND_URL = process.env['SYRIN_BACKEND_URL'] ?? 'http://localhost:4000';
 const adapter = new MastraAdapter();
 
 const sdk = await init({
-  apiKey: process.env['SYRIN_API_KEY'] ?? 'syrin_demo',
+  apiKey: SYRIN_API_KEY,
   backendUrl: BACKEND_URL,
   agentId: 'mastra-demo-agent',
   debug: true,
@@ -60,23 +76,14 @@ console.log('  SYRIN MASTRA ADAPTER DEMO (TypeScript)');
 console.log('='.repeat(60));
 console.log(`  session_id : ${sdk.sessionId}`);
 console.log(`  backend    : ${BACKEND_URL}`);
+console.log(`  model      : ${MODEL}`);
 console.log();
 
 // ---------------------------------------------------------------------------
-// Build a reusable agent
+// Shared model
 // ---------------------------------------------------------------------------
 
-const model = {
-  provider: 'OPEN_AI',
-  name: 'gpt-4o-mini',
-  toolChoice: 'auto' as const,
-};
-
-const demoAgent = new Agent({
-  name: 'demo-agent',
-  model,
-  instructions: 'You are a concise assistant that gives short, accurate answers.',
-});
+const model = openai(MODEL);
 
 // ---------------------------------------------------------------------------
 // Demo 1: Basic agent.generate()
@@ -85,21 +92,25 @@ const demoAgent = new Agent({
 async function demoGenerate(): Promise<void> {
   console.log('--- Demo 1: Basic agent.generate() ---');
 
-  let result: { text?: string } | null = null;
+  const agent = new Agent({
+    name: 'demo-agent',
+    model,
+    instructions: 'You are a concise assistant. Answer in 2 sentences max.',
+  });
+
   try {
-    result = await demoAgent.generate('Explain vector embeddings in 2 sentences.') as { text?: string };
+    const result = await agent.generate([
+      { role: 'user', content: 'Explain vector embeddings in 2 sentences.' },
+    ]);
+    console.log(`  answer: ${result.text ?? '(no text)'}`);
+    if (result.usage) {
+      console.log(`  tokens: ${(result.usage as Record<string, number>)['inputTokens'] ?? (result.usage as Record<string, number>)['promptTokens'] ?? 0} → ${(result.usage as Record<string, number>)['outputTokens'] ?? (result.usage as Record<string, number>)['completionTokens'] ?? 0}`);
+    }
   } catch (err) {
-    console.warn(`  [skipped] generate() failed (expected in mock mode): ${String(err)}`);
-    console.log('  LLM_CALL event emitted with framework=mastra, agent_name=demo-agent');
-    console.log();
-    return;
+    console.warn(`  [failed] ${String(err).split('\n')[0]}`);
   }
 
-  console.log(`  answer: ${result?.text ?? '(no text)'}`);
-  console.log('  LLM_CALL event emitted:');
-  console.log('    framework  = mastra');
-  console.log('    agent_name = demo-agent');
-  console.log('    event_type = LLM_CALL');
+  console.log('  LLM_CALL emitted: framework=mastra, agent_name=demo-agent');
   console.log();
 }
 
@@ -110,61 +121,79 @@ async function demoGenerate(): Promise<void> {
 async function demoStream(): Promise<void> {
   console.log('--- Demo 2: Streaming agent.stream() ---');
 
-  let streamResult: AsyncIterable<unknown> | null = null;
-  try {
-    streamResult = demoAgent.stream('What is semantic search? Be brief.') as unknown as AsyncIterable<unknown>;
-  } catch (err) {
-    console.warn(`  [skipped] stream() failed (expected in mock mode): ${String(err)}`);
-    console.log('  LLM_CALL event emitted after stream completes');
-    console.log();
-    return;
-  }
+  const agent = new Agent({
+    name: 'stream-agent',
+    model,
+    instructions: 'You are a concise assistant.',
+  });
 
   process.stdout.write('  answer: ');
   try {
-    for await (const chunk of streamResult) {
-      const text = (chunk as { text?: string })?.text ?? '';
-      process.stdout.write(text);
+    // Mastra v1.x: stream() returns Promise<{ textStream: AsyncIterable<string>, ... }>
+    const result = await agent.stream([
+      { role: 'user', content: 'What is semantic search? Answer in one sentence.' },
+    ]) as { textStream: AsyncIterable<string> };
+
+    for await (const chunk of result.textStream) {
+      process.stdout.write(chunk);
     }
+    process.stdout.write('\n');
   } catch (err) {
-    console.warn(`\n  [skipped] stream iteration failed (expected in mock mode): ${String(err)}`);
+    process.stdout.write('\n');
+    console.warn(`  [failed] ${String(err).split('\n')[0]}`);
   }
-  process.stdout.write('\n');
-  console.log('  LLM_CALL event emitted after stream completes:');
-  console.log('    framework  = mastra');
-  console.log('    agent_name = demo-agent');
-  console.log('    stream     = true');
+
+  console.log('  LLM_CALL emitted after stream completes: framework=mastra, stream=true');
   console.log();
 }
 
 // ---------------------------------------------------------------------------
-// Demo 3: Config injection
+// Demo 3: Remote config injection
 // ---------------------------------------------------------------------------
 
 async function demoConfigInjection(): Promise<void> {
-  console.log('--- Demo 3: Config injection ---');
+  console.log('--- Demo 3: Remote config injection ---');
+  console.log('  Pushing llm.temperature=0.1 to backend...');
 
-  // Create a local ConfigStore and inject temperature via the "llm" section.
-  // The MastraAdapter reads getConfig("llm") before every call and merges
-  // temperature, max_tokens, and model transparently into the call options.
-  const configStore = new ConfigStore();
-  configStore.set('llm', 'temperature', 0.1);
+  const agent = new Agent({
+    name: 'config-agent',
+    model,
+    instructions: 'You are a concise assistant.',
+  });
 
-  console.log('  Set llm.temperature = 0.1 in ConfigStore');
-  console.log('  (In production the backend pushes this via /ingest response)');
-
-  let result: { text?: string } | null = null;
+  // Push config via the backend API (same as what the dashboard does)
   try {
-    result = await demoAgent.generate('Name three vector databases.') as { text?: string };
+    await fetch(`${BACKEND_URL}/agents/mastra-demo-agent/config`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${SYRIN_API_KEY}`,
+      },
+      body: JSON.stringify({ overrides: { 'llm.temperature': 0.1 } }),
+    });
+    console.log('  Config pushed. Waiting 2s for SDK to pick it up...');
+    await new Promise(r => setTimeout(r, 2000));
   } catch (err) {
-    console.warn(`  [skipped] generate() failed (expected in mock mode): ${String(err)}`);
-    console.log('  LLM_CALL event emitted with temperature=0.1 injected into call opts');
-    console.log();
-    return;
+    console.warn(`  [push failed] ${String(err).split('\n')[0]}`);
   }
 
-  console.log(`  answer: ${result?.text ?? '(no text)'}`);
-  console.log('  LLM_CALL event emitted with temperature=0.1 injected into call opts');
+  try {
+    const result = await agent.generate([
+      { role: 'user', content: 'Name three vector databases in one sentence.' },
+    ]);
+    console.log(`  answer: ${result.text ?? '(no text)'}`);
+  } catch (err) {
+    console.warn(`  [failed] ${String(err).split('\n')[0]}`);
+  }
+
+  console.log('  LLM_CALL emitted with temperature=0.1 merged into opts transparently');
+
+  // Clear config
+  await fetch(`${BACKEND_URL}/agents/mastra-demo-agent/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SYRIN_API_KEY}` },
+    body: JSON.stringify({ overrides: { 'llm.temperature': null } }),
+  }).catch(() => {});
   console.log();
 }
 
@@ -178,7 +207,7 @@ async function demoMultipleAgents(): Promise<void> {
   const explainer = new Agent({
     name: 'explainer-agent',
     model,
-    instructions: 'You explain technical concepts clearly and concisely.',
+    instructions: 'You explain technical concepts clearly in 2 sentences.',
   });
 
   const summariser = new Agent({
@@ -187,31 +216,20 @@ async function demoMultipleAgents(): Promise<void> {
     instructions: 'You summarise text into a single sentence.',
   });
 
-  let explainerResult: { text?: string } | null = null;
-  let summariserResult: { text?: string } | null = null;
-
   try {
-    explainerResult = await explainer.generate('What is approximate nearest neighbour search?') as { text?: string };
+    const [r1, r2] = await Promise.all([
+      explainer.generate([{ role: 'user', content: 'What is HNSW indexing?' }]),
+      summariser.generate([{ role: 'user', content: 'Summarise: HNSW is a graph-based algorithm for approximate nearest neighbour search that builds hierarchical layers of proximity graphs.' }]),
+    ]);
+    console.log(`  explainer : ${r1.text ?? '(no text)'}`);
+    console.log(`  summariser: ${r2.text ?? '(no text)'}`);
   } catch (err) {
-    console.warn(`  [skipped] explainer.generate() failed (expected in mock mode): ${String(err)}`);
+    console.warn(`  [failed] ${String(err).split('\n')[0]}`);
   }
 
-  try {
-    summariserResult = await summariser.generate('Summarise: Approximate nearest neighbour search trades accuracy for speed by using indexing structures such as HNSW or IVF.') as { text?: string };
-  } catch (err) {
-    console.warn(`  [skipped] summariser.generate() failed (expected in mock mode): ${String(err)}`);
-  }
-
-  if (explainerResult) {
-    console.log(`  explainer : ${explainerResult.text ?? '(no text)'}`);
-  }
-  if (summariserResult) {
-    console.log(`  summariser: ${summariserResult.text ?? '(no text)'}`);
-  }
-
-  console.log('  Two LLM_CALL events emitted with different agent_name values:');
-  console.log('    LLM_CALL { agent_name: "explainer-agent",  framework: "mastra" }');
-  console.log('    LLM_CALL { agent_name: "summariser-agent", framework: "mastra" }');
+  console.log('  Two LLM_CALL events emitted:');
+  console.log('    { agent_name: "explainer-agent",  framework: "mastra" }');
+  console.log('    { agent_name: "summariser-agent", framework: "mastra" }');
   console.log();
 }
 
@@ -225,15 +243,14 @@ async function main(): Promise<void> {
   await demoConfigInjection();
   await demoMultipleAgents();
 
+  // Allow emitter to flush
+  await new Promise(r => setTimeout(r, 2000));
+
   console.log('='.repeat(60));
   console.log('  Demo complete.');
-  console.log('  Events emitted per invocation:');
-  console.log('    LLM_CALL — 1 per generate()/stream() call');
-  console.log('      framework  : mastra');
-  console.log('      agent_name : name from new Agent({ name })');
-  console.log('      model      : extracted from agent.model.name');
-  console.log('  Inspect events at:');
-  console.log(`  GET ${BACKEND_URL}/events`);
+  console.log('  Events emitted per agent call:');
+  console.log('    LLM_CALL  — framework=mastra, agent_name, model, tokens');
+  console.log(`  Inspect: GET ${BACKEND_URL}/agents/mastra-demo-agent/events`);
   console.log('='.repeat(60));
 
   await shutdown();

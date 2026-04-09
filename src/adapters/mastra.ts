@@ -38,20 +38,20 @@ let _originalStream: ((...args: unknown[]) => unknown) | null = null;
 interface ModelObject {
   modelId?: string;
   provider?: string;
+  config?: { provider?: string };
+  // legacy Mastra v0.x shape
+  name?: string;
 }
 
 function _extractModel(model: unknown): { modelId: string; provider: string } {
-  if (model == null) {
-    return { modelId: 'unknown', provider: 'unknown' };
-  }
-  if (typeof model === 'string') {
-    return { modelId: model, provider: 'unknown' };
-  }
+  if (model == null) return { modelId: 'unknown', provider: 'unknown' };
+  if (typeof model === 'string') return { modelId: model, provider: 'unknown' };
   const m = model as ModelObject;
-  return {
-    modelId: m.modelId ?? 'unknown',
-    provider: m.provider ?? 'unknown',
-  };
+  const modelId = m.modelId ?? m.name ?? 'unknown';
+  // v1.x: provider lives inside config.provider e.g. "openai.responses" → "openai"
+  const rawProvider = m.provider ?? m.config?.provider ?? 'unknown';
+  const provider = rawProvider.split('.')[0] ?? rawProvider;
+  return { modelId, provider };
 }
 
 // ---------------------------------------------------------------------------
@@ -88,7 +88,7 @@ export class MastraAdapter extends BaseFrameworkAdapter {
 
     let mastraModule: Record<string, unknown>;
     try {
-      mastraModule = (await import('@mastra/core')) as Record<string, unknown>;
+      mastraModule = (await import('@mastra/core/agent')) as Record<string, unknown>;
     } catch {
       return;
     }
@@ -171,9 +171,10 @@ export class MastraAdapter extends BaseFrameworkAdapter {
               } | null;
             } | null;
 
-            const usage = result?.usage;
-            const inputTokens = usage?.promptTokens ?? 0;
-            const outputTokens = usage?.completionTokens ?? 0;
+            const usage = result?.usage as Record<string, number> | null | undefined;
+            // Mastra v1.x uses inputTokens/outputTokens; v0.x used promptTokens/completionTokens
+            const inputTokens = (usage?.['inputTokens'] ?? usage?.['promptTokens']) as number | undefined ?? 0;
+            const outputTokens = (usage?.['outputTokens'] ?? usage?.['completionTokens']) as number | undefined ?? 0;
 
             adapter._emitLlmCallEvent({
               agentName,
@@ -210,15 +211,15 @@ export class MastraAdapter extends BaseFrameworkAdapter {
 
   private _makeStreamWrapper(
     origFn: (...args: unknown[]) => unknown,
-  ): (...args: unknown[]) => AsyncGenerator<unknown> {
+  ): (...args: unknown[]) => Promise<unknown> {
     const adapter = this;
 
-    return async function* patchedStream(
+    return async function patchedStream(
       this: Record<string, unknown>,
       prompt: unknown,
       opts?: Record<string, unknown>,
       ...rest: unknown[]
-    ): AsyncGenerator<unknown> {
+    ): Promise<unknown> {
       const agentName = typeof this['name'] === 'string' ? this['name'] : 'unknown';
       const { modelId, provider } = _extractModel(this['model']);
 
@@ -228,50 +229,86 @@ export class MastraAdapter extends BaseFrameworkAdapter {
 
       const start = Date.now();
 
-      // Call original — may return an AsyncGenerator or object with textStream
-      const streamResult = origFn.call(this, prompt, injectedOpts, ...rest);
+      // Mastra v1.x: stream() returns Promise<{ textStream: AsyncIterable<string>, usage: Promise<...>, ... }>
+      const streamResult = (await Promise.resolve(
+        origFn.call(this, prompt, injectedOpts, ...rest),
+      )) as Record<string, unknown>;
 
-      // Determine if result is an async iterable
-      const asyncIter = (streamResult as AsyncIterable<unknown>)?.[Symbol.asyncIterator];
+      // If result has a textStream property, wrap it to capture usage + emit event
+      if (streamResult && typeof streamResult === 'object' && 'textStream' in streamResult) {
+        const originalTextStream = streamResult['textStream'] as AsyncIterable<string>;
 
-      try {
-        if (typeof asyncIter === 'function') {
-          for await (const chunk of streamResult as AsyncIterable<unknown>) {
-            yield chunk;
-          }
-        } else {
-          // Resolve promise if needed, then iterate
-          const resolved = await Promise.resolve(streamResult);
-          const resolvedIter = (resolved as AsyncIterable<unknown>)?.[Symbol.asyncIterator];
-          if (typeof resolvedIter === 'function') {
-            for await (const chunk of resolved as AsyncIterable<unknown>) {
+        async function* patchedTextStream(): AsyncGenerator<string> {
+          try {
+            for await (const chunk of originalTextStream) {
               yield chunk;
             }
+            // usage is a Promise that resolves after the stream completes
+            const usageRaw = await Promise.resolve(streamResult['usage']);
+            const usage = usageRaw as Record<string, number> | null | undefined;
+            const inputTokens = (usage?.['inputTokens'] ?? usage?.['promptTokens']) ?? 0;
+            const outputTokens = (usage?.['outputTokens'] ?? usage?.['completionTokens']) ?? 0;
+            adapter._emitLlmCallEvent({
+              agentName,
+              model: modelId,
+              provider,
+              inputTokens,
+              outputTokens,
+              durationMs: Date.now() - start,
+              error: null,
+            });
+          } catch (err) {
+            const error = err instanceof Error ? err : new Error(String(err));
+            adapter._emitLlmCallEvent({
+              agentName,
+              model: modelId,
+              provider,
+              inputTokens: 0,
+              outputTokens: 0,
+              durationMs: Date.now() - start,
+              error: error.message,
+            });
+            throw err;
           }
         }
 
-        adapter._emitLlmCallEvent({
-          agentName,
-          model: modelId,
-          provider,
-          inputTokens: 0,
-          outputTokens: 0,
-          durationMs: Date.now() - start,
-          error: null,
-        });
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        adapter._emitLlmCallEvent({
-          agentName,
-          model: modelId,
-          provider,
-          inputTokens: 0,
-          outputTokens: 0,
-          durationMs: Date.now() - start,
-          error: error.message,
-        });
-        throw err;
+        return { ...streamResult, textStream: patchedTextStream() };
       }
+
+      // Fallback: direct AsyncIterable (e.g. older Mastra shapes)
+      const asyncIter = (streamResult as unknown as AsyncIterable<unknown>)?.[Symbol.asyncIterator];
+      if (typeof asyncIter !== 'function') {
+        adapter._emitLlmCallEvent({
+          agentName, model: modelId, provider,
+          inputTokens: 0, outputTokens: 0,
+          durationMs: Date.now() - start, error: null,
+        });
+        return streamResult;
+      }
+
+      // Wrap the iterable in a generator that emits after completion
+      async function* wrappedIterable(): AsyncGenerator<unknown> {
+        try {
+          for await (const chunk of streamResult as unknown as AsyncIterable<unknown>) {
+            yield chunk;
+          }
+          adapter._emitLlmCallEvent({
+            agentName, model: modelId, provider,
+            inputTokens: 0, outputTokens: 0,
+            durationMs: Date.now() - start, error: null,
+          });
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          adapter._emitLlmCallEvent({
+            agentName, model: modelId, provider,
+            inputTokens: 0, outputTokens: 0,
+            durationMs: Date.now() - start, error: error.message,
+          });
+          throw err;
+        }
+      }
+
+      return wrappedIterable();
     };
   }
 
