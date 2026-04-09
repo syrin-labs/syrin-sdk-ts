@@ -46,17 +46,24 @@ Examples:
 
 When `captureContent: true` is set in SDK config:
 
-### `gen_ai.content.prompt`
+### `gen_ai.{role}.message`
+
+One event per input message (role = `system`, `user`, `assistant`, or `tool`).
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `gen_ai.prompt` | string | JSON-serialized messages array |
+| `gen_ai.{role}.message` | string | Message content |
 
-### `gen_ai.content.completion`
+### `gen_ai.choice`
+
+One event per output choice.
 
 | Attribute | Type | Description |
 |-----------|------|-------------|
-| `gen_ai.completion` | string | Response text content |
+| `gen_ai.choice.index` | int | Choice index (0-based) |
+| `gen_ai.choice.finish_reason` | string | Stop reason (e.g. `"stop"`, `"length"`) |
+| `gen_ai.choice.message.role` | string | Response message role (typically `"assistant"`) |
+| `gen_ai.choice.message.content` | string | Response text content |
 
 ## Error Spans
 

@@ -416,3 +416,207 @@ npm test
 ```
 
 75 tests, no internet required.
+
+---
+
+## Anthropic Support
+
+The AnthropicAdapter is installed automatically by `init()`. If `@anthropic-ai/sdk` is installed, all calls to `Anthropic` and `AnthropicBedrock` are instrumented.
+
+```bash
+npm install @anthropic-ai/sdk
+```
+
+```typescript
+import { init } from "@syrin/sdk";
+import Anthropic from "@anthropic-ai/sdk";
+
+await init({ apiKey: "syrin_..." }); // AnthropicAdapter auto-installs
+
+const client = new Anthropic();
+
+const message = await client.messages.create({
+  model: "claude-3-5-sonnet-20241022",
+  max_tokens: 1024,
+  messages: [{ role: "user", content: "Hello!" }],
+});
+```
+
+Anthropic-specific telemetry captured: `input_tokens`, `output_tokens`, `stop_reason`, tool definitions using `input_schema` format, SSE streaming events.
+
+**Provider detection:** The SDK reads `client.baseURL` to detect third-party OpenAI-compatible providers (OpenRouter, Together AI, Groq, Fireworks, Google, Mistral, Cohere). The detected provider appears in telemetry as `provider`.
+
+---
+
+## Framework Adapters
+
+Pass framework adapters to `init({ adapters: [...] })`.
+
+### LangGraph
+
+```bash
+npm install @langchain/langgraph @langchain/openai @langchain/core
+```
+
+```typescript
+import { init } from "@syrin/sdk";
+import { LangGraphAdapter } from "@syrin/sdk";
+
+await init({
+  apiKey: "syrin_...",
+  adapters: [new LangGraphAdapter()],
+});
+```
+
+**Events emitted:**
+
+| Event | When | Key fields |
+|---|---|---|
+| `GRAPH_EXECUTION` | Per `graph.invoke()` | `graph_id`, `duration_ms`, `did_stop_early` |
+| `NODE_EXECUTION` | Per node function | `node_name`, `graph_run_id`, `input_hash`, `output_hash` |
+
+All `LLM_CALL` events inside a graph node carry `framework=langgraph`, `graph_id`, and `node_name`.
+
+### LangChain
+
+```bash
+npm install @langchain/core @langchain/openai
+```
+
+```typescript
+import { LangChainAdapter } from "@syrin/sdk";
+
+const adapter = new LangChainAdapter();
+await init({ apiKey: "syrin_...", adapters: [adapter] });
+
+// Method 1: inject callback handler
+const handler = adapter.callbackHandler();
+const result = await chain.invoke(input, { callbacks: [handler] });
+
+// Method 2: wrap() for zero-friction
+const instrumented = adapter.wrap(chain);
+const result2 = await instrumented.invoke(input);  // or .stream()
+```
+
+**See `docs/adapters.md` for the full adapter reference.**
+
+---
+
+## ConfigStore
+
+Built-in sections: `llm`, `langgraph`, `mastra`, `vercel_ai`.
+
+```typescript
+import { ConfigStore, FieldSchema } from "@syrin/sdk";
+
+const store = new ConfigStore();
+store.registerSection("search", {
+  maxResults: { name: "maxResults", type: "number", default: 10, ge: 1, le: 100 },
+  provider: { name: "provider", type: "string", default: "bing",
+               enum: ["bing", "google", "duckduckgo"] },
+});
+
+const results = store.get("search", "maxResults");
+store.applyUpdates({ "search.maxResults": 20 });
+```
+
+---
+
+## @tunable — Remote Control for Any Class
+
+TypeScript decorators (`experimentalDecorators: true` in `tsconfig.json`, or TypeScript 5+ native decorators):
+
+```typescript
+import { tunable, TunableField } from "@syrin/sdk";
+
+@tunable({ namespace: "processor" })
+class DocumentProcessor {
+  @TunableField({ default: 10, min: 1, max: 100 })
+  batchSize = 10;
+
+  @TunableField({ default: 0.7, min: 0.0, max: 2.0 })
+  temperature = 0.7;
+
+  @TunableField({ default: "openai", enum: ["openai", "anthropic"] })
+  provider = "openai";
+}
+
+const processor = new DocumentProcessor();
+// processor.temperature === 0.7 (not a marker object)
+```
+
+## tune() — Remote Control for Third-Party Objects
+
+```typescript
+import { tune, getTune } from "@syrin/sdk";
+import { z } from "zod";
+
+tune({
+  target: myVectorDb,
+  namespace: "vector_db",
+  fields: { topK: "number", similarityThreshold: "number" },
+});
+
+// Or with Zod schema for full validation:
+const VectorSchema = z.object({
+  topK: z.number().min(1).max(100).default(5),
+  similarityThreshold: z.number().min(0).max(1).default(0.75),
+});
+tune({ target: myVectorDb, namespace: "vector_db", schema: VectorSchema });
+
+const cfg = getTune("vector_db");  // Record<string, unknown>
+```
+
+---
+
+## ConfigGuard — Safe Config Application
+
+```typescript
+import { ConfigGuard } from "@syrin/sdk";
+import { globalRegistry } from "@syrin/sdk";
+
+const guard = new ConfigGuard({ registry: globalRegistry });
+
+const result = guard.safeApply("processor", { temperature: 0.3 });
+console.log(result.success);    // true
+console.log(result.applied);    // { temperature: 0.3 }
+console.log(result.rejected);   // {}
+
+// Reject out-of-range
+const result2 = guard.safeApply("processor", { temperature: 99.0 });
+console.log(result2.rejected);  // { temperature: "...exceeds maximum 2" }
+
+// Snapshot → apply → restore
+const anchor = guard.takeAnchor("processor", "before risky change");
+guard.safeApply("processor", { temperature: 1.9 });   // risky
+guard.restoreAnchor(anchor.anchorId);                  // rollback
+```
+
+**See `docs/config-store.md` for the full ConfigGuard + ConfigFuse reference.**
+
+---
+
+## Running All Examples
+
+```bash
+# Start the mock backend (includes OpenAI-compatible endpoint)
+npm run mock-backend
+
+# In another terminal:
+export SYRIN_BACKEND_URL=http://localhost:4318
+export SYRIN_API_KEY=syrin_test
+export OPENAI_API_KEY=sk-test
+export OPENAI_BASE_URL=http://localhost:4318/v1
+
+# Phase 1 examples
+npx tsx examples/01-basic-chat.ts
+npx tsx examples/02-streaming.ts
+npx tsx examples/03-remote-config.ts
+npx tsx examples/04-multi-agent.ts
+
+# Phase 2 examples
+npx tsx examples/05-anthropic.ts       # requires: npm install @anthropic-ai/sdk
+npx tsx examples/06-langgraph.ts       # requires: npm install @langchain/langgraph @langchain/openai @langchain/core
+npx tsx examples/07-langchain.ts       # requires: npm install @langchain/core @langchain/openai
+npx tsx examples/08-config-advanced.ts # no extra deps needed
+```
