@@ -29,6 +29,8 @@ Must be passed in the `adapters` array when calling `init()`.
 |---|---|---|
 | `LangGraphAdapter` | `@langchain/langgraph` | `GRAPH_EXECUTION`, `NODE_EXECUTION`, `HITL_INTERRUPT` |
 | `LangChainAdapter` | `@langchain/core` | `CHAIN_EXECUTION` |
+| `MastraAdapter` | `@mastra/core` | `LLM_CALL` (per agent call) |
+| `VercelAIAdapter` | `ai` | `LLM_CALL` (per function call) |
 
 ---
 
@@ -46,6 +48,12 @@ npm install @langchain/langgraph @langchain/openai @langchain/core
 
 # LangChain
 npm install @langchain/core @langchain/openai
+
+# Mastra
+npm install @mastra/core
+
+# Vercel AI SDK
+npm install ai @ai-sdk/openai zod
 ```
 
 ---
@@ -360,6 +368,164 @@ await init({
 | `this.getConfig(namespace)` | Read the current ConfigStore section |
 | `this.sessionId` | Current session ID |
 | `this.agentId` | Agent label from init options |
+
+---
+
+## Tier 2: Mastra Adapter
+
+Instruments `@mastra/core` `Agent` instances. Patches:
+
+- `Agent.prototype.generate` — wraps each `generate()` call to emit `LLM_CALL` on completion
+- `Agent.prototype.stream`   — wraps each `stream()` call to emit `LLM_CALL` after the stream is consumed
+
+```typescript
+import { init, MastraAdapter } from "@syrin/sdk";
+import { Agent } from "@mastra/core";
+
+const adapter = new MastraAdapter();
+
+await init({
+  apiKey: "syrin_...",
+  adapters: [adapter],
+});
+
+const agent = new Agent({
+  name: "my-agent",
+  model: { provider: "OPEN_AI", name: "gpt-4o-mini", toolChoice: "auto" },
+  instructions: "You are a helpful assistant.",
+});
+
+// generate() — LLM_CALL emitted on completion
+const result = await agent.generate("Explain vector embeddings in 2 sentences.");
+console.log(result.text);
+
+// stream() — LLM_CALL emitted after the stream is consumed
+for await (const chunk of agent.stream("What is semantic search?")) {
+  process.stdout.write((chunk as { text?: string }).text ?? "");
+}
+```
+
+**FrameworkContext per call:**
+
+| Field | Value |
+|---|---|
+| `framework` | `mastra` |
+| `agentName` | `agent.name` (from `new Agent({ name })`) |
+| `runId` | Generated `mrun_...` per call |
+
+**Events emitted:**
+
+`LLM_CALL` — emitted once per `generate()` or `stream()` call:
+
+| Field | Description |
+|---|---|
+| `event_type` | `LLM_CALL` |
+| `framework` | `mastra` |
+| `agent_name` | Agent name from constructor |
+| `model` | Extracted from `agent.model.modelId` or `agent.model.name` |
+| `provider` | Extracted from `agent.model.provider` |
+| `input_tokens` | From `result.usage.promptTokens` (0 for streams) |
+| `output_tokens` | From `result.usage.completionTokens` (0 for streams) |
+| `duration_ms` | Call round-trip time |
+| `error` | Error message if call failed, otherwise `null` |
+
+**Remote config injection:**
+
+The adapter reads `getConfig("llm")` before each call and merges matching fields into the call options transparently.
+
+| ConfigStore field | Injected as |
+|---|---|
+| `llm.temperature` | `opts.temperature` |
+| `llm.max_tokens` | `opts.max_tokens` |
+| `llm.model` | `opts.model` |
+
+**Model format:**
+
+Mastra agents expose `agent.model` as an object with `{ modelId?, provider?, name? }`. The adapter extracts `modelId` (or falls back to `name`) for the `model` field and `provider` for the `provider` field in the emitted event.
+
+---
+
+## Tier 2: Vercel AI SDK Adapter
+
+Instruments the `ai` (Vercel AI SDK) standalone functions. Patches the module-level exports:
+
+- `generateText`   — emits `LLM_CALL` after completion
+- `streamText`     — emits `LLM_CALL` after the `usage` promise settles
+- `generateObject` — emits `LLM_CALL` with `operation="generateObject"`
+
+```typescript
+import { init, VercelAIAdapter } from "@syrin/sdk";
+import { generateText, streamText, generateObject } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { z } from "zod";
+
+const adapter = new VercelAIAdapter();
+
+await init({
+  apiKey: "syrin_...",
+  adapters: [adapter],
+});
+
+// generateText — LLM_CALL with operation=generateText
+const { text, usage } = await generateText({
+  model: openai("gpt-4o-mini"),
+  prompt: "What is a vector database?",
+});
+console.log(text, usage);
+
+// streamText — LLM_CALL emitted after usage resolves
+const { textStream, usage: usageP } = streamText({
+  model: openai("gpt-4o-mini"),
+  prompt: "Explain embeddings briefly.",
+});
+for await (const chunk of textStream) { process.stdout.write(chunk); }
+await usageP; // LLM_CALL emitted here
+
+// generateObject — LLM_CALL with operation=generateObject
+const { object } = await generateObject({
+  model: openai("gpt-4o-mini"),
+  schema: z.object({ name: z.string(), openSource: z.boolean() }),
+  prompt: "Describe Qdrant.",
+});
+console.log(object);
+```
+
+**FrameworkContext per call:**
+
+| Field | Value |
+|---|---|
+| `framework` | `vercel-ai` |
+| `runId` | Generated `vairun_...` per call |
+
+**Events emitted:**
+
+`LLM_CALL` — emitted once per `generateText`, `streamText`, or `generateObject` call:
+
+| Field | Description |
+|---|---|
+| `event_type` | `LLM_CALL` |
+| `framework` | `vercel-ai` |
+| `operation` | `generateText` \| `streamText` \| `generateObject` |
+| `model` | Extracted from `opts.model.modelId` |
+| `provider` | Extracted from `opts.model.provider` |
+| `input_tokens` | From `result.usage.promptTokens` (0 for stream if usage not yet settled) |
+| `output_tokens` | From `result.usage.completionTokens` |
+| `duration_ms` | Call round-trip time |
+| `error` | Error message if call failed, otherwise `null` |
+
+**Remote config injection:**
+
+The adapter reads `getConfig("llm")` before each call and merges matching fields into the function options transparently.
+
+| ConfigStore field | Injected as |
+|---|---|
+| `llm.temperature` | `opts.temperature` |
+| `llm.max_tokens` | `opts.max_tokens` |
+| `llm.model` | `opts.model` |
+
+**`generateObject` note:**
+
+The `operation` field in the emitted `LLM_CALL` event is set to `"generateObject"` so you can distinguish structured-output calls from plain text calls in your Syrin dashboard.
 
 ---
 
