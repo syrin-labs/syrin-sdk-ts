@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { SyrinConfig, CallInfo } from '@/types';
-import { OTelBridge, BaggageSpanProcessor, recordMetrics } from '@/otel';
+import { OTelBridge, BaggageSpanProcessor, recordMetrics } from '@/observability/otel';
 
 // We use OTel's in-memory exporter directly
 import {

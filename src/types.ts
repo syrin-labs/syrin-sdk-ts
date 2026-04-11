@@ -20,6 +20,19 @@ export interface SyrinConfig {
   toolValidation: boolean;
   /** Auto-delete sessions older than this many ms (undefined = disabled). */
   sessionTtlMs?: number;
+  /** Public URL of this agent server — stored by dashboard to enable the "Run" button. */
+  serverUrl?: string;
+  /**
+   * How often (in ms) to poll the backend for agent config overrides.
+   * 0 or undefined = disabled (default).
+   */
+  configPollIntervalMs?: number;
+  /**
+   * Default values for schema fields shown in the dashboard.
+   * Keys use dot-notation: { 'llm.model': 'gpt-4o-mini', 'llm.temperature': 0.7 }.
+   * Parity with Python SDK's schema_defaults option.
+   */
+  schemaDefaults?: Record<string, unknown>;
 }
 
 export interface SyrinEvent {
@@ -38,6 +51,9 @@ export interface SyrinEvent {
   stream: boolean;
   error?: string;
   config_applied: boolean;
+  // Session lifecycle — set by SESSION_STARTED / SESSION_ENDED events
+  session_id?: string;
+  agent_id?: string;
   // Multi-agent context
   run_id?: string;
   workflow_id?: string;

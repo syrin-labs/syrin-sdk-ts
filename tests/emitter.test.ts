@@ -8,9 +8,9 @@ import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } 
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import type { SyrinConfig, SyrinEvent, IngestPayload } from '@/types';
-import { Emitter } from '@/emitter';
-import { SessionStore } from '@/session';
-import { generateId, nowIso } from '@/utils';
+import { Emitter } from '@/observability/emitter';
+import { SessionStore } from '@/core/session';
+import { generateId, nowIso } from '@/utils/helpers';
 
 // Mock server
 const server = setupServer();

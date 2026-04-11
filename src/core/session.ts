@@ -3,8 +3,8 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
-import type { SessionState } from '@/types';
-import { generateId, nowIso } from '@/utils';
+import type { SessionState } from '@/types.js';
+import { generateId, nowIso } from '@/utils/helpers.js';
 
 /**
  * AsyncLocalStorage for per-call session scoping.
@@ -157,7 +157,7 @@ export class SessionStore {
   /**
    * Atomically pop all pending governance actions.
    */
-  popGovernanceActions(sessionId: string): import('./types.js').GovernanceAction[] {
+  popGovernanceActions(sessionId: string): import('../types.js').GovernanceAction[] {
     const session = this.sessions.get(sessionId);
     if (!session) return [];
     const actions = [...session.pendingGovernance];
@@ -176,7 +176,7 @@ export class SessionStore {
     return messages;
   }
 
-  appendGovernanceAction(sessionId: string, action: import('./types.js').GovernanceAction): void {
+  appendGovernanceAction(sessionId: string, action: import('../types.js').GovernanceAction): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.pendingGovernance.push(action);

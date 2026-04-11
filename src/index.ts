@@ -7,54 +7,39 @@
  *   // All existing openai calls are now instrumented
  */
 
-import { createConfig } from '@/config';
-import { SessionStore, sessionStorage, resolveSessionId } from '@/session';
-import { Emitter } from '@/emitter';
-import { OTelBridge } from '@/otel';
-import { CheckpointClient } from '@/checkpoint';
-import { SyrinCore } from '@/core';
-import { OpenAIAdapter, unpatch, isPatched } from '@/adapters/openai';
-import { clearHooks } from '@/hooks';
-import { generateId } from '@/utils';
-import type { SyrinConfig, SyrinSDK } from '@/types';
-import type { SyrinAdapter } from '@/adapters/types';
+import { createConfig } from '@/config/config.js';
+import { SessionStore, sessionStorage, resolveSessionId } from '@/core/session.js';
+import { Emitter } from '@/observability/emitter.js';
+import { OTelBridge } from '@/observability/otel.js';
+import { CheckpointClient } from '@/core/checkpoint.js';
+import { SyrinCore } from '@/core/engine.js';
+import { Heartbeat } from '@/core/heartbeat.js';
+import { load as loadPersistedConfig, save as savePersistedConfig } from '@/config/persist.js';
+import { OpenAIAdapter, unpatch, isPatched } from '@/adapters/openai/index.js';
+import { clearHooks } from '@/observability/hooks.js';
+import { generateId, nowIso } from '@/utils/helpers.js';
+import type { SyrinConfig, SyrinSDK, SyrinEvent } from '@/types.js';
+import type { SyrinAdapter } from '@/adapters/types.js';
 
 
-export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData } from '@/types';
-export { withAgent, withWorkflow, withSwarm, getRunContext } from '@/agent';
-export { GovernanceStopError } from '@/governance';
-export type { Checkpoint } from '@/checkpoint';
-export { onConfigChange, onAlert } from '@/hooks';
-export { SyrinCore } from '@/core';
-export type { SyrinAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore, SchemaField as AdapterSchemaField } from '@/adapters/types';
-export { OpenAIAdapter } from '@/adapters/openai';
-export { ConfigStore } from '@/config-store';
-export type { FieldSchema } from '@/config-store';
-export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry } from '@/tunable';
-export { AnthropicAdapter } from '@/adapters/anthropic';
-export { LangChainAdapter } from '@/adapters/langchain';
-export { LangGraphAdapter } from '@/adapters/langgraph';
-export { MastraAdapter } from '@/adapters/mastra';
-export { VercelAIAdapter } from '@/adapters/vercel-ai';
-export { BaseFrameworkAdapter } from '@/adapters/types';
-export type { FrameworkAdapter } from '@/adapters/types';
-
-export interface SyrinInitOptions {
-  apiKey?: string;
-  agentId?: string;
-  sessionId?: string;
-  backendUrl?: string;
-  otelExporter?: 'none' | 'console' | 'otlp';
-  otelEndpoint?: string;
-  debug?: boolean;
-  captureContent?: boolean;
-  offline?: boolean;
-  batchIntervalMs?: number;
-  batchSize?: number;
-  toolValidation?: boolean;
-  sessionTtlMs?: number;
-  adapters?: import('./adapters/types.js').SyrinAdapter[];
-}
+export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData } from '@/types.js';
+export { withAgent, withWorkflow, withSwarm, getRunContext } from '@/agent/context.js';
+export { GovernanceStopError } from '@/core/governance.js';
+export type { Checkpoint } from '@/core/checkpoint.js';
+export { onConfigChange, onAlert } from '@/observability/hooks.js';
+export { SyrinCore } from '@/core/engine.js';
+export type { SyrinAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore, SchemaField as AdapterSchemaField } from '@/adapters/types.js';
+export { OpenAIAdapter } from '@/adapters/openai/index.js';
+export { ConfigStore } from '@/config/store.js';
+export type { FieldSchema } from '@/config/store.js';
+export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry } from '@/tunable/tunable.js';
+export { AnthropicAdapter } from '@/adapters/anthropic/index.js';
+export { LangChainAdapter } from '@/adapters/langchain/index.js';
+export { LangGraphAdapter } from '@/adapters/langgraph/index.js';
+export { MastraAdapter } from '@/adapters/mastra/index.js';
+export { VercelAIAdapter } from '@/adapters/vercel-ai/index.js';
+export { BaseFrameworkAdapter } from '@/adapters/types.js';
+export type { FrameworkAdapter } from '@/adapters/types.js';
 
 export class SyrinSDKInstance implements SyrinSDK {
   private _sessionId: string;
@@ -63,6 +48,7 @@ export class SyrinSDKInstance implements SyrinSDK {
   private _emitter: Emitter;
   private _otelBridge: OTelBridge;
   private _core: SyrinCore;
+  private _heartbeat: Heartbeat;
 
   constructor(
     config: SyrinConfig,
@@ -70,12 +56,14 @@ export class SyrinSDKInstance implements SyrinSDK {
     emitter: Emitter,
     otelBridge: OTelBridge,
     core: SyrinCore,
+    heartbeat: Heartbeat,
   ) {
     this._config = config;
     this._sessionStore = sessionStore;
     this._emitter = emitter;
     this._otelBridge = otelBridge;
     this._core = core;
+    this._heartbeat = heartbeat;
     this._sessionId = resolveSessionId(config.sessionId);
   }
 
@@ -133,7 +121,7 @@ export class SyrinSDKInstance implements SyrinSDK {
   async createCheckpoint(
     messages: Array<Record<string, unknown>>,
     options: { sessionId?: string; label?: string; metadata?: Record<string, unknown> } = {}
-  ): Promise<import('./checkpoint.js').Checkpoint> {
+  ): Promise<import('./core/checkpoint.js').Checkpoint> {
     const sid = options.sessionId ?? this._sessionId;
     const session = this._sessionStore.getSession(sid);
     const cp = await this._core.checkpointClient.save(sid, messages, {
@@ -162,7 +150,7 @@ export class SyrinSDKInstance implements SyrinSDK {
   /**
    * List all checkpoints for a session (from local cache).
    */
-  listCheckpoints(sessionId?: string): import('./checkpoint.js').Checkpoint[] {
+  listCheckpoints(sessionId?: string): import('./core/checkpoint.js').Checkpoint[] {
     return this._core.checkpointClient.listForSession(sessionId ?? this._sessionId);
   }
 
@@ -186,15 +174,68 @@ export class SyrinSDKInstance implements SyrinSDK {
     await this._emitter.flush();
   }
 
+  /**
+   * Re-send the agent schema to the backend.
+   * Call after tune() to push custom sections to the dashboard.
+   * Parity with Python SDK's sdk.refresh_schema().
+   */
+  async refreshSchema(): Promise<void> {
+    await this._core.register();
+  }
+
   async shutdown(): Promise<void> {
+    await this._heartbeat.stop();
     await this._emitter.stop();
     this._core.uninstallAll();
     await this._otelBridge.shutdown();
   }
 }
 
-// Global singleton state
-let _instance: SyrinSDKInstance | null = null;
+// ---------------------------------------------------------------------------
+// Named-instance registry
+// ---------------------------------------------------------------------------
+
+/** Internal registry of named instances */
+const _instances = new Map<string, SyrinSDKInstance>();
+/** Primary (default) instance — used by module-level helpers */
+let _primaryInstance: SyrinSDKInstance | null = null;
+
+
+export interface SyrinInitOptions {
+  apiKey?: string;
+  agentId?: string;
+  sessionId?: string;
+  backendUrl?: string;
+  otelExporter?: 'none' | 'console' | 'otlp';
+  otelEndpoint?: string;
+  debug?: boolean;
+  captureContent?: boolean;
+  offline?: boolean;
+  /** Flush the event queue after this many ms of inactivity (default: 10 000). */
+  idleFlushMs?: number;
+  batchSize?: number;
+  toolValidation?: boolean;
+  sessionTtlMs?: number;
+  /** Public URL of this agent server — stored by dashboard to enable the "Run" button. */
+  serverUrl?: string;
+  adapters?: import('./adapters/types.js').SyrinAdapter[];
+  /**
+   * Name for this SDK instance in the registry.
+   * Defaults to 'default'. Multiple named instances can coexist.
+   */
+  instanceName?: string;
+  /**
+   * How often (in ms) to poll the backend for config overrides.
+   * 0 (default) disables polling.
+   */
+  configPollIntervalMs?: number;
+  /**
+   * Default values for schema fields shown in the dashboard.
+   * Keys use dot-notation: { 'llm.model': 'gpt-4o-mini', 'llm.temperature': 0.7 }.
+   * Parity with Python SDK's schema_defaults option.
+   */
+  schemaDefaults?: Record<string, unknown>;
+}
 
 /**
  * Initialize the Syrin SDK.
@@ -203,11 +244,27 @@ let _instance: SyrinSDKInstance | null = null;
  * @remarks
  * ⚠️ You MUST await init(). If you skip await, the OpenAI SDK may not be
  * patched before your first API call and telemetry will be silently missed.
+ *
+ * Pass `instanceName` to support multiple named SDK instances.
+ * Without `instanceName` (or `instanceName: 'default'`), behaves exactly as before.
  */
 export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInstance> {
-  if (_instance !== null) {
+  const name = options.instanceName ?? 'default';
+
+  const existing = _instances.get(name);
+  if (existing) {
     console.warn(
-      '[Syrin] init() called more than once. Reinitializing. Call shutdown() first to avoid this warning.'
+      `[Syrin] Instance "${name}" already initialized. Call shutdown("${name}") first to reinitialize.`
+    );
+    // Tear down existing instance and reinitialize
+    try { await existing.shutdown(); } catch { /* non-fatal */ }
+    _instances.delete(name);
+  }
+
+  // For 'default' instance, warn and tear down legacy singleton if present (backward compat)
+  if (name === 'default' && _primaryInstance !== null) {
+    console.warn(
+      '[Syrin] init() called more than once for the default instance. Reinitializing. Call shutdown() first to avoid this warning.'
     );
     _teardown();
   }
@@ -234,17 +291,17 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   await core.registerAdapter(new OpenAIAdapter());
 
   // Wire ConfigStore into core so framework adapters can read config
-  const { ConfigStore } = await import('./config-store.js');
+  const { ConfigStore } = await import('./config/store.js');
   const configStore = new ConfigStore();
   (core as unknown as Record<string, unknown>)['_configStore'] = configStore;
 
   // Wire global TunableRegistry into core
-  const { globalRegistry } = await import('./tunable.js');
+  const { globalRegistry } = await import('./tunable/tunable.js');
   (core as unknown as Record<string, unknown>)['_tunableRegistry'] = globalRegistry;
 
   // Try to auto-install Anthropic adapter if @anthropic-ai/sdk is available
   try {
-    const { AnthropicAdapter } = await import('./adapters/anthropic.js');
+    const { AnthropicAdapter } = await import('./adapters/anthropic/index.js');
     await core.registerAdapter(new AnthropicAdapter());
   } catch {
     // @anthropic-ai/sdk not installed — skip silently
@@ -257,15 +314,71 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
     }
   }
 
+  // Load persisted config from previous run (.syrin/syrin.config.json).
+  // Parity with Python SDK — overrides survive restarts without waiting for polling.
+  try {
+    const persisted = loadPersistedConfig();
+    if (Object.keys(persisted).length > 0) {
+      const store = sessionStore as unknown as { applyConfigUpdate(sid: string, overrides: Record<string, unknown>): void };
+      const sid = resolveSessionId(config.sessionId);
+      if (typeof store.applyConfigUpdate === 'function') {
+        store.applyConfigUpdate(sid, persisted);
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+
   // POST config schema to backend so the dashboard knows what's remotely configurable
   await core.register();
 
-  const instance = new SyrinSDKInstance(config, sessionStore, emitter, otelBridge, core);
-  _instance = instance;
+  // Start heartbeat — keeps agent lastSeen fresh every 30 s + signals graceful shutdown
+  const heartbeat = new Heartbeat({
+    agentId: config.agentId,
+    backendUrl: config.backendUrl,
+    apiKey: config.apiKey,
+    offline: config.offline,
+    intervalMs: 30_000,
+  });
+  heartbeat.start();
+
+  const instance = new SyrinSDKInstance(config, sessionStore, emitter, otelBridge, core, heartbeat);
+
+  // Start config polling if requested (check both options and resolved config)
+  const pollIntervalMs = options.configPollIntervalMs ?? config.configPollIntervalMs ?? 0;
+  if (pollIntervalMs > 0) {
+    const pollTimer = setInterval(async () => {
+      try {
+        const resp = await fetch(
+          `${config.backendUrl}/agents/${config.agentId}/overrides`,
+          { headers: { Authorization: `Bearer ${config.apiKey}` } }
+        );
+        if (resp.ok) {
+          const data = await resp.json() as { ok: boolean; overrides: Record<string, unknown> };
+          if (data.ok && data.overrides) {
+            // Apply overrides to all active sessions
+            for (const sid of sessionStore.getSessionIds()) {
+              sessionStore.applyConfigUpdate(sid, data.overrides);
+            }
+          }
+        }
+      } catch {
+        // Non-fatal — polling is best-effort
+      }
+    }, pollIntervalMs);
+
+    (instance as unknown as { _pollTimer: ReturnType<typeof setInterval> })._pollTimer = pollTimer;
+  }
+
+  // Register in named registry
+  _instances.set(name, instance);
+  if (name === 'default') {
+    _primaryInstance = instance;
+  }
 
   if (config.debug) {
     console.log(
-      `[Syrin] Initialized. sessionId=${sessionId} agentId=${config.agentId ?? 'none'} backend=${config.backendUrl}`
+      `[Syrin] Initialized instance="${name}". sessionId=${sessionId} agentId=${config.agentId ?? 'none'} backend=${config.backendUrl}`
     );
   }
 
@@ -275,67 +388,208 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
 }
 
 function _teardown(): void {
-  if (_instance) {
-    _instance.shutdown().catch(() => { /* ignore */ });
-    _instance = null;
+  if (_primaryInstance) {
+    const inst = _primaryInstance as unknown as { _pollTimer?: ReturnType<typeof setInterval> };
+    if (inst._pollTimer) {
+      clearInterval(inst._pollTimer);
+      inst._pollTimer = undefined;
+    }
+    _primaryInstance.shutdown().catch(() => { /* ignore */ });
+    _primaryInstance = null;
   }
+  _instances.delete('default');
   if (isPatched()) {
     unpatch();
   }
 }
 
-export async function shutdown(): Promise<void> {
-  if (_instance) {
-    await _instance.shutdown();
-    _instance = null;
+// ---------------------------------------------------------------------------
+// Module-level helpers — refreshSchema + mountConfigEndpoint
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-send the agent schema to the backend.
+ * Call after tune() to push custom sections to the dashboard.
+ * Parity with Python SDK's sdk.refresh_schema().
+ */
+export async function refreshSchema(name = 'default'): Promise<void> {
+  const inst = _instances.get(name);
+  if (!inst) return;
+  await inst.refreshSchema();
+}
+
+/**
+ * Returns a framework-agnostic request handler that receives config pushes
+ * from the Syrin backend and applies them in-memory + persists to disk.
+ *
+ * Works with any HTTP framework that provides req.body + res.status().json():
+ *   Express: app.post('/syrin/config', mountConfigEndpoint())
+ *   Fastify: app.post('/syrin/config', async (req, reply) => mountConfigEndpoint()(req, reply))
+ *   Hono:    app.post('/syrin/config', (c) => mountConfigEndpoint()(c.req, c.res))
+ *
+ * Parity with Python SDK's syrin_sdk.mount_config_endpoint(app).
+ */
+export function mountConfigEndpoint(instanceName = 'default') {
+  return async (req: { body?: unknown }, res: { status(c: number): { json(b: unknown): void }; json(b: unknown): void }): Promise<void> => {
+    const inst = _instances.get(instanceName);
+    if (!inst) {
+      res.status(503).json({ ok: false, error: 'SDK not initialised' });
+      return;
+    }
+
+    const body = req.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body)) {
+      res.status(400).json({ ok: false, error: 'Body must be a JSON object of config overrides' });
+      return;
+    }
+
+    const overrides = body as Record<string, unknown>;
+
+    // Apply to all active sessions
+    const store = (inst as unknown as { _sessionStore: SessionStore })._sessionStore;
+    const ids = typeof (store as unknown as { getSessionIds?(): string[] }).getSessionIds === 'function'
+      ? (store as unknown as { getSessionIds(): string[] }).getSessionIds()
+      : [];
+    for (const sid of ids) {
+      if (typeof (store as unknown as { applyConfigUpdate?(s: string, o: Record<string, unknown>): void }).applyConfigUpdate === 'function') {
+        (store as unknown as { applyConfigUpdate(s: string, o: Record<string, unknown>): void }).applyConfigUpdate(sid, overrides);
+      }
+    }
+
+    // Also apply to the primary session config
+    inst.configure(overrides);
+
+    // Persist to disk
+    savePersistedConfig(overrides);
+
+    res.json({ ok: true, applied: Object.keys(overrides).length });
+  };
+}
+
+/**
+ * Shutdown a named SDK instance (default: 'default').
+ * Backward-compatible: `shutdown()` with no args shuts down the default instance.
+ */
+export async function shutdown(name = 'default'): Promise<void> {
+  const inst = _instances.get(name);
+  if (!inst) return;
+
+  const instWithTimer = inst as unknown as { _pollTimer?: ReturnType<typeof setInterval> };
+  if (instWithTimer._pollTimer) {
+    clearInterval(instWithTimer._pollTimer);
+    instWithTimer._pollTimer = undefined;
+  }
+
+  await inst.shutdown();
+  _instances.delete(name);
+
+  if (name === 'default') {
+    _primaryInstance = null;
   }
 }
 
 export function getSessionId(): string {
-  if (_instance) {
-    return sessionStorage.getStore() ?? _instance.sessionId;
+  if (_primaryInstance) {
+    return sessionStorage.getStore() ?? _primaryInstance.sessionId;
   }
   return sessionStorage.getStore() ?? generateId('ses_');
 }
 
 export async function withSession<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
-  return sessionStorage.run(sessionId, fn);
+  const inst = _primaryInstance;
+  const agentId = inst?.config.agentId;
+  const startTime = Date.now();
+  const emitter = inst ? (inst as unknown as { _emitter: Emitter })._emitter : null;
+
+  if (emitter) {
+    const startedEvent: SyrinEvent = {
+      event_id: generateId('evt_'),
+      event_type: 'SESSION_STARTED',
+      timestamp: nowIso(),
+      session_id: sessionId,
+      agent_id: agentId,
+      duration_ms: 0,
+      model: '',
+      provider: '',
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_usd: 0,
+      stream: false,
+      config_applied: false,
+    };
+    emitter.emit(startedEvent, sessionId);
+  }
+
+  try {
+    return await sessionStorage.run(sessionId, fn);
+  } finally {
+    if (emitter) {
+      const endedEvent: SyrinEvent = {
+        event_id: generateId('evt_'),
+        event_type: 'SESSION_ENDED',
+        timestamp: nowIso(),
+        session_id: sessionId,
+        agent_id: agentId,
+        duration_ms: Date.now() - startTime,
+        model: '',
+        provider: '',
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        stream: false,
+        config_applied: false,
+      };
+      emitter.emit(endedEvent, sessionId);
+    }
+  }
 }
 
-export function getInstance(): SyrinSDKInstance | null {
-  return _instance;
+/**
+ * Get a named SDK instance.
+ * Without arguments, returns the default (primary) instance or null.
+ * Pass a name to get a specific named instance — throws if not found.
+ */
+export function getInstance(name?: string): SyrinSDKInstance | null {
+  if (name === undefined || name === 'default') {
+    return _primaryInstance;
+  }
+  const inst = _instances.get(name);
+  if (!inst) {
+    throw new Error(`[Syrin] No SDK instance named "${name}". Call init({ instanceName: "${name}" }) first.`);
+  }
+  return inst;
 }
 
 export function getToolValidation(
   toolCallId: string,
   sessionId?: string
 ): { valid: boolean; error?: string } | undefined {
-  return _instance?.getToolValidation(toolCallId, sessionId);
+  return _primaryInstance?.getToolValidation(toolCallId, sessionId);
 }
 
 export function configure(overrides: Record<string, unknown>, sessionId?: string): void {
-  _instance?.configure(overrides, sessionId);
+  _primaryInstance?.configure(overrides, sessionId);
 }
 
 export async function createCheckpoint(
   messages: Array<Record<string, unknown>>,
   options: { sessionId?: string; label?: string; metadata?: Record<string, unknown> } = {}
-): Promise<import('./checkpoint.js').Checkpoint | undefined> {
-  return _instance?.createCheckpoint(messages, options);
+): Promise<import('./core/checkpoint.js').Checkpoint | undefined> {
+  return _primaryInstance?.createCheckpoint(messages, options);
 }
 
 export async function restoreCheckpoint(checkpointId: string): Promise<Array<Record<string, unknown>> | undefined> {
-  return _instance?.restoreCheckpoint(checkpointId);
+  return _primaryInstance?.restoreCheckpoint(checkpointId);
 }
 
 export function deleteSession(sessionId: string): void {
-  _instance?.deleteSession(sessionId);
+  _primaryInstance?.deleteSession(sessionId);
 }
 
 export function clearStaleSessions(olderThanMs = 3_600_000): number {
-  return _instance?.clearStaleSessions(olderThanMs) ?? 0;
+  return _primaryInstance?.clearStaleSessions(olderThanMs) ?? 0;
 }
 
 export function configSnapshot(): Record<string, unknown> | null {
-  return _instance?.configSnapshot() ?? null;
+  return _primaryInstance?.configSnapshot() ?? null;
 }

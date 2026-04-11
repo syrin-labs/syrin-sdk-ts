@@ -4,13 +4,13 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SyrinConfig, SyrinEvent } from '@/types';
-import { SessionStore } from '@/session';
-import { Emitter } from '@/emitter';
-import { OTelBridge } from '@/otel';
-import { CheckpointClient } from '@/checkpoint';
-import { SyrinCore } from '@/core';
-import { patchWithModule, unpatch } from '@/adapters/openai';
-import { estimateCost, detectProvider } from '@/utils';
+import { SessionStore } from '@/core/session';
+import { Emitter } from '@/observability/emitter';
+import { OTelBridge } from '@/observability/otel';
+import { CheckpointClient } from '@/core/checkpoint';
+import { SyrinCore } from '@/core/engine';
+import { patchWithModule, unpatch } from '@/adapters/openai/index';
+import { estimateCost, detectProvider } from '@/utils/helpers';
 
 // Mock openai — create on prototype (matches real SDK v4 structure)
 vi.mock('openai', () => {
@@ -107,7 +107,7 @@ describe('Edge cases', () => {
     const instance1 = await init({ apiKey: 'syrin_first', offline: true });
     const instance2 = await init({ apiKey: 'syrin_second', offline: true });
 
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/init\(\) called more than once/));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/already initialized/));
     expect(instance2).not.toBe(instance1);
 
     await shutdown();
@@ -116,7 +116,7 @@ describe('Edge cases', () => {
 
   it('init() without apiKey throws descriptive error', async () => {
     delete process.env['SYRIN_API_KEY'];
-    const { createConfig } = await import('../src/config.js');
+    const { createConfig } = await import('../src/config/config.js');
     expect(() => createConfig({} as Parameters<typeof createConfig>[0])).toThrow(/apiKey/);
   });
 
@@ -129,7 +129,7 @@ describe('Edge cases', () => {
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({ apiKey: 'test' });
 
-    const { sessionStorage } = await import('../src/session.js');
+    const { sessionStorage } = await import('../src/core/session.js');
 
     const sessionId = 'concurrent-session';
     await sessionStore.getOrCreate(sessionId, undefined);
@@ -225,7 +225,7 @@ describe('Edge cases', () => {
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({ apiKey: 'test' });
 
-    const { sessionStorage } = await import('../src/session.js');
+    const { sessionStorage } = await import('../src/core/session.js');
     const sessionId = 'cumulative-cost-session';
     await sessionStore.getOrCreate(sessionId, undefined);
 

@@ -12,7 +12,7 @@ import {
   TUNABLE_FIELD_MARKER,
   isTunableFieldMarker,
   globalRegistry,
-} from '@/tunable';
+} from '@/tunable/tunable';
 
 describe('TunableField marker', () => {
   it('TunableField stores options on class metadata', () => {

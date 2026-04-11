@@ -6,7 +6,7 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { ConfigStore } from '@/config-store';
+import { ConfigStore } from '@/config/store';
 
 // ---------------------------------------------------------------------------
 // Mock @mastra/core — Agent class created once and referenced by tests
@@ -84,15 +84,15 @@ function makeCore(configStoreOverrides: Record<string, Record<string, unknown>> 
 // ---------------------------------------------------------------------------
 
 describe('MastraAdapter', () => {
-  let MastraAdapter: typeof import('../src/adapters/mastra.js').MastraAdapter;
-  let getFrameworkContext: typeof import('../src/framework-context.js').getFrameworkContext;
+  let MastraAdapter: typeof import('../src/adapters/mastra/index.js').MastraAdapter;
+  let getFrameworkContext: typeof import('../src/agent/framework-context.js').getFrameworkContext;
 
   beforeEach(async () => {
     vi.resetModules();
     vi.clearAllMocks();
-    const mod = await import('../src/adapters/mastra.js');
+    const mod = await import('../src/adapters/mastra/index.js');
     MastraAdapter = mod.MastraAdapter;
-    const fwCtxMod = await import('../src/framework-context.js');
+    const fwCtxMod = await import('../src/agent/framework-context.js');
     getFrameworkContext = fwCtxMod.getFrameworkContext;
   });
 

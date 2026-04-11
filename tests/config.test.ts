@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { createConfig, fromEnv } from '@/config';
+import { createConfig, fromEnv } from '@/config/config';
 import type { SyrinConfig } from '@/types';
 
 describe('createConfig', () => {

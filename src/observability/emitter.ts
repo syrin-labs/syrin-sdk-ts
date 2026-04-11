@@ -7,11 +7,11 @@
  *      the first queued event when a full batch hasn't triggered first.
  */
 
-import type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse } from '@/types';
-import type { SessionStore } from '@/session';
-import { SDK_VERSION } from '@/config';
-import { GovernanceResponse } from '@/governance';
-import { fireConfigChange, fireAlert } from '@/hooks';
+import type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse } from '@/types.js';
+import type { SessionStore } from '@/core/session.js';
+import { SDK_VERSION } from '@/config/config.js';
+import { GovernanceResponse } from '@/core/governance.js';
+import { fireConfigChange, fireAlert } from '@/observability/hooks.js';
 
 const MAX_QUEUE_SIZE = 1000;
 
@@ -212,7 +212,7 @@ export class Emitter {
     }
   }
 
-  private _applyGovernance(sessionId: string, governanceData: import('./types.js').GovernanceData): void {
+  private _applyGovernance(sessionId: string, governanceData: import('../types.js').GovernanceData): void {
     const gov = new GovernanceResponse(governanceData);
 
     if (gov.loopDetected && this.config.debug) {

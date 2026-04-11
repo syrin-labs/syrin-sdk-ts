@@ -5,8 +5,8 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { FrameworkContext } from '@/framework-context';
-import { getFrameworkContext, withFrameworkContext } from '@/framework-context';
+import type { FrameworkContext } from '@/agent/framework-context';
+import { getFrameworkContext, withFrameworkContext } from '@/agent/framework-context';
 
 function makeCtx(overrides: Partial<FrameworkContext> = {}): FrameworkContext {
   return {

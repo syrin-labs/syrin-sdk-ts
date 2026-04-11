@@ -6,8 +6,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ConfigStore } from '@/config-store';
-import { getFrameworkContext } from '@/framework-context';
+import { ConfigStore } from '@/config/store';
+import { getFrameworkContext } from '@/agent/framework-context';
 import type { ISyrinCore } from '@/adapters/types';
 import type { SyrinConfig } from '@/types';
 
@@ -84,7 +84,7 @@ function makeMockChain(name = 'mock_chain') {
 // Import adapter under test
 // ---------------------------------------------------------------------------
 
-const { LangChainAdapter, SyrinLangChainCallback } = await import('../src/adapters/langchain.js');
+const { LangChainAdapter, SyrinLangChainCallback } = await import('../src/adapters/langchain/index.js');
 
 // ---------------------------------------------------------------------------
 // Tests

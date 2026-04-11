@@ -7,12 +7,12 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { SyrinConfig, SyrinEvent } from '@/types';
-import { SessionStore } from '@/session';
-import { Emitter } from '@/emitter';
-import { OTelBridge } from '@/otel';
-import { CheckpointClient } from '@/checkpoint';
-import { SyrinCore } from '@/core';
-import { patchWithModule, unpatch } from '@/adapters/openai';
+import { SessionStore } from '@/core/session';
+import { Emitter } from '@/observability/emitter';
+import { OTelBridge } from '@/observability/otel';
+import { CheckpointClient } from '@/core/checkpoint';
+import { SyrinCore } from '@/core/engine';
+import { patchWithModule, unpatch } from '@/adapters/openai/index';
 
 // Mock openai module — create is on the prototype to match real SDK v4 behavior
 vi.mock('openai', () => {
@@ -161,7 +161,7 @@ describe('interceptor: patchWithModule', () => {
     await sessionStore.getOrCreate(sessionId, undefined);
     sessionStore.applyConfigUpdate(sessionId, { temperature: 0.3 });
 
-    const { sessionStorage } = await import('../src/session.js');
+    const { sessionStorage } = await import('../src/core/session.js');
     await sessionStorage.run(sessionId, async () => {
       await client.chat.completions.create({
         model: 'gpt-4o',
@@ -209,7 +209,7 @@ describe('interceptor: patchWithModule', () => {
     await sessionStore.getOrCreate(sessionId, undefined);
     sessionStore.applyConfigUpdate(sessionId, { temperature: 0.7 });
 
-    const { sessionStorage } = await import('../src/session.js');
+    const { sessionStorage } = await import('../src/core/session.js');
     await sessionStorage.run(sessionId, async () => {
       await client.chat.completions.create({
         model: 'o1',
@@ -232,7 +232,7 @@ describe('interceptor: patchWithModule', () => {
     await sessionStore.getOrCreate(sessionId, undefined);
     sessionStore.applyConfigUpdate(sessionId, { temperature: 0.5 });
 
-    const { sessionStorage } = await import('../src/session.js');
+    const { sessionStorage } = await import('../src/core/session.js');
     await sessionStorage.run(sessionId, async () => {
       await client.chat.completions.create({
         model: 'o3-mini',
@@ -255,7 +255,7 @@ describe('interceptor: patchWithModule', () => {
     await sessionStore.getOrCreate(sessionId, undefined);
     sessionStore.applyConfigUpdate(sessionId, { temperature: 1.8 }); // Over Anthropic's limit
 
-    const { sessionStorage } = await import('../src/session.js');
+    const { sessionStorage } = await import('../src/core/session.js');
     await sessionStorage.run(sessionId, async () => {
       await client.chat.completions.create({
         model: 'claude-3-5-sonnet-20241022',
@@ -284,7 +284,7 @@ describe('interceptor: patchWithModule', () => {
     };
     const originalParamsCopy = { ...originalParams };
 
-    const { sessionStorage } = await import('../src/session.js');
+    const { sessionStorage } = await import('../src/core/session.js');
     await sessionStorage.run(sessionId, async () => {
       await client.chat.completions.create(originalParams);
     });
@@ -302,7 +302,7 @@ describe('interceptor: patchWithModule', () => {
     const sessionId = 'cost-tracking-session';
     await sessionStore.getOrCreate(sessionId, undefined);
 
-    const { sessionStorage } = await import('../src/session.js');
+    const { sessionStorage } = await import('../src/core/session.js');
     await sessionStorage.run(sessionId, async () => {
       await client.chat.completions.create({
         model: 'gpt-4o',

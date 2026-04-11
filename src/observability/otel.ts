@@ -11,7 +11,7 @@
 
 import type { Span, Tracer } from '@opentelemetry/api';
 import type { NodeTracerProvider, SpanProcessor } from '@opentelemetry/sdk-trace-node';
-import type { SyrinConfig, CallInfo } from '@/types';
+import type { SyrinConfig, CallInfo } from '@/types.js';
 
 // ---------------------------------------------------------------------------
 // BaggageSpanProcessor

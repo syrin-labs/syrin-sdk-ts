@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { detectProvider, PROVIDER_URL_MAP } from '@/provider';
+import { detectProvider, PROVIDER_URL_MAP } from '@/utils/provider';
 
 function clientWithBase(baseUrl: string): unknown {
   return { baseUrl };

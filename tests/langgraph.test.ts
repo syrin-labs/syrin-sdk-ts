@@ -6,8 +6,8 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { ConfigStore } from '@/config-store';
-import { getFrameworkContext } from '@/framework-context';
+import { ConfigStore } from '@/config/store';
+import { getFrameworkContext } from '@/agent/framework-context';
 
 // ---------------------------------------------------------------------------
 // Mock @langchain/langgraph — classes are created once and referenced by tests
@@ -91,14 +91,14 @@ function makeCore(configStoreOverrides: Record<string, Record<string, unknown>> 
 // ---------------------------------------------------------------------------
 
 describe('LangGraphAdapter', () => {
-  let LangGraphAdapter: typeof import('../src/adapters/langgraph.js').LangGraphAdapter;
+  let LangGraphAdapter: typeof import('../src/adapters/langgraph/index.js').LangGraphAdapter;
 
   beforeEach(async () => {
     vi.clearAllMocks();
     // Reset lgInterruptFn to original so patching starts fresh
     lgInterruptFn = fakeInterrupt;
     // Import after clearing to avoid stale module state
-    const mod = await import('../src/adapters/langgraph.js');
+    const mod = await import('../src/adapters/langgraph/index.js');
     LangGraphAdapter = mod.LangGraphAdapter;
   });
 

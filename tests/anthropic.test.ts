@@ -116,7 +116,7 @@ async function getAnthropicClass(): Promise<new (opts?: unknown) => { messages: 
 // Import the adapter under test (after mock setup)
 // ---------------------------------------------------------------------------
 
-const { AnthropicAdapter } = await import('../src/adapters/anthropic.js');
+const { AnthropicAdapter } = await import('../src/adapters/anthropic/index.js');
 
 // ---------------------------------------------------------------------------
 // Tests

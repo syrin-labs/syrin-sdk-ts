@@ -64,13 +64,13 @@ const BACKEND_URL = 'http://localhost:4399';
 
 describe('Integration: init → call → event at mock backend', () => {
   it('emits an event after an OpenAI call via SDK', async () => {
-    const { createConfig } = await import('../src/config.js');
-    const { SessionStore } = await import('../src/session.js');
-    const { Emitter } = await import('../src/emitter.js');
-    const { OTelBridge } = await import('../src/otel.js');
-    const { CheckpointClient } = await import('../src/checkpoint.js');
-    const { SyrinCore } = await import('../src/core.js');
-    const { patchWithModule, unpatch } = await import('../src/adapters/openai.js');
+    const { createConfig } = await import('../src/config/config.js');
+    const { SessionStore } = await import('../src/core/session.js');
+    const { Emitter } = await import('../src/observability/emitter.js');
+    const { OTelBridge } = await import('../src/observability/otel.js');
+    const { CheckpointClient } = await import('../src/core/checkpoint.js');
+    const { SyrinCore } = await import('../src/core/engine.js');
+    const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
 
     unpatch();
 
@@ -124,14 +124,14 @@ describe('Integration: init → call → event at mock backend', () => {
   });
 
   it('applies config update from backend to next call', async () => {
-    const { createConfig } = await import('../src/config.js');
-    const { SessionStore } = await import('../src/session.js');
-    const { Emitter } = await import('../src/emitter.js');
-    const { OTelBridge } = await import('../src/otel.js');
-    const { CheckpointClient } = await import('../src/checkpoint.js');
-    const { SyrinCore } = await import('../src/core.js');
-    const { patchWithModule, unpatch } = await import('../src/adapters/openai.js');
-    const { sessionStorage } = await import('../src/session.js');
+    const { createConfig } = await import('../src/config/config.js');
+    const { SessionStore } = await import('../src/core/session.js');
+    const { Emitter } = await import('../src/observability/emitter.js');
+    const { OTelBridge } = await import('../src/observability/otel.js');
+    const { CheckpointClient } = await import('../src/core/checkpoint.js');
+    const { SyrinCore } = await import('../src/core/engine.js');
+    const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
+    const { sessionStorage } = await import('../src/core/session.js');
 
     unpatch();
 
@@ -203,13 +203,13 @@ describe('Integration: init → call → event at mock backend', () => {
   });
 
   it('withSession() scopes events to the correct session', async () => {
-    const { createConfig } = await import('../src/config.js');
-    const { SessionStore } = await import('../src/session.js');
-    const { Emitter } = await import('../src/emitter.js');
-    const { OTelBridge } = await import('../src/otel.js');
-    const { CheckpointClient } = await import('../src/checkpoint.js');
-    const { SyrinCore } = await import('../src/core.js');
-    const { patchWithModule, unpatch } = await import('../src/adapters/openai.js');
+    const { createConfig } = await import('../src/config/config.js');
+    const { SessionStore } = await import('../src/core/session.js');
+    const { Emitter } = await import('../src/observability/emitter.js');
+    const { OTelBridge } = await import('../src/observability/otel.js');
+    const { CheckpointClient } = await import('../src/core/checkpoint.js');
+    const { SyrinCore } = await import('../src/core/engine.js');
+    const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
     const { withSession } = await import('../src/index.js');
 
     unpatch();
@@ -273,13 +273,13 @@ describe('Integration: init → call → event at mock backend', () => {
   });
 
   it('shutdown() flushes remaining events', async () => {
-    const { createConfig } = await import('../src/config.js');
-    const { SessionStore } = await import('../src/session.js');
-    const { Emitter } = await import('../src/emitter.js');
-    const { OTelBridge } = await import('../src/otel.js');
-    const { CheckpointClient } = await import('../src/checkpoint.js');
-    const { SyrinCore } = await import('../src/core.js');
-    const { patchWithModule, unpatch } = await import('../src/adapters/openai.js');
+    const { createConfig } = await import('../src/config/config.js');
+    const { SessionStore } = await import('../src/core/session.js');
+    const { Emitter } = await import('../src/observability/emitter.js');
+    const { OTelBridge } = await import('../src/observability/otel.js');
+    const { CheckpointClient } = await import('../src/core/checkpoint.js');
+    const { SyrinCore } = await import('../src/core/engine.js');
+    const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
 
     unpatch();
 
@@ -317,7 +317,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const client = new OpenAI({ apiKey: 'test' });
 
     const sessionId = 'shutdown-session';
-    const { sessionStorage } = await import('../src/session.js');
+    const { sessionStorage } = await import('../src/core/session.js');
 
     await sessionStorage.run(sessionId, async () => {
       await client.chat.completions.create({

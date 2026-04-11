@@ -3,8 +3,8 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { ConfigStore } from '@/config-store';
-import type { FieldSchema } from '@/config-store';
+import { ConfigStore } from '@/config/store';
+import type { FieldSchema } from '@/config/store';
 
 describe('ConfigStore — built-in sections', () => {
   let store: ConfigStore;

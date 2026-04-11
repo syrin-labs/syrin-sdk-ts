@@ -12,6 +12,8 @@
  * The core is responsible for governance, config injection, telemetry building, and emitting.
  */
 
+import { generateId, nowIso } from '../utils/helpers.js';
+
 // ---------------------------------------------------------------------------
 // Normalised request / response shapes
 // ---------------------------------------------------------------------------
@@ -102,7 +104,7 @@ export interface BeforeCallResult {
  */
 export interface ISyrinCore {
   readonly config: import('../types.js').SyrinConfig;
-  readonly sessionStore: import('../session.js').SessionStore;
+  readonly sessionStore: import('../core/session.js').SessionStore;
   beforeCall(params: NormalizedCallParams): Promise<BeforeCallResult>;
   afterCall(ctx: BeforeCallResult, params: NormalizedCallParams, result: NormalizedCallResult): void;
   onStreamComplete(ctx: BeforeCallResult, params: NormalizedCallParams, result: NormalizedCallResult): void;
@@ -124,6 +126,13 @@ export interface SyrinAdapter {
    * Used in debug logs and the adapter registry.
    */
   readonly name: string;
+
+  /**
+   * Return the config fields this adapter exposes for remote configuration.
+   * Keys are section names (e.g. "llm", "openai"); values are arrays of SchemaField descriptors.
+   * Return {} if this adapter has no remotely-configurable fields.
+   */
+  configSchema(): Record<string, SchemaField[]>;
 
   /**
    * Install the monkey-patch / hook for this provider SDK.
@@ -158,10 +167,12 @@ export interface FrameworkAdapter extends SyrinAdapter {
 // Schema types — used for /agents/:id/register
 // ---------------------------------------------------------------------------
 
+
 export interface SchemaField {
   name: string;
   type: 'str' | 'float' | 'int' | 'bool';
   default?: unknown;
+  multiline?: boolean;
   constraints?: { ge?: number; le?: number; gt?: number; lt?: number; enum?: unknown[] };
 }
 
@@ -203,7 +214,7 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
   }
 
   getConfig(namespace: string): Record<string, unknown> {
-    const cs = (this._core as unknown as { _configStore?: import('../config-store.js').ConfigStore })?._configStore;
+    const cs = (this._core as unknown as { _configStore?: import('../config/store.js').ConfigStore })?._configStore;
     return cs ? cs.getSection(namespace) : {};
   }
 
@@ -224,5 +235,73 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
    */
   configSchema(): Record<string, SchemaField[]> {
     return {};
+  }
+
+  /**
+   * Build and emit a normalised LLM_CALL event via the core emitter.
+   * Eliminates the per-adapter boilerplate.
+   */
+  protected emitLlmCallEvent(data: {
+    agentName?: string;
+    model: string;
+    provider: string;
+    inputTokens: number;
+    outputTokens: number;
+    durationMs: number;
+    error: string | null;
+    operation?: string;
+  }): void {
+    this.emitEvent({
+      event_id: generateId('evt_'),
+      event_type: 'LLM_CALL',
+      timestamp: nowIso(),
+      session_id: this.sessionId,
+      agent_id: this.agentId,
+      framework: this.name,
+      agent_name: data.agentName ?? 'unknown',
+      model: data.model,
+      provider: data.provider,
+      input_tokens: data.inputTokens,
+      output_tokens: data.outputTokens,
+      duration_ms: data.durationMs,
+      error: data.error,
+      ...(data.operation != null ? { operation: data.operation } : {}),
+    });
+  }
+
+  /**
+   * Merge config section (default: 'llm') into call options.
+   * Eliminates the per-adapter getConfig/inject pattern.
+   */
+  protected injectLlmConfig(
+    opts: Record<string, unknown> | undefined,
+    namespace = 'llm',
+  ): Record<string, unknown> {
+    const cfg = this.getConfig(namespace);
+    const hasOverrides = Object.values(cfg).some((v) => v != null);
+    if (!hasOverrides) return opts ?? {};
+    const result = { ...(opts ?? {}) };
+    for (const [key, val] of Object.entries(cfg)) {
+      if (val != null) result[key] = val;
+    }
+    return result;
+  }
+
+  /**
+   * Extract input/output tokens from a provider response.
+   * Tries each candidate field name in order.
+   */
+  protected extractTokens(
+    usage: Record<string, number> | null | undefined,
+    inputFields: string[],
+    outputFields: string[],
+  ): { inputTokens: number; outputTokens: number } {
+    const pick = (fields: string[]) => {
+      for (const f of fields) {
+        if (usage?.[f] != null) return usage[f] as number;
+      }
+      return 0;
+    };
+    return { inputTokens: pick(inputFields), outputTokens: pick(outputFields) };
   }
 }

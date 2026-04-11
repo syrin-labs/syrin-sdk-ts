@@ -16,7 +16,7 @@
  *   tune({ target: myObj, namespace: "myns", fields: { x: "number" } });
  */
 
-import type { FieldSchema } from '@/config-store';
+import type { FieldSchema } from '@/config/store.js';
 
 // ---------------------------------------------------------------------------
 // Public option types

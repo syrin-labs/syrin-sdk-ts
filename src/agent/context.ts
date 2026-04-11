@@ -15,8 +15,8 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
-import type { RunContext } from '@/types';
-import { generateId } from '@/utils';
+import type { RunContext } from '@/types.js';
+import { generateId } from '@/utils/helpers.js';
 
 export type { RunContext };
 

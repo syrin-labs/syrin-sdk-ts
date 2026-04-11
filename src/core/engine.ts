@@ -14,13 +14,13 @@
  * to plug any LLM SDK into this engine without re-implementing any of the above.
  */
 
-import type { SyrinConfig, SyrinEvent } from '@/types';
-import { SDK_VERSION } from '@/config';
-import type { SessionStore } from '@/session';
-import { sessionStorage } from '@/session';
-import type { Emitter } from '@/emitter';
-import type { OTelBridge } from '@/otel';
-import type { CheckpointClient } from '@/checkpoint';
+import type { SyrinConfig, SyrinEvent } from '@/types.js';
+import { SDK_VERSION } from '@/config/config.js';
+import type { SessionStore } from '@/core/session.js';
+import { sessionStorage } from '@/core/session.js';
+import type { Emitter } from '@/observability/emitter.js';
+import type { OTelBridge } from '@/observability/otel.js';
+import type { CheckpointClient } from '@/core/checkpoint.js';
 import type {
   SyrinAdapter,
   ISyrinCore,
@@ -29,15 +29,14 @@ import type {
   BeforeCallResult,
   NormalizedMessage,
   SchemaField,
-} from '@/adapters/types';
-import { agentStorage } from '@/agent';
-import { GovernanceStopError } from '@/governance';
-import { getFrameworkContext } from '@/framework-context';
+} from '@/adapters/types.js';
+import { agentStorage } from '@/agent/context.js';
+import { GovernanceStopError } from '@/core/governance.js';
+import { getFrameworkContext } from '@/agent/framework-context.js';
 import {
   generateId,
   nowIso,
   estimateCost,
-  detectProvider,
   clampTemperature,
   isTemperatureUnsupported,
   hashSystemPrompt,
@@ -47,10 +46,11 @@ import {
   contextSize,
   detectRefusal,
   stableHash,
-} from '@/utils';
+} from '@/utils/helpers.js';
+import { detectProvider } from '@/utils/provider.js';
 
 // Re-export for convenience
-export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types';
+export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types.js';
 
 export class SyrinCore implements ISyrinCore {
   private readonly _adapters = new Map<string, SyrinAdapter>();
@@ -96,9 +96,7 @@ export class SyrinCore implements ISyrinCore {
     const sections: Record<string, Record<string, SchemaField>> = {};
 
     for (const adapter of this._adapters.values()) {
-      const schemaFn = (adapter as unknown as { configSchema?: () => Record<string, SchemaField[]> }).configSchema;
-      if (typeof schemaFn !== 'function') continue;
-      const adapterSchema = schemaFn.call(adapter);
+      const adapterSchema = adapter.configSchema();
       for (const [sectionName, fields] of Object.entries(adapterSchema)) {
         if (!sections[sectionName]) sections[sectionName] = {};
         for (const field of fields) {
@@ -106,6 +104,19 @@ export class SyrinCore implements ISyrinCore {
             sections[sectionName][field.name] = field;
           }
         }
+      }
+    }
+
+    // Apply schemaDefaults — patch matching field defaults before returning.
+    // Parity with Python SDK's schema_defaults option.
+    const defaults = this.config.schemaDefaults ?? {};
+    for (const [path, value] of Object.entries(defaults)) {
+      const dot = path.indexOf('.');
+      if (dot === -1) continue;
+      const sec = path.slice(0, dot);
+      const fieldName = path.slice(dot + 1);
+      if (sections[sec]?.[fieldName]) {
+        sections[sec][fieldName] = { ...sections[sec][fieldName], default: value };
       }
     }
 
@@ -135,6 +146,7 @@ export class SyrinCore implements ISyrinCore {
       agent_framework: this._detectFramework(),
       sdk: { language: 'typescript', version: SDK_VERSION },
       schema,
+      server_url: this.config.serverUrl ?? null,
     };
 
     const url = `${this.config.backendUrl}/agents/${agentId}/register`;
@@ -170,8 +182,16 @@ export class SyrinCore implements ISyrinCore {
   }
 
   private _detectFramework(): string | undefined {
+    // Tier 1: framework/orchestration adapters (preferred)
+    const llmProviders = new Set(['openai', 'anthropic']);
     for (const adapter of this._adapters.values()) {
-      if (adapter.name !== 'openai' && adapter.name !== 'anthropic') {
+      if (!llmProviders.has(adapter.name)) {
+        return adapter.name;
+      }
+    }
+    // Tier 2: fall back to LLM provider name (parity with Python SDK)
+    for (const adapter of this._adapters.values()) {
+      if (llmProviders.has(adapter.name)) {
         return adapter.name;
       }
     }
@@ -260,6 +280,18 @@ export class SyrinCore implements ISyrinCore {
     if (effectiveConfig['model'] !== undefined) {
       modifiedRaw['model'] = effectiveConfig['model'];
       configApplied = true;
+    }
+
+    // Sampling / decoding parameters — schema-controlled per adapter so only
+    // applicable fields are ever present in effectiveConfig.
+    for (const field of [
+      'top_p', 'frequency_penalty', 'presence_penalty',
+      'seed', 'n', 'top_k',
+    ] as const) {
+      if (effectiveConfig[field] !== undefined) {
+        modifiedRaw[field] = effectiveConfig[field];
+        configApplied = true;
+      }
     }
 
     // System prompt injection

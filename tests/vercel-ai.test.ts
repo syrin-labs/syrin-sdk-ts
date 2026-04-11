@@ -6,8 +6,8 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { ConfigStore } from '@/config-store';
-import { getFrameworkContext } from '@/framework-context';
+import { ConfigStore } from '@/config/store';
+import { getFrameworkContext } from '@/agent/framework-context';
 
 // ---------------------------------------------------------------------------
 // Mock `ai` module — standalone functions
@@ -102,7 +102,7 @@ function makeCore(configStoreOverrides: Record<string, Record<string, unknown>> 
 // ---------------------------------------------------------------------------
 
 describe('VercelAIAdapter', () => {
-  let VercelAIAdapter: typeof import('../src/adapters/vercel-ai.js').VercelAIAdapter;
+  let VercelAIAdapter: typeof import('../src/adapters/vercel-ai/index.js').VercelAIAdapter;
 
   beforeEach(async () => {
     vi.clearAllMocks();
@@ -111,7 +111,7 @@ describe('VercelAIAdapter', () => {
     aiModule.streamText = fakeStreamText;
     aiModule.generateObject = fakeGenerateObject;
 
-    const mod = await import('../src/adapters/vercel-ai.js');
+    const mod = await import('../src/adapters/vercel-ai/index.js');
     VercelAIAdapter = mod.VercelAIAdapter;
   });
 

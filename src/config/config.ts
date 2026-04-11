@@ -2,7 +2,7 @@
  * Syrin SDK — Configuration management
  */
 
-import type { SyrinConfig } from '@/types';
+import type { SyrinConfig } from '@/types.js';
 
 const SDK_VERSION = '0.1.0';
 
@@ -17,6 +17,7 @@ const DEFAULTS: Omit<SyrinConfig, 'apiKey'> = {
   idleFlushMs: 10_000,
   toolValidation: false,
   sessionTtlMs: undefined,
+  configPollIntervalMs: 0,
 };
 
 export function fromEnv(): Partial<SyrinConfig> {
@@ -68,6 +69,10 @@ export function fromEnv(): Partial<SyrinConfig> {
   if (process.env['SYRIN_SESSION_TTL_MS']) {
     const parsed = parseInt(process.env['SYRIN_SESSION_TTL_MS'], 10);
     if (!isNaN(parsed)) env.sessionTtlMs = parsed;
+  }
+  if (process.env['SYRIN_CONFIG_POLL_INTERVAL_MS']) {
+    const parsed = parseInt(process.env['SYRIN_CONFIG_POLL_INTERVAL_MS'], 10);
+    if (!isNaN(parsed)) env.configPollIntervalMs = parsed;
   }
 
   return env;

@@ -10,9 +10,9 @@ import {
   AutoRevert,
   DEFAULT_RECOVERY_POLICY,
   type RecoveryPolicy,
-} from '@/config-guard';
-import { ConfigStore } from '@/config-store';
-import { TunableRegistry } from '@/tunable';
+} from '@/config/guard';
+import { ConfigStore } from '@/config/store';
+import { TunableRegistry } from '@/tunable/tunable';
 
 function makeStore(): ConfigStore {
   const store = new ConfigStore();
