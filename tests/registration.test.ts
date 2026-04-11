@@ -1,5 +1,5 @@
 /**
- * Tests: SyrinCore.buildSchema() + SyrinCore.register()
+ * Tests: SyrinSDKCore.buildSchema() + SyrinSDKCore.register()
  *
  * Covers:
  *  1. buildSchema with no adapters returns empty sections
@@ -14,13 +14,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SyrinCore } from '@/core/engine';
+import { SyrinSDKCore } from '@/core/engine';
 import { ConfigStore } from '@/config/store';
 import { OpenAIAdapter } from '@/adapters/openai/index';
 import { LangGraphAdapter } from '@/adapters/langgraph/index';
-import { BaseFrameworkAdapter } from '@/adapters/types';
+import { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types';
 import type { ISyrinCore, SchemaField } from '@/adapters/types';
-import type { SyrinConfig } from '@/types';
+import type { SyrinSDKConfig } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Mock openai for tests that trigger init()
@@ -43,7 +43,7 @@ vi.mock('openai', () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
+function makeConfig(overrides: Partial<SyrinSDKConfig> = {}): SyrinSDKConfig {
   return {
     apiKey: 'syrin_test',
     backendUrl: 'http://localhost:4399',
@@ -61,8 +61,8 @@ function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
   };
 }
 
-function makeCore(configOverrides: Partial<SyrinConfig> = {}): {
-  core: SyrinCore & { _configStore: ConfigStore };
+function makeCore(configOverrides: Partial<SyrinSDKConfig> = {}): {
+  core: SyrinSDKCore & { _configStore: ConfigStore };
   configStore: ConfigStore;
 } {
   const config = makeConfig(configOverrides);
@@ -97,7 +97,7 @@ function makeCore(configOverrides: Partial<SyrinConfig> = {}): {
     listForSession: vi.fn().mockReturnValue([]),
   };
 
-  const core = new SyrinCore(
+  const core = new SyrinSDKCore(
     config,
     sessionStore,
     emitter as never,
@@ -108,14 +108,14 @@ function makeCore(configOverrides: Partial<SyrinConfig> = {}): {
   const configStore = new ConfigStore();
   (core as unknown as Record<string, unknown>)['_configStore'] = configStore;
 
-  return { core: core as SyrinCore & { _configStore: ConfigStore }, configStore };
+  return { core: core as SyrinSDKCore & { _configStore: ConfigStore }, configStore };
 }
 
 // ---------------------------------------------------------------------------
 // A custom adapter that exposes a duplicate llm section (for dedup test)
 // ---------------------------------------------------------------------------
 
-class DuplicateLlmAdapter extends BaseFrameworkAdapter {
+class DuplicateLlmAdapter extends SyrinSDKBaseFrameworkAdapter {
   readonly name = 'duplicate-llm';
 
   protected _doInstall(_core: ISyrinCore): void {}
@@ -138,7 +138,7 @@ class DuplicateLlmAdapter extends BaseFrameworkAdapter {
 // 1. buildSchema with no adapters returns empty sections
 // ---------------------------------------------------------------------------
 
-describe('SyrinCore.buildSchema()', () => {
+describe('SyrinSDKCore.buildSchema()', () => {
   it('returns empty sections when no adapters are registered', () => {
     const { core } = makeCore();
     const schema = core.buildSchema();
@@ -235,7 +235,7 @@ describe('SyrinCore.buildSchema()', () => {
 // 5–8: register() tests
 // ---------------------------------------------------------------------------
 
-describe('SyrinCore.register()', () => {
+describe('SyrinSDKCore.register()', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {

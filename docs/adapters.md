@@ -9,28 +9,56 @@ supported frameworks, and integration patterns for each adapter.
 
 Syrin separates instrumentation into two tiers:
 
-**Tier 1 — Provider Adapters (automatic)**
+### Tier 1 — Provider Adapters
 
 Intercept raw LLM API calls and emit `LLM_CALL` events with full telemetry.
-Installed automatically by `init()`.
+Auto-installed when the SDK detects the corresponding library in your process.
 
-| Adapter | Package | Install |
-|---|---|---|
-| `OpenAIAdapter` | `openai` | Always auto-installed |
-| `AnthropicAdapter` | `@anthropic-ai/sdk` | Auto-installed if package is present |
+| Adapter | Library | Auto-detected when |
+| --- | --- | --- |
+| `OpenAIAdapter` | `openai` | `openai` is imported anywhere in the process |
+| `AnthropicAdapter` | `@anthropic-ai/sdk` | `@anthropic-ai/sdk` is imported |
 
-**Tier 2 — Framework Adapters (opt-in)**
+### Tier 2 — Framework Adapters
 
 Instrument higher-level frameworks (orchestration graphs, chains, agents).
 Emit framework-specific event types that complement Tier 1 `LLM_CALL` events.
-Must be passed in the `adapters` array when calling `init()`.
+Also auto-installed when the SDK detects the corresponding library in your process.
 
-| Adapter | Package | Event types |
-|---|---|---|
+| Adapter | Library | Events emitted |
+| --- | --- | --- |
 | `LangGraphAdapter` | `@langchain/langgraph` | `GRAPH_EXECUTION`, `NODE_EXECUTION`, `HITL_INTERRUPT` |
-| `LangChainAdapter` | `@langchain/core` | `CHAIN_EXECUTION` |
+| `LangChainAdapter` | `langchain` / `@langchain/core` | `CHAIN_EXECUTION` |
 | `MastraAdapter` | `@mastra/core` | `LLM_CALL` (per agent call) |
 | `VercelAIAdapter` | `ai` | `LLM_CALL` (per function call) |
+
+---
+
+## Auto-Detection
+
+The SDK uses a two-phase detection system so you never need to pass adapters manually.
+
+**Phase 1 — Libraries loaded before `init()`:** on startup, the SDK scans `require.cache`
+for any watched library. If found, the matching adapter is installed immediately.
+
+**Phase 2 — Libraries loaded after `init()`:** the SDK installs a `Module._load` hook.
+When any watched library is first `require()`d after `init()` returns, the adapter is
+installed at that point.
+
+The hook is removed cleanly when `shutdown()` is called.
+
+Detection is **usage-based, not install-based**: having `@langchain/langgraph` in
+`node_modules` does nothing. Actually importing it triggers the adapter.
+
+When `debug: true`, the SDK logs each auto-installed adapter:
+
+```text
+[syrin] Auto-installed OpenAIAdapter (detected in require.cache)
+[syrin] Auto-installed LangGraphAdapter (detected via Module._load hook)
+```
+
+> **ESM note:** Auto-detection works for CJS modules (what most frameworks ship).
+> For pure ESM-only packages, use the explicit `adapters: [...]` option as a fallback.
 
 ---
 
@@ -40,7 +68,7 @@ Must be passed in the `adapters` array when calling `init()`.
 # Core SDK
 npm install @syrin/sdk openai
 
-# Anthropic (auto-detected by init())
+# Anthropic (auto-detected when imported)
 npm install @anthropic-ai/sdk
 
 # LangGraph
@@ -60,11 +88,11 @@ npm install ai @ai-sdk/openai zod
 
 ## Tier 1: OpenAI Adapter
 
-Installed automatically. No configuration needed.
+Auto-installed when `openai` is detected. No configuration needed.
 
 ```typescript
 import { init } from "@syrin/sdk";
-import OpenAI from "openai";
+import OpenAI from "openai"; // SDK detects this import
 
 await init({ apiKey: "syrin_..." });
 
@@ -79,7 +107,7 @@ const response = await client.chat.completions.create({
 **Emits per call:**
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `event_type` | `LLM_CALL` |
 | `model` | Requested model |
 | `provider` | `openai` |
@@ -96,14 +124,13 @@ const response = await client.chat.completions.create({
 
 ## Tier 1: Anthropic Adapter
 
-Installed automatically by `init()` when `@anthropic-ai/sdk` is available.
-No extra configuration required.
+Auto-installed when `@anthropic-ai/sdk` is detected. No extra configuration required.
 
 ```typescript
 import { init } from "@syrin/sdk";
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic from "@anthropic-ai/sdk"; // SDK detects this import
 
-await init({ apiKey: "syrin_..." });
+await init({ apiKey: "syrin_..." }); // AnthropicAdapter auto-installs
 
 const client = new Anthropic();
 // Automatically instrumented
@@ -117,7 +144,7 @@ const response = await client.messages.create({
 **Anthropic-specific differences from OpenAI:**
 
 | Field | OpenAI | Anthropic |
-|---|---|---|
+| --- | --- | --- |
 | Usage | `prompt_tokens` / `completion_tokens` | `input_tokens` / `output_tokens` |
 | Stop signal | `finish_reason` | `stop_reason` |
 | Tool definitions | `tools[i].function.parameters` | `tools[i].input_schema` |
@@ -149,21 +176,18 @@ event reflects this.
 
 ## Tier 2: LangGraph Adapter
 
-Instruments `@langchain/langgraph` graphs. Patches:
+Auto-installed when `@langchain/langgraph` is detected. Patches:
 
 - `StateGraph.prototype.addNode` — wraps each node function to emit `NODE_EXECUTION`
 - `CompiledGraph.prototype.invoke` / `ainvoke` — wraps graph runs to emit `GRAPH_EXECUTION`
 - `interrupt()` — emits `HITL_INTERRUPT` when a graph pauses for human review
 
 ```typescript
-import { init, LangGraphAdapter } from "@syrin/sdk";
-import { StateGraph, Annotation, END, START } from "@langchain/langgraph";
+import { init } from "@syrin/sdk";
+import { StateGraph, Annotation, END, START } from "@langchain/langgraph"; // auto-detected
 import { ChatOpenAI } from "@langchain/openai";
 
-await init({
-  apiKey: "syrin_...",
-  adapters: [new LangGraphAdapter()],
-});
+await init({ apiKey: "syrin_..." }); // LangGraphAdapter auto-installs
 
 const GraphState = Annotation.Root({
   question: Annotation<string>({ reducer: (_p, n) => n, default: () => "" }),
@@ -190,7 +214,7 @@ console.log(result.answer);
 `GRAPH_EXECUTION` — emitted once per `invoke()` / `ainvoke()` call:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `event_type` | `GRAPH_EXECUTION` |
 | `run_id` | Unique run identifier (`lgrun_...`) |
 | `graph_id` | Graph name |
@@ -205,7 +229,7 @@ console.log(result.answer);
 `NODE_EXECUTION` — emitted once per node invocation:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `event_type` | `NODE_EXECUTION` |
 | `node_name` | The node's label in the graph |
 | `graph_run_id` | Parent graph run identifier |
@@ -217,7 +241,7 @@ console.log(result.answer);
 `HITL_INTERRUPT` — emitted when `interrupt()` is called inside a node:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `event_type` | `HITL_INTERRUPT` |
 | `graph_run_id` | Parent graph run identifier |
 | `interrupt_value` | Value passed to `interrupt()` |
@@ -228,7 +252,7 @@ The LangGraph adapter reads the `langgraph` section from the ConfigStore and inj
 values into the `config` argument of each `invoke()` call transparently.
 
 | ConfigStore field | Injected as |
-|---|---|
+| --- | --- |
 | `langgraph.recursion_limit` | `config.recursionLimit` |
 | `langgraph.interrupt_before` | `config.interruptBefore` |
 | `langgraph.interrupt_after` | `config.interruptAfter` |
@@ -243,8 +267,10 @@ values into the `config` argument of each `invoke()` call transparently.
 
 ## Tier 2: LangChain Adapter
 
-Instruments LangChain.js LCEL chains without global monkey-patching.
-Two integration modes:
+Auto-installed when `langchain` or `@langchain/core` is detected. Instruments LangChain.js
+LCEL chains without global monkey-patching.
+
+Two integration modes are available:
 
 ### Mode 1: callbackHandler() — manual injection
 
@@ -254,12 +280,10 @@ import { ChatPromptTemplate } from "@langchain/core/prompts";
 import { ChatOpenAI } from "@langchain/openai";
 import { StringOutputParser } from "@langchain/core/output_parsers";
 
+// LangChain is auto-detected; grab the adapter instance for callback access
 const adapter = new LangChainAdapter();
 
-await init({
-  apiKey: "syrin_...",
-  adapters: [adapter],
-});
+await init({ apiKey: "syrin_...", adapters: [adapter] });
 
 const chain = ChatPromptTemplate.fromMessages([
   ["system", "Answer concisely."],
@@ -292,7 +316,7 @@ const result = await wrappedChain.invoke({ question: "What is TypeScript?" });
 `CHAIN_EXECUTION` — emitted once per `invoke()` / `ainvoke()` call:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `event_type` | `CHAIN_EXECUTION` |
 | `chainRunId` | Unique run identifier |
 | `chainName` | Chain label (from `callbackHandler()` or `wrap()`) |
@@ -300,7 +324,7 @@ const result = await wrappedChain.invoke({ question: "What is TypeScript?" });
 | `error` | Error message if chain failed |
 | `framework` | `langchain` |
 
-LLM_CALL events are emitted separately by the Tier 1 OpenAI or Anthropic adapter,
+`LLM_CALL` events are emitted separately by the Tier 1 OpenAI or Anthropic adapter,
 enriched with `framework: "langchain"` via `FrameworkContext`.
 
 ---
@@ -330,64 +354,18 @@ and `sessionId` — without any changes to user code.
 
 ---
 
-## Writing a Custom Adapter
-
-Extend `BaseFrameworkAdapter` from `"@syrin/sdk"`:
-
-```typescript
-import { BaseFrameworkAdapter } from "@syrin/sdk";
-import type { ISyrinCore } from "@syrin/sdk";
-
-export class MyFrameworkAdapter extends BaseFrameworkAdapter {
-  readonly name = "my-framework";
-
-  protected async _doInstall(core: ISyrinCore): Promise<void> {
-    // Patch your framework here
-    // Use this.emitEvent({ event_type: "MY_EVENT", ... }) to emit events
-    // Use this.getConfig("llm") to read remote config
-  }
-
-  protected _doUninstall(): void {
-    // Restore any patches
-  }
-}
-
-// Register at init time
-await init({
-  apiKey: "syrin_...",
-  adapters: [new MyFrameworkAdapter()],
-});
-```
-
-`BaseFrameworkAdapter` provides:
-
-| Member | Description |
-|---|---|
-| `this.core` | `ISyrinCore` instance |
-| `this.emitEvent(event)` | Queue an event for the next `/ingest` flush |
-| `this.getConfig(namespace)` | Read the current ConfigStore section |
-| `this.sessionId` | Current session ID |
-| `this.agentId` | Agent label from init options |
-
----
-
 ## Tier 2: Mastra Adapter
 
-Instruments `@mastra/core` `Agent` instances. Patches:
+Auto-installed when `@mastra/core` is detected. Patches:
 
 - `Agent.prototype.generate` — wraps each `generate()` call to emit `LLM_CALL` on completion
 - `Agent.prototype.stream`   — wraps each `stream()` call to emit `LLM_CALL` after the stream is consumed
 
 ```typescript
-import { init, MastraAdapter } from "@syrin/sdk";
-import { Agent } from "@mastra/core";
+import { init } from "@syrin/sdk";
+import { Agent } from "@mastra/core"; // auto-detected
 
-const adapter = new MastraAdapter();
-
-await init({
-  apiKey: "syrin_...",
-  adapters: [adapter],
-});
+await init({ apiKey: "syrin_..." }); // MastraAdapter auto-installs
 
 const agent = new Agent({
   name: "my-agent",
@@ -408,7 +386,7 @@ for await (const chunk of agent.stream("What is semantic search?")) {
 **FrameworkContext per call:**
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | `framework` | `mastra` |
 | `agentName` | `agent.name` (from `new Agent({ name })`) |
 | `runId` | Generated `mrun_...` per call |
@@ -418,7 +396,7 @@ for await (const chunk of agent.stream("What is semantic search?")) {
 `LLM_CALL` — emitted once per `generate()` or `stream()` call:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `event_type` | `LLM_CALL` |
 | `framework` | `mastra` |
 | `agent_name` | Agent name from constructor |
@@ -431,40 +409,32 @@ for await (const chunk of agent.stream("What is semantic search?")) {
 
 **Remote config injection:**
 
-The adapter reads `getConfig("llm")` before each call and merges matching fields into the call options transparently.
+The adapter reads `getConfig("llm")` before each call and merges matching fields into the
+call options transparently.
 
 | ConfigStore field | Injected as |
-|---|---|
+| --- | --- |
 | `llm.temperature` | `opts.temperature` |
 | `llm.max_tokens` | `opts.max_tokens` |
 | `llm.model` | `opts.model` |
-
-**Model format:**
-
-Mastra agents expose `agent.model` as an object with `{ modelId?, provider?, name? }`. The adapter extracts `modelId` (or falls back to `name`) for the `model` field and `provider` for the `provider` field in the emitted event.
 
 ---
 
 ## Tier 2: Vercel AI SDK Adapter
 
-Instruments the `ai` (Vercel AI SDK) standalone functions. Patches the module-level exports:
+Auto-installed when the `ai` package is detected. Patches the module-level exports:
 
 - `generateText`   — emits `LLM_CALL` after completion
 - `streamText`     — emits `LLM_CALL` after the `usage` promise settles
 - `generateObject` — emits `LLM_CALL` with `operation="generateObject"`
 
 ```typescript
-import { init, VercelAIAdapter } from "@syrin/sdk";
-import { generateText, streamText, generateObject } from "ai";
+import { init } from "@syrin/sdk";
+import { generateText, streamText, generateObject } from "ai"; // auto-detected
 import { openai } from "@ai-sdk/openai";
 import { z } from "zod";
 
-const adapter = new VercelAIAdapter();
-
-await init({
-  apiKey: "syrin_...",
-  adapters: [adapter],
-});
+await init({ apiKey: "syrin_..." }); // VercelAIAdapter auto-installs
 
 // generateText — LLM_CALL with operation=generateText
 const { text, usage } = await generateText({
@@ -493,7 +463,7 @@ console.log(object);
 **FrameworkContext per call:**
 
 | Field | Value |
-|---|---|
+| --- | --- |
 | `framework` | `vercel-ai` |
 | `runId` | Generated `vairun_...` per call |
 
@@ -502,7 +472,7 @@ console.log(object);
 `LLM_CALL` — emitted once per `generateText`, `streamText`, or `generateObject` call:
 
 | Field | Description |
-|---|---|
+| --- | --- |
 | `event_type` | `LLM_CALL` |
 | `framework` | `vercel-ai` |
 | `operation` | `generateText` \| `streamText` \| `generateObject` |
@@ -515,17 +485,74 @@ console.log(object);
 
 **Remote config injection:**
 
-The adapter reads `getConfig("llm")` before each call and merges matching fields into the function options transparently.
-
 | ConfigStore field | Injected as |
-|---|---|
+| --- | --- |
 | `llm.temperature` | `opts.temperature` |
 | `llm.max_tokens` | `opts.max_tokens` |
 | `llm.model` | `opts.model` |
 
-**`generateObject` note:**
+The `operation` field in the emitted `LLM_CALL` event is set to `"generateObject"` for
+structured-output calls so you can distinguish them from plain text calls in your dashboard.
 
-The `operation` field in the emitted `LLM_CALL` event is set to `"generateObject"` so you can distinguish structured-output calls from plain text calls in your Syrin dashboard.
+---
+
+## Explicit Adapters (ESM fallback / custom ordering)
+
+If you need explicit control — for pure ESM packages or specific adapter ordering — pass
+adapters directly to `init()`. User-provided adapters take precedence over auto-detection.
+
+```typescript
+import { init, LangGraphAdapter, LangChainAdapter } from "@syrin/sdk";
+
+await init({
+  apiKey: "syrin_...",
+  adapters: [new LangGraphAdapter(), new LangChainAdapter()],
+});
+```
+
+This is also the right pattern when you need the adapter instance itself (e.g., to call
+`langChainAdapter.wrap(chain)` or `langChainAdapter.callbackHandler()`).
+
+---
+
+## Writing a Custom Adapter
+
+Extend `SyrinSDKBaseFrameworkAdapter` from `"@syrin/sdk"`:
+
+```typescript
+import { SyrinSDKBaseFrameworkAdapter } from "@syrin/sdk";
+import type { ISyrinCore } from "@syrin/sdk";
+
+export class MyFrameworkAdapter extends SyrinSDKBaseFrameworkAdapter {
+  readonly name = "my-framework";
+
+  protected async _doInstall(core: ISyrinCore): Promise<void> {
+    // Patch your framework here
+    // Use this.emitEvent({ event_type: "MY_EVENT", ... }) to emit events
+    // Use this.getConfig("llm") to read remote config
+  }
+
+  protected _doUninstall(): void {
+    // Restore any patches
+  }
+}
+
+// Register at init time (explicit adapter)
+await init({
+  apiKey: "syrin_...",
+  adapters: [new MyFrameworkAdapter()],
+});
+```
+
+`SyrinSDKBaseFrameworkAdapter` provides:
+
+| Member | Description |
+| --- | --- |
+| `this.core` | `ISyrinCore` instance |
+| `this.emitEvent(event)` | Queue an event for the next `/ingest` flush |
+| `this.getConfig(namespace)` | Read the current ConfigStore section |
+| `this.sessionId` | Current session ID |
+| `this.agentId` | Agent label from init options |
 
 ---
 

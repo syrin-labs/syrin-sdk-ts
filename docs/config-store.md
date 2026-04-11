@@ -12,12 +12,22 @@ The Syrin config system has three layers:
 
 | Layer | What it does |
 |---|---|
-| `ConfigStore` | Stores current values per namespace with schema validation |
+| `ConfigStore` | Stores current values per namespace with schema validation, version history, audit log, and allowlist/blocklist |
 | `TunableRegistry` | Links `ConfigStore` values to live object properties |
 | `ConfigGuard` | Validates + applies updates safely; manages anchors and circuit breaker |
 
 These layers work together: the backend sends `config_updates` → ConfigStore stores
 them → TunableRegistry propagates to live objects → ConfigGuard protects against bad values.
+
+**Priority order (highest to lowest):**
+1. Governance override — set by backend `governance.actions`; immutable by local code
+2. Anchors — keys locked via `store.anchor()`; remote config cannot change them
+3. Blocklist — keys blocked from remote; `store.setBlocklist()`
+4. Allowlist — only these keys accepted from remote; `store.setAllowlist()`
+5. Schema validation
+6. Remote config — from `/ingest` response `config_updates`
+7. Local override — set via `configure()` or `@tunable`
+8. SDK defaults
 
 ---
 
@@ -68,18 +78,106 @@ store.set("vector_search", "topK", 20);
 ### applyUpdates()
 
 Apply a flat map of `"namespace.field"` → value updates with validation.
-Returns rejected fields with error reasons.
+Returns rejected fields with error reasons. Pass a `source` string to track
+where the update originated — it is recorded in the audit log.
 
 ```typescript
+// Apply from remote config (default source: "remote")
 const rejected = store.applyUpdates({
   "llm.temperature": 0.3,
   "llm.max_tokens": 2048,
-  "llm.temperature": 9.9,  // invalid — will be rejected
-});
-// rejected: { "llm.temperature": "temperature must be <= 2.0, got 9.9" }
+}, "remote");
+
+// Apply from local code
+store.applyUpdates({ "llm.temperature": 0.5 }, "local");
+
+// Invalid value — will be rejected
+const rejected2 = store.applyUpdates({ "llm.temperature": 9.9 });
+// rejected2: { "llm.temperature": "temperature must be <= 2.0, got 9.9" }
 ```
 
 A `null` value resets the field to its declared default.
+
+### Allowlist and Blocklist
+
+Control which keys are accepted from remote config updates per section.
+
+```typescript
+// Only temperature and max_tokens can be updated remotely for "llm"
+store.setAllowlist("llm", new Set(["temperature", "max_tokens"]));
+
+// The "model" key will never be accepted from remote for "llm"
+store.setBlocklist("llm", new Set(["model"]));
+```
+
+Allowlist and blocklist apply only to updates arriving via `applyUpdates()` with
+source `"remote"`. Direct `set()` calls are not filtered.
+
+### Anchors
+
+Lock specific keys so they cannot be changed by remote config. Anchored values
+are immutable until explicitly released with `unanchor()`.
+
+```typescript
+// Lock temperature at 0.7 — remote config cannot change it
+store.anchor("llm", "temperature", 0.7);
+
+// Remote config update for temperature is silently ignored
+store.applyUpdates({ "llm.temperature": 0.1 }, "remote"); // no effect
+
+// Release the anchor
+store.unanchor("llm", "temperature");
+```
+
+### Version History
+
+Every successful `applyUpdates()` call that changes at least one field creates a
+new `ConfigVersion` entry, retrievable via `getHistory()`.
+
+```typescript
+import type { ConfigVersion } from "@syrin/sdk";
+
+const history: ConfigVersion[] = store.getHistory("llm");
+// [
+//   {
+//     versionId: "ver_abc123",
+//     timestamp: "2026-04-11T10:00:00.000Z",
+//     section: "llm",
+//     changedKeys: ["temperature"],
+//     valuesSnapshot: { temperature: 0.3, max_tokens: null, ... },
+//     source: "remote"
+//   },
+//   ...
+// ]
+
+// Roll back a section to a specific version
+store.rollback("llm", "ver_abc123");
+```
+
+### Audit Log
+
+Every accepted and rejected update is recorded in the audit log.
+
+```typescript
+import type { AuditEntry } from "@syrin/sdk";
+
+const log: AuditEntry[] = store.getAuditLog();
+// [
+//   {
+//     timestamp: "2026-04-11T10:00:00.000Z",
+//     section: "llm",
+//     key: "temperature",
+//     oldValue: 0.7,
+//     newValue: 0.3,
+//     source: "remote",
+//     accepted: true,
+//     rejectionReason: null
+//   },
+//   ...
+// ]
+
+store.clearAuditLog();
+```
 
 ### snapshot() / restoreSnapshot()
 
@@ -477,10 +575,49 @@ console.log(fuse.state);          // "CLOSED"
 
 ---
 
+## Exported Types
+
+```typescript
+import type {
+  ConfigVersion,   // { versionId, timestamp, section, changedKeys, valuesSnapshot, source }
+  AuditEntry,      // { timestamp, section, key, oldValue, newValue, source, accepted, rejectionReason }
+  ConfigUpdate,    // Typed object for sdk.configure() — keys: temperature, max_tokens, model, etc.
+  FieldSchema,     // Schema definition for registerSection()
+} from "@syrin/sdk";
+```
+
+### ConfigUpdate
+
+`ConfigUpdate` is the typed interface accepted by `sdk.configure()`.
+
+```typescript
+import type { ConfigUpdate } from "@syrin/sdk";
+
+const update: ConfigUpdate = {
+  temperature: 0.3,        // number | null
+  max_tokens: 1000,        // number | null
+  model: "gpt-4o-mini",   // string | null
+  system_prompt: "...",    // string | null
+  top_p: 0.9,              // number | null
+  frequency_penalty: 0.1,  // number | null
+  presence_penalty: 0.2,   // number | null
+};
+
+sdk.configure(update);
+```
+
+Setting any key to `null` clears that override and reverts to the remote config value
+or call-site default.
+
+---
+
 ## Complete Example
 
 ```typescript
-import { init, shutdown, tunable, TunableField, getTune, globalRegistry, ConfigStore } from "@syrin/sdk";
+import {
+  init, shutdown, tunable, TunableField, getTune, globalRegistry, ConfigStore,
+} from "@syrin/sdk";
+import type { ConfigUpdate, ConfigVersion, AuditEntry } from "@syrin/sdk";
 import { ConfigGuard } from "@syrin/sdk/config-guard";
 
 await init({ apiKey: "syrin_...", offline: true });
@@ -500,8 +637,18 @@ console.log(processor.batchSize);   // 50
 
 console.log(getTune("processor"));  // { batchSize: 50, temperature: 0.7 }
 
-// --- ConfigGuard ---
+// --- ConfigStore with allowlist + audit log ---
 const store = new ConfigStore();
+store.setAllowlist("llm", new Set(["temperature", "max_tokens"]));
+store.anchor("llm", "temperature", 0.7);
+
+store.applyUpdates({ "llm.temperature": 0.1 }, "remote"); // ignored — anchored
+store.applyUpdates({ "llm.max_tokens": 2000 }, "remote"); // accepted
+
+const history: ConfigVersion[] = store.getHistory("llm");
+const log: AuditEntry[] = store.getAuditLog();
+
+// --- ConfigGuard ---
 const guard = new ConfigGuard(store, globalRegistry);
 
 const anchor = guard.takeAnchor("before risky");

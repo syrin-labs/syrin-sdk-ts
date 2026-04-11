@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import type { SyrinConfig, CallInfo } from '@/types';
+import type { SyrinSDKConfig, CallInfo } from '@/types';
 import { OTelBridge, BaggageSpanProcessor, recordMetrics } from '@/observability/otel';
 
 // We use OTel's in-memory exporter directly
@@ -16,7 +16,7 @@ import {
 } from '@opentelemetry/sdk-trace-node';
 import { trace, context } from '@opentelemetry/api';
 
-function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
+function makeConfig(overrides: Partial<SyrinSDKConfig> = {}): SyrinSDKConfig {
   return {
     apiKey: 'syrin_test',
     backendUrl: 'http://localhost:4318',

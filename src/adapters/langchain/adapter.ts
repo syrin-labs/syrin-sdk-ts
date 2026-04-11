@@ -5,7 +5,7 @@
 import { generateId, nowIso } from '@/utils/helpers.js';
 import { withFrameworkContext } from '@/agent/framework-context.js';
 import type { FrameworkContext } from '@/agent/framework-context.js';
-import { BaseFrameworkAdapter } from '@/adapters/types.js';
+import { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types.js';
 import type { ISyrinCore, SchemaField } from '@/adapters/types.js';
 import { SyrinLangChainCallback } from './callback.js';
 import { patchBaseChatModel, unpatchBaseChatModel } from './patch-llm.js';
@@ -17,7 +17,7 @@ interface RunnableLike {
   [key: string]: unknown;
 }
 
-export class LangChainAdapter extends BaseFrameworkAdapter {
+export class LangChainAdapter extends SyrinSDKBaseFrameworkAdapter {
   readonly name = 'langchain';
 
   override configSchema(): Record<string, SchemaField[]> {

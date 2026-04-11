@@ -11,7 +11,7 @@
 
 import type { Span, Tracer } from '@opentelemetry/api';
 import type { NodeTracerProvider, SpanProcessor } from '@opentelemetry/sdk-trace-node';
-import type { SyrinConfig, CallInfo } from '@/types.js';
+import type { SyrinSDKConfig, CallInfo } from '@/types.js';
 
 // ---------------------------------------------------------------------------
 // BaggageSpanProcessor
@@ -133,12 +133,12 @@ export function recordMetrics(callInfo: CallInfo): void {
 // ---------------------------------------------------------------------------
 
 export class OTelBridge {
-  private config: SyrinConfig;
+  private config: SyrinSDKConfig;
   private tracer: Tracer | null = null;
   private provider: NodeTracerProvider | null = null;
   private initialized = false;
 
-  constructor(config: SyrinConfig) {
+  constructor(config: SyrinSDKConfig) {
     this.config = config;
   }
 
@@ -200,7 +200,7 @@ export class OTelBridge {
     let resource: ConstructorParameters<typeof NodeTracerProvider>[0] extends { resource?: infer R } ? R : never;
     if (otelResources) {
       resource = new otelResources.Resource({
-        [otelResources.SEMRESATTRS_SERVICE_NAME ?? 'service.name']: serviceName,
+        [(otelResources as unknown as Record<string, string | undefined>)['SEMRESATTRS_SERVICE_NAME'] ?? (otelResources as unknown as Record<string, string | undefined>)['ATTR_SERVICE_NAME'] ?? 'service.name']: serviceName,
         'syrin.sdk.language': 'typescript',
         'syrin.sdk.version': '0.1.0',
       }) as typeof resource;
@@ -226,7 +226,7 @@ export class OTelBridge {
     }
 
     // Add BaggageSpanProcessor so W3C baggage flows into spans
-    provider.addSpanProcessor(new BaggageSpanProcessor() as SpanProcessor);
+    provider.addSpanProcessor(new BaggageSpanProcessor() as unknown as SpanProcessor);
 
     provider.register();
     this.provider = provider;

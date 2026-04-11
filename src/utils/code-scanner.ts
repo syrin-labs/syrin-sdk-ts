@@ -83,13 +83,22 @@ export function inferFieldType(value: unknown): SchemaField['type'] {
 // Internal — call-stack parsing
 // ---------------------------------------------------------------------------
 
-const _SDK_MARKERS = [
-  'node_modules',
-  '/syrin-sdk/',
-  '/@syrin/',
-  '/dist/index.',
-  '/dist/chunk-',
-  'node:internal',
+// Compute the SDK package root dynamically so that SDK-internal files are
+// reliably filtered regardless of installation path or whether we're running
+// from source (tsx dev) or compiled dist (Node.js production).
+//
+// code-scanner lives at:
+//   dev:  <sdk-root>/src/utils/code-scanner.ts  → dirname ../.. = <sdk-root>
+//   dist: <sdk-root>/dist/utils/code-scanner.js → dirname ../.. = <sdk-root>
+const _MODULE_FILE = fileURLToPath(import.meta.url);
+const _SDK_ROOT = path.resolve(path.dirname(_MODULE_FILE), '..', '..');
+
+const _SDK_MARKERS: string[] = [
+  'node_modules',                              // production npm install
+  'node:internal',                             // Node.js internals
+  path.join(_SDK_ROOT, 'src') + path.sep,      // dev: SDK source files
+  path.join(_SDK_ROOT, 'dist') + path.sep,     // dev/prod: SDK compiled files
+  '/@syrin/',                                  // scoped npm package fallback
 ];
 
 /** @internal */

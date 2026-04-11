@@ -2,18 +2,21 @@
 
 **AI agent observability and remote configuration for TypeScript/Node.js.**
 
-Syrin automatically instruments your OpenAI calls with zero changes to your existing code.
+Syrin automatically instruments your AI library calls with zero changes to your existing code.
+Just import your AI libraries, call `init()`, and every LLM call is fully observed.
 
 ## Features
 
-- **Zero-friction setup** — two lines to instrument everything
-- **Automatic instrumentation** — patches OpenAI SDK transparently
+- **Zero-friction setup** — one `await init()` call instruments everything
+- **Auto-detection** — SDK detects which AI libraries you actually use and instruments them automatically
+- **Multi-provider** — OpenAI, Anthropic, LangChain, LangGraph, Mastra, Vercel AI SDK
 - **OpenTelemetry native** — emits `gen_ai.*` standard spans + `syrin.*` extensions
 - **Remote configuration** — backend can push temperature/max_tokens/model overrides live
 - **Session scoping** — per-user/per-request session isolation via `AsyncLocalStorage`
 - **Streaming support** — streaming completions fully instrumented
 - **Batched event delivery** — efficient HTTP batching with retry and backpressure
 - **Cost tracking** — per-call and cumulative cost estimation for 20+ models
+- **Governance** — backend can stop, alert, inject messages, or trigger checkpoints
 
 ## Quick Start
 
@@ -23,12 +26,12 @@ npm install @syrin/sdk openai
 
 ```typescript
 import { init } from "@syrin/sdk";
-
-// That's it — one line
-init({ apiKey: "syrin_..." });
-
-// All your existing OpenAI code is now instrumented
 import OpenAI from "openai";
+
+// One line — SDK detects the OpenAI import and instruments it automatically
+await init({ apiKey: "syrin_..." });
+
+// All your existing code works unchanged
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const response = await openai.chat.completions.create({
@@ -37,62 +40,125 @@ const response = await openai.chat.completions.create({
 });
 ```
 
+That's it. No adapter lists, no extra configuration. The SDK sees that `openai` is loaded in
+your process and instruments it automatically.
+
+## How Auto-Detection Works
+
+When you call `await init()`, the SDK:
+
+1. Scans `require.cache` for any AI libraries already loaded in the process.
+2. Installs a `Module._load` hook to detect libraries loaded after `init()`.
+3. For each detected library, auto-installs the matching adapter.
+4. Removes the hook cleanly on `shutdown()`.
+
+Detection is **usage-based, not install-based**: having `langchain` installed as a package
+does not trigger its adapter — actually importing/requiring it does.
+
+**Watched libraries:** `openai`, `@anthropic-ai/sdk`, `langchain`, `@langchain/langgraph`,
+`@mastra/core`, `ai` (Vercel AI SDK)
+
+> **Note:** Auto-detection works for CJS modules (what most frameworks ship). For pure
+> ESM-only packages, use the explicit `adapters: [...]` option as a fallback.
+
+When `debug: true` is set, the SDK logs which adapters were auto-installed.
+
 ## Documentation
 
 - [Quickstart Guide](docs/quickstart.md)
+- [Framework Adapters](docs/adapters.md)
+- [ConfigStore, Tunable, ConfigGuard](docs/config-store.md)
 - [OTel Schema Reference](docs/otel-reference.md)
+- [Backend API Reference](docs/backend-api.md)
 
 ## API Reference
 
-### `init(options): SyrinSDKInstance`
+### `init(options): Promise<SyrinSDKInstance>`
 
-Initialize the SDK and patch the OpenAI SDK.
+Initialize the SDK. Returns a `SyrinSDKInstance` with methods for config, checkpoints, and lifecycle.
 
 ```typescript
-const sdk = init({
+const sdk = await init({
   apiKey: "syrin_...",           // Required (or SYRIN_API_KEY env var)
-  agentId: "my-agent",           // Optional
-  sessionId: "ses_custom",       // Optional: override auto-generated session ID
-  backendUrl: "https://api.syrin.ai",
-  otelExporter: "none",          // "none" | "console" | "otlp"
-  otelEndpoint: "http://localhost:4318",
-  debug: false,
-  captureContent: false,
-  offline: false,
+  agentId: "my-agent",           // Optional — max 128 chars, alphanumeric + -_.@:
+  sessionId: "ses_custom",       // Optional — auto-generated if not set
+  backendUrl: "https://api.syrin.dev",
+  debug: false,                  // Logs auto-detected adapters and SDK activity
+  captureContent: false,         // Include prompt/response text in spans
+  offline: false,                // Disable all HTTP (local OTel only)
   batchIntervalMs: 5000,
   batchSize: 50,
+  otelExporter: "none",          // "none" | "console" | "otlp"
+  otelEndpoint: "http://localhost:4318",
+
+  // Optional: explicit adapters (for ESM packages or custom ordering)
+  // adapters: [new LangGraphAdapter()],
 });
 ```
+
+> `agentId` and `sessionId` are validated: max 128 characters, alphanumeric plus `-_.@:` only.
+> A clear error is thrown if these constraints are violated.
 
 ### `shutdown(): Promise<void>`
 
-Flush remaining events and clean up.
+Flush remaining events, remove the `Module._load` hook, and clean up.
 
 ```typescript
 await shutdown();
+// or: await sdk.shutdown();
 ```
 
-### `withSession<T>(sessionId: string, fn: () => Promise<T>): Promise<T>`
+Always call this before process exit.
 
-Scope all OpenAI calls within `fn` to a specific session.
+### `configure(updates: ConfigUpdate): void`
+
+Apply a local config override. Takes priority over remote config.
+Valid keys: `temperature`, `max_tokens`, `model`, `system_prompt`, `top_p`,
+`frequency_penalty`, `presence_penalty`. Setting any key to `null` clears it.
 
 ```typescript
-await withSession("user_123", async () => {
-  const response = await openai.chat.completions.create({ ... });
+import type { ConfigUpdate } from "@syrin/sdk";
+
+sdk.configure({ temperature: 0.2, max_tokens: 1000 });
+sdk.configure({ temperature: null }); // revert to remote config or call default
+```
+
+### `createCheckpoint(messages: MessageParam[], label?: string)`
+
+Save conversation state. `MessageParam` has `role: 'user' | 'assistant' | 'system' | 'tool'`
+plus typed content fields.
+
+```typescript
+import type { MessageParam } from "@syrin/sdk";
+
+const messages: MessageParam[] = [{ role: "user", content: "Hello" }];
+const cp = sdk.createCheckpoint(messages, "before-risky-op");
+```
+
+## Explicit Adapters (ESM fallback / custom ordering)
+
+For pure ESM packages or when you need explicit control over adapter ordering, pass adapters
+directly. User-provided adapters take precedence over auto-detection.
+
+```typescript
+import { init, LangGraphAdapter, LangChainAdapter } from "@syrin/sdk";
+
+await init({
+  apiKey: "syrin_...",
+  adapters: [new LangGraphAdapter(), new LangChainAdapter()],
 });
 ```
 
-### `getSessionId(): string`
-
-Get the current active session ID.
-
-### `SyrinSDKInstance`
+## Exported Types
 
 ```typescript
-sdk.sessionId    // Current session ID
-sdk.config       // Active configuration
-sdk.flush()      // Manually flush pending events
-sdk.shutdown()   // Flush and tear down
+import type {
+  ConfigUpdate,      // Typed object for configure()
+  MessageParam,      // Typed message for createCheckpoint()
+  ConfigVersion,     // { versionId, timestamp, section, changedKeys, valuesSnapshot, source }
+  AuditEntry,        // { timestamp, section, key, oldValue, newValue, source, accepted, rejectionReason }
+  SyrinEvent,        // Discriminated union of all 21 event interfaces
+} from "@syrin/sdk";
 ```
 
 ## Environment Variables
@@ -102,13 +168,13 @@ sdk.shutdown()   // Flush and tear down
 | `SYRIN_API_KEY` | — | Your Syrin API key |
 | `SYRIN_AGENT_ID` | — | Agent identifier |
 | `SYRIN_SESSION_ID` | — | Override session ID |
-| `SYRIN_BACKEND_URL` | `https://api.syrin.ai` | Backend URL |
+| `SYRIN_BACKEND_URL` | `https://api.syrin.dev` | Backend URL |
 | `SYRIN_OTEL_EXPORTER` | `none` | `none`/`console`/`otlp` |
 | `SYRIN_OTEL_ENDPOINT` | `http://localhost:4318` | OTLP endpoint |
-| `SYRIN_DEBUG` | `false` | Verbose logging |
-| `SYRIN_CAPTURE_CONTENT` | `false` | Capture prompts in spans |
-| `SYRIN_OFFLINE` | `false` | Skip HTTP calls |
-| `SYRIN_BATCH_INTERVAL_MS` | `5000` | Flush interval |
+| `SYRIN_DEBUG` | `false` | Verbose logging + adapter detection output |
+| `SYRIN_CAPTURE_CONTENT` | `false` | Capture prompts/responses in spans |
+| `SYRIN_OFFLINE` | `false` | Skip all HTTP calls |
+| `SYRIN_BATCH_INTERVAL_MS` | `5000` | Flush interval (ms) |
 | `SYRIN_BATCH_SIZE` | `50` | Events per batch |
 
 ## Mock Backend
@@ -138,6 +204,8 @@ npm run mock-backend
 | `GET` | `/events` | View all received events |
 | `POST` | `/control/config` | Queue config update for next response |
 | `DELETE` | `/control/config` | Clear pending config |
+| `POST` | `/control/governance` | Inject governance actions |
+| `DELETE` | `/control/governance` | Clear pending governance |
 | `GET` | `/health` | Health check |
 
 Inject a config update:
@@ -161,10 +229,10 @@ Built-in cost estimation for:
 
 ## Remote Configuration
 
-When Syrin's backend returns `config_updates` in the ingest response, the SDK automatically applies them to subsequent calls:
+When Syrin's backend returns `config_updates` in the ingest response, the SDK automatically
+applies them to subsequent calls:
 
 ```json
-// Backend response
 {
   "ok": true,
   "config_updates": {
@@ -188,7 +256,7 @@ The next call automatically uses `temperature: 0.3` and `max_tokens: 500` withou
 # Install dependencies
 npm install
 
-# Run tests
+# Run tests (480 tests)
 npm test
 
 # Run tests with coverage

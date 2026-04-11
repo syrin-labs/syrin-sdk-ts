@@ -243,7 +243,7 @@ export function tunable(options: TunableDecoratorOptions): ClassDecorator {
 
     // Use Reflect.construct to properly invoke ES class constructors
     // (plain `ctor.apply(this, args)` breaks for ES2022 classes)
-    function TunableWrapper(this: object, ...args: unknown[]): void {
+    function TunableWrapper(this: object, ...args: unknown[]): Record<string, unknown> {
       // Reflect.construct calls `ctor` as a constructor with `this` as the
       // new.target, which satisfies the "must be called with new" constraint.
       const instance = Reflect.construct(ctor, args, new.target ?? TunableWrapper) as Record<string, unknown>;
@@ -323,9 +323,9 @@ export function tune(options: TuneOptions): void {
           type: typeOrDef.type,
           default: typeOrDef.default ?? null,
           description: typeOrDef.description,
-          constraints: (typeOrDef.ge !== undefined || typeOrDef.le !== undefined || typeOrDef.enum !== undefined)
-            ? { ge: typeOrDef.ge, le: typeOrDef.le, enum: typeOrDef.enum }
-            : undefined,
+          ...(typeOrDef.ge !== undefined ? { ge: typeOrDef.ge } : {}),
+          ...(typeOrDef.le !== undefined ? { le: typeOrDef.le } : {}),
+          ...(typeOrDef.enum !== undefined ? { enum: typeOrDef.enum } : {}),
         };
       }
       // Read the current value from the target (supports dotted paths via apply fn)

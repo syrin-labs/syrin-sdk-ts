@@ -2,10 +2,10 @@
  * OpenAI Adapter — Adapter class
  */
 
-import type { ISyrinCore, SyrinAdapter, SchemaField } from '@/adapters/types.js';
+import type { ISyrinCore, SyrinSDKAdapter, SchemaField } from '@/adapters/types.js';
 import { patchWithModule, unpatch, isPatched, type OpenAIModule } from './patch.js';
 
-export class OpenAIAdapter implements SyrinAdapter {
+export class OpenAIAdapter implements SyrinSDKAdapter {
   readonly name = 'openai';
 
   constructor(private readonly _openaiModule?: OpenAIModule) {}

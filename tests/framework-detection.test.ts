@@ -15,13 +15,13 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { SyrinCore } from '@/core/engine';
+import { SyrinSDKCore } from '@/core/engine';
 import { OpenAIAdapter } from '@/adapters/openai/index';
 import { AnthropicAdapter } from '@/adapters/anthropic/index';
 import { LangChainAdapter } from '@/adapters/langchain/index';
 import { LangGraphAdapter } from '@/adapters/langgraph/index';
 import type { ISyrinCore } from '@/adapters/types';
-import type { SyrinConfig } from '@/types';
+import type { SyrinSDKConfig } from '@/types';
 
 vi.mock('openai', () => {
   class MockOpenAI { constructor(_?: unknown) {} }
@@ -32,8 +32,8 @@ vi.mock('@anthropic-ai/sdk', () => {
   return { default: MockAnthropic, Anthropic: MockAnthropic };
 });
 
-function makeCore(): SyrinCore {
-  const config: SyrinConfig = {
+function makeCore(): SyrinSDKCore {
+  const config: SyrinSDKConfig = {
     apiKey: 'syrin_test',
     backendUrl: 'http://localhost:4000',
     otelExporter: 'none',
@@ -66,10 +66,10 @@ function makeCore(): SyrinCore {
   const otelBridge = { recordSpan: vi.fn(), setup: vi.fn(), shutdown: vi.fn() };
   const checkpointClient = { save: vi.fn(), getById: vi.fn(), listForSession: vi.fn().mockReturnValue([]) };
 
-  return new SyrinCore(config, stub, emitter as never, otelBridge as never, checkpointClient as never);
+  return new SyrinSDKCore(config, stub, emitter as never, otelBridge as never, checkpointClient as never);
 }
 
-async function registerNoOp(adapter: { install: unknown; isInstalled: unknown; uninstall: unknown }, core: SyrinCore) {
+async function registerNoOp(adapter: { install: unknown; isInstalled: unknown; uninstall: unknown }, core: SyrinSDKCore) {
   (adapter as Record<string, unknown>)['install'] = vi.fn().mockResolvedValue(undefined);
   (adapter as Record<string, unknown>)['isInstalled'] = vi.fn().mockReturnValue(true);
   (adapter as Record<string, unknown>)['uninstall'] = vi.fn();
@@ -77,7 +77,7 @@ async function registerNoOp(adapter: { install: unknown; isInstalled: unknown; u
 }
 
 // Access the private method for testing via type assertion
-function detectFramework(core: SyrinCore): string | undefined {
+function detectFramework(core: SyrinSDKCore): string | undefined {
   return (core as unknown as { _detectFramework(): string | undefined })._detectFramework();
 }
 

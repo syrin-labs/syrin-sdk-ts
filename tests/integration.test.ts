@@ -69,7 +69,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const { Emitter } = await import('../src/observability/emitter.js');
     const { OTelBridge } = await import('../src/observability/otel.js');
     const { CheckpointClient } = await import('../src/core/checkpoint.js');
-    const { SyrinCore } = await import('../src/core/engine.js');
+    const { SyrinSDKCore } = await import('../src/core/engine.js');
     const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
 
     unpatch();
@@ -96,7 +96,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const otelBridge = new OTelBridge(config);
     otelBridge.setup();
     const checkpointClient = new CheckpointClient(config);
-    const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+    const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
 
     const openaiModule = await import('openai');
     patchWithModule(openaiModule, core);
@@ -129,7 +129,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const { Emitter } = await import('../src/observability/emitter.js');
     const { OTelBridge } = await import('../src/observability/otel.js');
     const { CheckpointClient } = await import('../src/core/checkpoint.js');
-    const { SyrinCore } = await import('../src/core/engine.js');
+    const { SyrinSDKCore } = await import('../src/core/engine.js');
     const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
     const { sessionStorage } = await import('../src/core/session.js');
 
@@ -160,7 +160,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const otelBridge = new OTelBridge(config);
     otelBridge.setup();
     const checkpointClient = new CheckpointClient(config);
-    const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+    const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
 
     const openaiModule = await import('openai');
     patchWithModule(openaiModule, core);
@@ -208,7 +208,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const { Emitter } = await import('../src/observability/emitter.js');
     const { OTelBridge } = await import('../src/observability/otel.js');
     const { CheckpointClient } = await import('../src/core/checkpoint.js');
-    const { SyrinCore } = await import('../src/core/engine.js');
+    const { SyrinSDKCore } = await import('../src/core/engine.js');
     const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
     const { withSession } = await import('../src/index.js');
 
@@ -232,7 +232,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const otelBridge = new OTelBridge(config);
     otelBridge.setup();
     const checkpointClient = new CheckpointClient(config);
-    const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+    const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
 
     const openaiModule = await import('openai');
     patchWithModule(openaiModule, core);
@@ -278,7 +278,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const { Emitter } = await import('../src/observability/emitter.js');
     const { OTelBridge } = await import('../src/observability/otel.js');
     const { CheckpointClient } = await import('../src/core/checkpoint.js');
-    const { SyrinCore } = await import('../src/core/engine.js');
+    const { SyrinSDKCore } = await import('../src/core/engine.js');
     const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
 
     unpatch();
@@ -305,7 +305,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const otelBridge = new OTelBridge(config);
     otelBridge.setup();
     const checkpointClient = new CheckpointClient(config);
-    const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+    const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
 
     const openaiModule = await import('openai');
     patchWithModule(openaiModule, core);

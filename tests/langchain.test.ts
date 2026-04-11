@@ -9,13 +9,13 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ConfigStore } from '@/config/store';
 import { getFrameworkContext } from '@/agent/framework-context';
 import type { ISyrinCore } from '@/adapters/types';
-import type { SyrinConfig } from '@/types';
+import type { SyrinSDKConfig } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
+function makeConfig(overrides: Partial<SyrinSDKConfig> = {}): SyrinSDKConfig {
   return {
     apiKey: 'syrin_test',
     backendUrl: 'http://localhost:4318',

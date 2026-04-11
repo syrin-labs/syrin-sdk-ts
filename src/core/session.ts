@@ -91,6 +91,7 @@ export class SessionStore {
         pendingGovernance: [],
         injectedMessages: [],
         lastCheckpointId: undefined,
+        lastConversationHash: undefined,
       };
       this.sessions.set(sessionId, newSession);
       return newSession;

@@ -10,18 +10,18 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { SyrinCore } from '@/core/engine';
+import { SyrinSDKCore } from '@/core/engine';
 import { OpenAIAdapter } from '@/adapters/openai/index';
 import type { ISyrinCore, SchemaField } from '@/adapters/types';
-import type { SyrinConfig } from '@/types';
+import type { SyrinSDKConfig } from '@/types';
 
 vi.mock('openai', () => {
   class MockOpenAI { constructor(_?: unknown) {} }
   return { default: MockOpenAI };
 });
 
-function makeCore(schemaDefaults?: Record<string, unknown>): SyrinCore {
-  const config: SyrinConfig = {
+function makeCore(schemaDefaults?: Record<string, unknown>): SyrinSDKCore {
+  const config: SyrinSDKConfig = {
     apiKey: 'syrin_test',
     backendUrl: 'http://localhost:4000',
     otelExporter: 'none',
@@ -55,10 +55,10 @@ function makeCore(schemaDefaults?: Record<string, unknown>): SyrinCore {
   const otelBridge = { recordSpan: vi.fn(), setup: vi.fn(), shutdown: vi.fn() };
   const checkpointClient = { save: vi.fn(), getById: vi.fn(), listForSession: vi.fn().mockReturnValue([]) };
 
-  return new SyrinCore(config, sessionStore, emitter as never, otelBridge as never, checkpointClient as never);
+  return new SyrinSDKCore(config, sessionStore, emitter as never, otelBridge as never, checkpointClient as never);
 }
 
-async function makeOpenAICore(schemaDefaults?: Record<string, unknown>): Promise<SyrinCore> {
+async function makeOpenAICore(schemaDefaults?: Record<string, unknown>): Promise<SyrinSDKCore> {
   const core = makeCore(schemaDefaults);
   const adapter = new OpenAIAdapter({} as never);
   adapter.install = vi.fn().mockResolvedValue(undefined);

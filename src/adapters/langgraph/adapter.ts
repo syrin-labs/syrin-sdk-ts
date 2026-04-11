@@ -2,7 +2,7 @@
  * LangGraph Adapter — Adapter class
  */
 
-import { BaseFrameworkAdapter } from '@/adapters/types.js';
+import { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types.js';
 import type { ISyrinCore, SchemaField } from '@/adapters/types.js';
 import {
   patchStateGraph,
@@ -14,7 +14,7 @@ import {
 } from './patch.js';
 import { patchBaseChatModel, unpatchBaseChatModel } from '../langchain/patch-llm.js';
 
-export class LangGraphAdapter extends BaseFrameworkAdapter {
+export class LangGraphAdapter extends SyrinSDKBaseFrameworkAdapter {
   readonly name = 'langgraph';
 
   override configSchema(): Record<string, SchemaField[]> {

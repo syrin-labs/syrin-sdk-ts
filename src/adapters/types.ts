@@ -67,6 +67,8 @@ export interface NormalizedCallResult {
   /** Only populated when config.captureContent is true */
   responseText?: string;
   stream: boolean;
+  /** Time to first token in ms — only populated for streaming calls */
+  ttftMs?: number;
 }
 
 /**
@@ -94,17 +96,17 @@ export interface BeforeCallResult {
 }
 
 // ---------------------------------------------------------------------------
-// SyrinAdapter interface
+// SyrinSDKAdapter interface
 // ---------------------------------------------------------------------------
 
 /**
  * Minimal core interface that adapters need — avoids circular imports between
  * adapters/types.ts and core.ts while still being strongly typed.
  *
- * SyrinCore implements this interface.
+ * SyrinSDKCore implements this interface.
  */
 export interface ISyrinCore {
-  readonly config: import('../types.js').SyrinConfig;
+  readonly config: import('../types.js').SyrinSDKConfig;
   readonly sessionStore: import('../core/session.js').SessionStore;
   beforeCall(params: NormalizedCallParams): Promise<BeforeCallResult>;
   afterCall(ctx: BeforeCallResult, params: NormalizedCallParams, result: NormalizedCallResult): void;
@@ -121,7 +123,7 @@ export interface ISyrinCore {
  *
  * Example future adapters: AnthropicAdapter, LangChainOpenAIAdapter, VercelAIAdapter.
  */
-export interface SyrinAdapter {
+export interface SyrinSDKAdapter {
   /**
    * Stable identifier, e.g. "openai", "anthropic", "langchain-openai".
    * Used in debug logs and the adapter registry.
@@ -157,7 +159,7 @@ export interface SyrinAdapter {
  * Framework adapters set FrameworkContext and emit framework-level events.
  * They do NOT emit LLM_CALL events — that's Tier 1's responsibility.
  */
-export interface FrameworkAdapter extends SyrinAdapter {
+export interface SyrinSDKFrameworkAdapter extends SyrinSDKAdapter {
   /** Emit a framework event via the core emitter */
   emitEvent(event: Record<string, unknown>): void;
   /** Read current config section */
@@ -178,10 +180,10 @@ export interface SchemaField {
 }
 
 /**
- * Abstract base class implementing FrameworkAdapter helpers.
+ * Abstract base class implementing SyrinSDKFrameworkAdapter helpers.
  * Subclasses implement _doInstall() and _doUninstall().
  */
-export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
+export abstract class SyrinSDKBaseFrameworkAdapter implements SyrinSDKFrameworkAdapter {
   abstract readonly name: string;
   protected _core: ISyrinCore | null = null;
   private _installed = false;
@@ -210,33 +212,42 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
   emitEvent(event: Record<string, unknown>): void {
     if (this._core) {
       try {
-        (this._core as unknown as { _emitter: { emit: (e: unknown, s: string) => void } })
-          ._emitter.emit(event as never, this.sessionId ?? 'unknown');
+        // Use the typed getEmitter() accessor if available (SyrinSDKCore),
+        // otherwise fall back to the _emitter property (test mocks / custom cores).
+        const coreWithAccessor = this._core as ISyrinCore & { getEmitter?(): { emit(e: unknown, s: string): void } };
+        const coreWithProp = this._core as ISyrinCore & { _emitter?: { emit(e: unknown, s: string): void } };
+        const emitter = coreWithAccessor.getEmitter?.() ?? coreWithProp._emitter;
+        if (emitter) {
+          emitter.emit(event, this.sessionId ?? 'unknown');
+        }
       } catch (err) {
         // Non-fatal: telemetry errors must never crash user code
         // Silent in production; only log in debug
-        const cfg = (this._core as unknown as { config?: { debug?: boolean } })?.config;
-        if (cfg?.debug) console.warn('[Syrin] Framework event emit failed (non-fatal):', err);
+        if (this._core.config?.debug) console.warn('[Syrin] Framework event emit failed (non-fatal):', err);
       }
     }
   }
 
   getConfig(namespace: string): Record<string, unknown> {
-    const cs = (this._core as unknown as { _configStore?: import('../config/store.js').ConfigStore })?._configStore;
+    // Use the typed getConfigStore() accessor if available (SyrinSDKCore),
+    // otherwise fall back to _configStore property (test mocks / custom cores).
+    const coreWithAccessor = this._core as ISyrinCore & { getConfigStore?(): import('../config/store.js').ConfigStore | null };
+    const coreWithProp = this._core as ISyrinCore & { _configStore?: import('../config/store.js').ConfigStore };
+    const cs = coreWithAccessor.getConfigStore?.() ?? coreWithProp._configStore;
     return cs ? cs.getSection(namespace) : {};
   }
 
   get sessionId(): string | undefined {
     // Prefer AsyncLocalStorage value set by withSession() over static config
-    return sessionStorage.getStore() ?? (this._core as unknown as { config: { sessionId?: string } })?.config?.sessionId;
+    return sessionStorage.getStore() ?? this._core?.config?.sessionId;
   }
 
   get agentId(): string | undefined {
-    return (this._core as unknown as { config: { agentId?: string } })?.config?.agentId;
+    return this._core?.config.agentId;
   }
 
   get captureContent(): boolean {
-    return (this._core as unknown as { config: { captureContent?: boolean } })?.config?.captureContent ?? false;
+    return this._core?.config.captureContent ?? false;
   }
 
   /**

@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createConfig, fromEnv } from '@/config/config';
-import type { SyrinConfig } from '@/types';
+import type { SyrinSDKConfig } from '@/types';
 
 describe('createConfig', () => {
   const baseOptions = { apiKey: 'syrin_test_key' };
@@ -16,7 +16,7 @@ describe('createConfig', () => {
     expect(config.backendUrl).toBeDefined();
     expect(config.otelExporter).toBeDefined();
     expect(config.debug).toBe(false);
-    expect(config.captureContent).toBe(false);
+    expect(config.captureContent).toBe(true);
     expect(config.offline).toBe(false);
     expect(typeof config.idleFlushMs).toBe('number');
     expect(typeof config.batchSize).toBe('number');
@@ -29,7 +29,7 @@ describe('createConfig', () => {
     expect(config.otelExporter).toBe('none');
     expect(config.otelEndpoint).toBe('http://localhost:4318');
     expect(config.debug).toBe(false);
-    expect(config.captureContent).toBe(false);
+    expect(config.captureContent).toBe(true);
     expect(config.offline).toBe(false);
     expect(config.idleFlushMs).toBe(10_000);
     expect(config.batchSize).toBe(100);
@@ -112,7 +112,7 @@ describe('createConfig', () => {
     expect(() =>
       createConfig({
         apiKey: 'syrin_test',
-        otelExporter: 'invalid' as SyrinConfig['otelExporter'],
+        otelExporter: 'invalid' as SyrinSDKConfig['otelExporter'],
       })
     ).toThrow(/otelExporter/);
   });
@@ -134,7 +134,7 @@ describe('createConfig', () => {
   });
 
   it('accepts all valid otelExporter values', () => {
-    const valid: SyrinConfig['otelExporter'][] = ['none', 'console', 'otlp'];
+    const valid: SyrinSDKConfig['otelExporter'][] = ['none', 'console', 'otlp'];
     for (const exporter of valid) {
       expect(() =>
         createConfig({ apiKey: 'syrin_test', otelExporter: exporter })

@@ -15,7 +15,7 @@
  */
 
 import { generateId, nowIso } from '@/utils/helpers.js';
-import type { SyrinConfig } from '@/types.js';
+import type { SyrinSDKConfig } from '@/types.js';
 
 export interface Checkpoint {
   checkpointId: string;
@@ -102,7 +102,7 @@ class InMemoryCheckpointStore {
 export class CheckpointClient {
   private readonly _cache = new InMemoryCheckpointStore();
 
-  constructor(private readonly _config: SyrinConfig) {}
+  constructor(private readonly _config: SyrinSDKConfig) {}
 
   /**
    * Create and persist a checkpoint.

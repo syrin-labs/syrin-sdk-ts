@@ -2,20 +2,32 @@
 
 ## Overview
 
-The Syrin SDK emits OpenTelemetry spans for every LLM call. The schema follows the [OpenTelemetry Semantic Conventions for Generative AI Systems](https://opentelemetry.io/docs/specs/semconv/gen-ai/) with Syrin-specific extensions.
+The Syrin SDK emits OpenTelemetry spans for every LLM call. The schema follows the
+[OpenTelemetry Semantic Conventions for Generative AI Systems](https://opentelemetry.io/docs/specs/semconv/gen-ai/)
+with Syrin-specific extensions.
+
+Spans are emitted in addition to — not instead of — the HTTP events sent to `/ingest`.
+You can use both independently or together.
+
+---
 
 ## Span Name
 
-Format: `chat {model}`
+Format: `{operation} {model}`
 
 Examples:
 - `chat gpt-4o`
 - `chat gpt-4o-mini`
 - `chat claude-3-5-sonnet-20241022`
+- `generateObject gpt-4o-mini` (Vercel AI SDK)
+
+---
 
 ## Span Kind
 
 `SpanKind.CLIENT`
+
+---
 
 ## Standard `gen_ai.*` Attributes
 
@@ -32,6 +44,8 @@ Examples:
 | `gen_ai.usage.output_tokens` | int | Completion tokens generated | `200` |
 | `gen_ai.usage.total_tokens` | int | Total tokens | `700` |
 
+---
+
 ## Syrin Extension `syrin.*` Attributes
 
 | Attribute | Type | Description | Example |
@@ -41,6 +55,10 @@ Examples:
 | `syrin.cost_usd` | float | Estimated cost for this call | `0.0125` |
 | `syrin.cumulative_cost_usd` | float | Total session cost so far | `0.0378` |
 | `syrin.config_applied` | bool | Whether remote config was applied | `true` |
+| `syrin.framework` | string | Framework adapter in use | `"langchain"`, `"langgraph"` |
+| `syrin.call_depth` | int | Nesting depth of LLM calls | `0` |
+
+---
 
 ## Span Events
 
@@ -65,6 +83,8 @@ One event per output choice.
 | `gen_ai.choice.message.role` | string | Response message role (typically `"assistant"`) |
 | `gen_ai.choice.message.content` | string | Response text content |
 
+---
+
 ## Error Spans
 
 On API errors, the span is marked with:
@@ -73,6 +93,42 @@ On API errors, the span is marked with:
 - `exception.type`: Error class name
 - `exception.message`: Error message
 - `exception.stacktrace`: Stack trace
+
+---
+
+## Event Types Emitted to `/ingest`
+
+The SDK emits a richer set of event types to the backend than it emits as OTel spans.
+The full list of `event_type` values in the `/ingest` payload:
+
+| Event type | Emitted by | When |
+|---|---|---|
+| `LLM_CALL` | OpenAI / Anthropic / Mastra / Vercel AI adapters | Every LLM API call |
+| `LLM_ERROR` | OpenAI / Anthropic adapters | API error |
+| `SESSION_STARTED` | Core engine | First event in a new session |
+| `SESSION_ENDED` | Core engine | On `shutdown()` or `deleteSession()` |
+| `AGENT_RUN_STARTED` | `withAgent()` | On enter |
+| `AGENT_RUN_ENDED` | `withAgent()` | On exit (includes `duration_ms`) |
+| `WORKFLOW_STARTED` | `withWorkflow()` | On enter |
+| `WORKFLOW_ENDED` | `withWorkflow()` | On exit (includes `duration_ms`) |
+| `SWARM_STARTED` | `withSwarm()` | On enter |
+| `SWARM_ENDED` | `withSwarm()` | On exit (includes `duration_ms`) |
+| `CHAIN_EXECUTION` | LangChain adapter | Per `chain.invoke()` |
+| `GRAPH_EXECUTION` | LangGraph adapter | Per `graph.invoke()` |
+| `NODE_EXECUTION` | LangGraph adapter | Per graph node invocation |
+| `HITL_INTERRUPT` | LangGraph adapter | When `interrupt()` is called |
+| `TOOL_CALL` | OpenAI adapter | When a tool call is made |
+| `TOOL_RESULT` | OpenAI adapter | When a tool result is received |
+| `CONFIG_APPLIED` | Core engine | When remote config is applied to a call |
+| `GOVERNANCE_TRIGGERED` | Core engine | When any governance action fires |
+| `APPROVAL_REQUESTED` | Core engine | When a HITL approval is requested |
+| `APPROVAL_GRANTED` | Core engine | When a HITL approval is granted |
+| `APPROVAL_REJECTED` | Core engine | When a HITL approval is rejected |
+
+OTel spans are emitted only for `LLM_CALL` events. All other event types are sent
+to the backend via `/ingest` only.
+
+---
 
 ## Provider Mapping
 
@@ -88,25 +144,28 @@ The `gen_ai.system` attribute is derived from the model name:
 | `command-*` | `cohere` |
 | (other) | `unknown` |
 
+---
+
 ## OTel Exporter Configuration
 
 ### None (default)
 
 ```typescript
-init({ otelExporter: "none" }); // No spans emitted
+await init({ apiKey: "syrin_...", otelExporter: "none" }); // No spans emitted
 ```
 
 ### Console (development)
 
 ```typescript
-init({ otelExporter: "console" });
+await init({ apiKey: "syrin_...", otelExporter: "console" });
 // Spans printed to stdout
 ```
 
 ### OTLP (production)
 
 ```typescript
-init({
+await init({
+  apiKey: "syrin_...",
   otelExporter: "otlp",
   otelEndpoint: "http://your-collector:4318",
   // Traces sent to: http://your-collector:4318/v1/traces
@@ -121,14 +180,16 @@ Compatible with any OTLP-compatible backend:
 - New Relic
 - Grafana Cloud
 
+---
+
 ## Example Span (JSON)
 
 ```json
 {
   "name": "chat gpt-4o",
   "kind": "CLIENT",
-  "startTime": "2024-01-15T10:30:00.000Z",
-  "endTime": "2024-01-15T10:30:01.234Z",
+  "startTime": "2026-04-11T10:30:00.000Z",
+  "endTime": "2026-04-11T10:30:01.234Z",
   "status": { "code": "OK" },
   "attributes": {
     "gen_ai.system": "openai",
@@ -145,10 +206,14 @@ Compatible with any OTLP-compatible backend:
     "syrin.session_id": "ses_550e8400-e29b-41d4-a716-446655440000",
     "syrin.cost_usd": 0.003250,
     "syrin.cumulative_cost_usd": 0.012750,
-    "syrin.config_applied": false
+    "syrin.config_applied": false,
+    "syrin.framework": "langchain",
+    "syrin.call_depth": 0
   }
 }
 ```
+
+---
 
 ## Model-Specific Behavior
 
@@ -159,7 +224,8 @@ These models do not support the `temperature` parameter:
 - Remote config `temperature` updates are **not injected** for these models
 - Affected models: `o1`, `o1-preview`, `o1-mini`, `o3`, `o3-mini`
 
-### Anthropic Models (via OpenAI-compatible endpoint)
+### Anthropic Models
 
 - Temperature is clamped to the range `[0, 1.0]` (Anthropic's limit)
 - The `gen_ai.system` value is `"anthropic"`
+- The span name format is still `chat {model}` (e.g., `chat claude-3-5-sonnet-20241022`)

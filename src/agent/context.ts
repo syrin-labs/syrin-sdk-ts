@@ -15,13 +15,82 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
-import type { RunContext } from '@/types.js';
-import { generateId } from '@/utils/helpers.js';
+import type { RunContext, SyrinEvent, SyrinEventBase } from '@/types.js';
+import { generateId, nowIso } from '@/utils/helpers.js';
 
 export type { RunContext };
 
 /** Module-level AsyncLocalStorage — read by the interceptor on every LLM call. */
 export const agentStorage = new AsyncLocalStorage<RunContext>();
+
+// ---------------------------------------------------------------------------
+// Lifecycle emitter wiring
+// ---------------------------------------------------------------------------
+
+type LifecycleEmitter = { emit(event: SyrinEvent, sessionId: string): void };
+let _lifecycleEmitter: LifecycleEmitter | null = null;
+
+/** Called by SDK init() to wire in the emitter for lifecycle events. */
+export function _setLifecycleEmitter(e: LifecycleEmitter | null): void {
+  _lifecycleEmitter = e;
+}
+
+function _getSessionId(): string {
+  try {
+    // Attempt to read from agentStorage store (may have session_id in some setups)
+    // but in practice session ID lives in sessionStorage — return 'unknown' as fallback
+    return agentStorage.getStore()?.runId ?? 'unknown';
+  } catch {
+    return 'unknown';
+  }
+}
+
+function _emitLifecycle(event: SyrinEvent, sessionId: string): void {
+  try {
+    _lifecycleEmitter?.emit(event, sessionId);
+  } catch {
+    // fail-open: SDK crash must never block user call
+  }
+}
+
+/**
+ * Build a lifecycle SyrinEvent from a RunContext.
+ * DRY helper used by withAgent, withWorkflow, withSwarm.
+ */
+function _buildLifecycleEvent(
+  eventType: SyrinEvent['event_type'],
+  ctx: RunContext,
+  durationMs = 0,
+): SyrinEvent {
+  const base: SyrinEventBase & { event_type: SyrinEvent['event_type'] } = {
+    event_id: generateId('evt_'),
+    event_type: eventType,
+    timestamp: nowIso(),
+    session_id: _getSessionId(),
+    agent_id: ctx.agentId ?? undefined,
+    run_id: ctx.runId,
+    workflow_id: ctx.workflowId ?? undefined,
+    swarm_id: ctx.swarmId ?? undefined,
+    parent_run_id: ctx.parentRunId ?? undefined,
+    trace_id: ctx.traceId,
+    call_depth: ctx.callDepth,
+    duration_ms: durationMs,
+    model: '',
+    provider: '',
+    input_tokens: 0,
+    output_tokens: 0,
+    cost_usd: 0,
+    stream: false,
+    config_applied: false,
+  };
+  // Cast is safe: all lifecycle events share the SyrinEventBase shape;
+  // the discriminant is set correctly from the `eventType` parameter.
+  return base as SyrinEvent;
+}
+
+// ---------------------------------------------------------------------------
+// withAgent
+// ---------------------------------------------------------------------------
 
 /**
  * Run `fn` with a specific agent_id active for all LLM calls inside.
@@ -46,8 +115,22 @@ export async function withAgent<T>(
     traceId: options?.traceId ?? parent?.traceId ?? generateId('trc_'),
     callDepth: parent ? parent.callDepth + 1 : 0,
   };
-  return agentStorage.run(ctx, () => fn(ctx));
+
+  const sessionId = ctx.runId; // use runId as proxy session key for lifecycle events
+  _emitLifecycle(_buildLifecycleEvent('AGENT_RUN_STARTED', ctx, 0), sessionId);
+
+  const t0 = performance.now();
+  try {
+    return await agentStorage.run(ctx, () => fn(ctx));
+  } finally {
+    const durationMs = Math.round(performance.now() - t0);
+    _emitLifecycle(_buildLifecycleEvent('AGENT_RUN_ENDED', ctx, durationMs), sessionId);
+  }
 }
+
+// ---------------------------------------------------------------------------
+// withWorkflow
+// ---------------------------------------------------------------------------
 
 /**
  * Run `fn` within a named workflow (groups sequential agents).
@@ -72,8 +155,22 @@ export async function withWorkflow<T>(
     traceId: options?.traceId ?? parent?.traceId ?? generateId('trc_'),
     callDepth: parent ? parent.callDepth + 1 : 0,
   };
-  return agentStorage.run(ctx, () => fn(ctx));
+
+  const sessionId = ctx.runId;
+  _emitLifecycle(_buildLifecycleEvent('WORKFLOW_STARTED', ctx, 0), sessionId);
+
+  const t0 = performance.now();
+  try {
+    return await agentStorage.run(ctx, () => fn(ctx));
+  } finally {
+    const durationMs = Math.round(performance.now() - t0);
+    _emitLifecycle(_buildLifecycleEvent('WORKFLOW_ENDED', ctx, durationMs), sessionId);
+  }
 }
+
+// ---------------------------------------------------------------------------
+// withSwarm
+// ---------------------------------------------------------------------------
 
 /**
  * Run `fn` within a named swarm (groups parallel agents).
@@ -100,7 +197,17 @@ export async function withSwarm<T>(
     traceId: options?.traceId ?? parent?.traceId ?? generateId('trc_'),
     callDepth: parent ? parent.callDepth + 1 : 0,
   };
-  return agentStorage.run(ctx, () => fn(ctx));
+
+  const sessionId = ctx.runId;
+  _emitLifecycle(_buildLifecycleEvent('SWARM_STARTED', ctx, 0), sessionId);
+
+  const t0 = performance.now();
+  try {
+    return await agentStorage.run(ctx, () => fn(ctx));
+  } finally {
+    const durationMs = Math.round(performance.now() - t0);
+    _emitLifecycle(_buildLifecycleEvent('SWARM_ENDED', ctx, durationMs), sessionId);
+  }
 }
 
 /**

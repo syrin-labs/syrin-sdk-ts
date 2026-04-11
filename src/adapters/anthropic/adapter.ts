@@ -2,10 +2,10 @@
  * Anthropic Adapter — Adapter class
  */
 
-import type { ISyrinCore, SyrinAdapter, SchemaField } from '@/adapters/types.js';
+import type { ISyrinCore, SyrinSDKAdapter, SchemaField } from '@/adapters/types.js';
 import { patchWithModule, unpatch, isPatched, type AnthropicModule } from './patch.js';
 
-export class AnthropicAdapter implements SyrinAdapter {
+export class AnthropicAdapter implements SyrinSDKAdapter {
   readonly name = 'anthropic';
 
   constructor(private readonly _anthropicModule?: AnthropicModule | null) {}
@@ -44,7 +44,7 @@ export class AnthropicAdapter implements SyrinAdapter {
 
 async function _loadAnthropic(debug?: boolean): Promise<AnthropicModule | null> {
   try {
-    return (await import('@anthropic-ai/sdk')) as AnthropicModule;
+    return (await import('@anthropic-ai/sdk')) as unknown as AnthropicModule;
   } catch {
     if (debug) {
       console.warn('[Syrin] @anthropic-ai/sdk not found. Install with: npm install @anthropic-ai/sdk');

@@ -2,16 +2,16 @@
  * Syrin SDK — Configuration management
  */
 
-import type { SyrinConfig } from '@/types.js';
+import type { SyrinSDKConfig } from '@/types.js';
 
 const SDK_VERSION = '0.1.0';
 
-const DEFAULTS: Omit<SyrinConfig, 'apiKey'> = {
+const DEFAULTS: Omit<SyrinSDKConfig, 'apiKey'> = {
   backendUrl: 'https://api.syrin.ai',
   otelExporter: 'none',
   otelEndpoint: 'http://localhost:4318',
   debug: false,
-  captureContent: false,
+  captureContent: true,
   offline: false,
   batchSize: 100,
   idleFlushMs: 10_000,
@@ -20,8 +20,29 @@ const DEFAULTS: Omit<SyrinConfig, 'apiKey'> = {
   configPollIntervalMs: 0,
 };
 
-export function fromEnv(): Partial<SyrinConfig> {
-  const env: Partial<SyrinConfig> = {};
+/** Regex for valid identifiers: alphanumeric, hyphen, underscore, dot, colon, @ */
+const IDENTIFIER_RE = /^[\w\-.:@]+$/;
+
+/**
+ * Validate that an identifier (agentId or sessionId) meets length and character constraints.
+ *
+ * @param value - The identifier string to validate.
+ * @param fieldName - Human-readable field name for error messages.
+ * @throws Error if the identifier is invalid.
+ */
+function validateIdentifier(value: string, fieldName: string): void {
+  if (value.length > 128) {
+    throw new Error(`[Syrin] ${fieldName} must be 128 characters or less (got ${value.length})`);
+  }
+  if (!IDENTIFIER_RE.test(value)) {
+    throw new Error(
+      `[Syrin] ${fieldName} must only contain alphanumeric characters, hyphens, underscores, dots, colons, or @ (got: "${value}")`
+    );
+  }
+}
+
+export function fromEnv(): Partial<SyrinSDKConfig> {
+  const env: Partial<SyrinSDKConfig> = {};
 
   if (process.env['SYRIN_API_KEY']) {
     env.apiKey = process.env['SYRIN_API_KEY'];
@@ -36,7 +57,7 @@ export function fromEnv(): Partial<SyrinConfig> {
     env.backendUrl = process.env['SYRIN_BACKEND_URL'];
   }
   if (process.env['SYRIN_OTEL_EXPORTER']) {
-    env.otelExporter = process.env['SYRIN_OTEL_EXPORTER'] as SyrinConfig['otelExporter'];
+    env.otelExporter = process.env['SYRIN_OTEL_EXPORTER'] as SyrinSDKConfig['otelExporter'];
   }
   if (process.env['SYRIN_OTEL_ENDPOINT']) {
     env.otelEndpoint = process.env['SYRIN_OTEL_ENDPOINT'];
@@ -79,11 +100,11 @@ export function fromEnv(): Partial<SyrinConfig> {
 }
 
 export function createConfig(
-  options: Partial<SyrinConfig> & { apiKey?: string }
-): SyrinConfig {
+  options: Partial<SyrinSDKConfig> & { apiKey?: string }
+): SyrinSDKConfig {
   const envConfig = fromEnv();
 
-  const merged: Partial<SyrinConfig> = {
+  const merged: Partial<SyrinSDKConfig> = {
     ...DEFAULTS,
     ...envConfig,
     ...options,
@@ -94,6 +115,14 @@ export function createConfig(
     throw new Error(
       '[Syrin] apiKey is required. Set SYRIN_API_KEY env var or pass apiKey to init().'
     );
+  }
+
+  // Validate agentId and sessionId if provided
+  if (merged.agentId) {
+    validateIdentifier(merged.agentId, 'agentId');
+  }
+  if (merged.sessionId) {
+    validateIdentifier(merged.sessionId, 'sessionId');
   }
 
   // Validate otelExporter
@@ -121,7 +150,7 @@ export function createConfig(
     );
   }
 
-  return merged as SyrinConfig;
+  return merged as SyrinSDKConfig;
 }
 
 export { SDK_VERSION };

@@ -6,12 +6,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { SyrinConfig, SyrinEvent } from '@/types';
+import type { SyrinSDKConfig, SyrinEvent } from '@/types';
 import { SessionStore } from '@/core/session';
 import { Emitter } from '@/observability/emitter';
 import { OTelBridge } from '@/observability/otel';
 import { CheckpointClient } from '@/core/checkpoint';
-import { SyrinCore } from '@/core/engine';
+import { SyrinSDKCore } from '@/core/engine';
 import { patchWithModule, unpatch } from '@/adapters/openai/index';
 
 // Mock openai module — create is on the prototype to match real SDK v4 behavior
@@ -50,7 +50,7 @@ async function getMockCreate(): Promise<ReturnType<typeof vi.fn>> {
   return (mod as unknown as { __mockCreate: ReturnType<typeof vi.fn> }).__mockCreate;
 }
 
-function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
+function makeConfig(overrides: Partial<SyrinSDKConfig> = {}): SyrinSDKConfig {
   return {
     apiKey: 'syrin_test',
     backendUrl: 'http://localhost:4318',
@@ -87,7 +87,7 @@ function makeSuccessResponse(model = 'gpt-4o', content = 'Hello!') {
 }
 
 describe('interceptor: patchWithModule', () => {
-  let config: SyrinConfig;
+  let config: SyrinSDKConfig;
   let sessionStore: SessionStore;
   let emitter: Emitter;
   let otelBridge: OTelBridge;
@@ -104,7 +104,7 @@ describe('interceptor: patchWithModule', () => {
 
     const openaiModule = await import('openai');
     const checkpointClient = new CheckpointClient(config);
-    const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+    const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
     patchWithModule(openaiModule, core);
   });
 

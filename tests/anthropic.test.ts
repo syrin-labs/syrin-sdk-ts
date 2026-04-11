@@ -11,7 +11,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ISyrinCore, BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types';
-import type { SyrinConfig } from '@/types';
+import type { SyrinSDKConfig } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Mock @anthropic-ai/sdk
@@ -45,7 +45,7 @@ vi.mock('@anthropic-ai/sdk', () => {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
+function makeConfig(overrides: Partial<SyrinSDKConfig> = {}): SyrinSDKConfig {
   return {
     apiKey: 'syrin_test',
     backendUrl: 'http://localhost:4318',
@@ -75,7 +75,7 @@ function makeBeforeCallResult(overrides: Partial<BeforeCallResult> = {}): Before
   };
 }
 
-function makeCore(config: SyrinConfig = makeConfig()): ISyrinCore {
+function makeCore(config: SyrinSDKConfig = makeConfig()): ISyrinCore {
   const beforeResult = makeBeforeCallResult();
   return {
     config,

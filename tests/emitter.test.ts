@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
-import type { SyrinConfig, SyrinEvent, IngestPayload } from '@/types';
+import type { SyrinSDKConfig, SyrinEvent, IngestPayload } from '@/types';
 import { Emitter } from '@/observability/emitter';
 import { SessionStore } from '@/core/session';
 import { generateId, nowIso } from '@/utils/helpers';
@@ -19,7 +19,7 @@ beforeAll(() => server.listen({ onUnhandledRequest: 'bypass' }));
 afterEach(() => server.resetHandlers());
 afterAll(() => server.close());
 
-function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
+function makeConfig(overrides: Partial<SyrinSDKConfig> = {}): SyrinSDKConfig {
   return {
     apiKey: 'syrin_test_key',
     backendUrl: 'http://localhost:4399',
@@ -52,7 +52,7 @@ function makeEvent(overrides: Partial<SyrinEvent> = {}): SyrinEvent {
 }
 
 describe('Emitter: batching and flushing', () => {
-  let config: SyrinConfig;
+  let config: SyrinSDKConfig;
   let sessionStore: SessionStore;
   let emitter: Emitter;
 

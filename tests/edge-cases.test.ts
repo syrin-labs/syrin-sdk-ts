@@ -3,12 +3,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { SyrinConfig, SyrinEvent } from '@/types';
+import type { SyrinSDKConfig, SyrinEvent } from '@/types';
 import { SessionStore } from '@/core/session';
 import { Emitter } from '@/observability/emitter';
 import { OTelBridge } from '@/observability/otel';
 import { CheckpointClient } from '@/core/checkpoint';
-import { SyrinCore } from '@/core/engine';
+import { SyrinSDKCore } from '@/core/engine';
 import { patchWithModule, unpatch } from '@/adapters/openai/index';
 import { estimateCost, detectProvider } from '@/utils/helpers';
 
@@ -46,7 +46,7 @@ async function getMockCreate(): Promise<ReturnType<typeof vi.fn>> {
   return (mod as unknown as { __mockCreate: ReturnType<typeof vi.fn> }).__mockCreate;
 }
 
-function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
+function makeConfig(overrides: Partial<SyrinSDKConfig> = {}): SyrinSDKConfig {
   return {
     apiKey: 'syrin_test',
     backendUrl: 'http://localhost:4399',
@@ -73,7 +73,7 @@ function makeSuccessResponse(model = 'gpt-4o') {
 }
 
 describe('Edge cases', () => {
-  let config: SyrinConfig;
+  let config: SyrinSDKConfig;
   let sessionStore: SessionStore;
   let emitter: Emitter;
   let otelBridge: OTelBridge;
@@ -88,7 +88,7 @@ describe('Edge cases', () => {
 
     const openaiModule = await import('openai');
     const checkpointClient = new CheckpointClient(config);
-    const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+    const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
     patchWithModule(openaiModule, core);
   });
 
@@ -198,7 +198,7 @@ describe('Edge cases', () => {
     const openaiModule = await import('openai');
     // Already patched — second call should be a no-op
     const checkpointClient = new CheckpointClient(config);
-    const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+    const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
     patchWithModule(openaiModule, core);
 
     const mockCreate = await getMockCreate();

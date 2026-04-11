@@ -2,7 +2,7 @@
  * Mastra Adapter — Adapter class
  */
 
-import { BaseFrameworkAdapter } from '@/adapters/types.js';
+import { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types.js';
 import type { ISyrinCore, SchemaField } from '@/adapters/types.js';
 import { patchAgent, unpatchAgent, _patchedMastra } from './patch.js';
 
@@ -33,7 +33,7 @@ export function extractModelInfo(model: unknown): { modelId: string; provider: s
   return { modelId, provider };
 }
 
-export class MastraAdapter extends BaseFrameworkAdapter {
+export class MastraAdapter extends SyrinSDKBaseFrameworkAdapter {
   readonly name = 'mastra';
 
   override configSchema(): Record<string, SchemaField[]> {
@@ -46,7 +46,9 @@ export class MastraAdapter extends BaseFrameworkAdapter {
         { name: 'frequency_penalty', type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
         { name: 'presence_penalty',  type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
         { name: 'seed',              type: 'int',   default: null },
-        { name: 'system_prompt',     type: 'str',   default: null, multiline: true },
+      ],
+      prompt: [
+        { name: 'system_prompt', type: 'str', default: null, multiline: true },
       ],
       mastra: [
         /** Max reasoning/tool-call steps per agent.generate() call */

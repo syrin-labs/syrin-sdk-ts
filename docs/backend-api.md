@@ -29,7 +29,8 @@ curl http://localhost:4000/health
 
 ### `POST /ingest`
 
-Submit a batch of telemetry events from an SDK session. The SDK calls this automatically; you rarely need to call it directly.
+Submit a batch of telemetry events from an SDK session. The SDK calls this automatically;
+you rarely need to call it directly.
 
 **Request body:**
 
@@ -43,7 +44,7 @@ Submit a batch of telemetry events from an SDK session. The SDK calls this autom
     {
       "event_id": "evt_123",
       "event_type": "LLM_CALL",
-      "timestamp": "2026-04-09T12:00:00.000Z",
+      "timestamp": "2026-04-11T12:00:00.000Z",
       "duration_ms": 1240,
       "model": "gpt-4o",
       "provider": "openai",
@@ -60,12 +61,36 @@ Submit a batch of telemetry events from an SDK session. The SDK calls this autom
 
 | Field | Required | Description |
 |---|---|---|
-| `session_id` | Yes | UUID or string identifying the session |
-| `agent_id` | No | Identifies the agent; links events to a registered agent |
+| `session_id` | Yes | UUID or string identifying the session. Max 128 chars, alphanumeric + `-_.@:` |
+| `agent_id` | No | Identifies the agent. Max 128 chars, alphanumeric + `-_.@:` |
 | `sdk` | No | SDK language + version metadata |
 | `events` | Yes | Array of events (max 500 per request) |
 
-**Event types:** `LLM_CALL`, `LLM_ERROR`, `LLM_STREAM`, `CHAIN_EXECUTION`, `GRAPH_EXECUTION`, `NODE_EXECUTION`, `HITL_INTERRUPT`
+**Supported `event_type` values:**
+
+| Event type | When emitted |
+|---|---|
+| `LLM_CALL` | Every LLM API call (OpenAI, Anthropic, Mastra, Vercel AI) |
+| `LLM_ERROR` | LLM API error |
+| `SESSION_STARTED` | First event in a new session |
+| `SESSION_ENDED` | On `shutdown()` or `deleteSession()` |
+| `AGENT_RUN_STARTED` | On `withAgent()` enter |
+| `AGENT_RUN_ENDED` | On `withAgent()` exit |
+| `WORKFLOW_STARTED` | On `withWorkflow()` enter |
+| `WORKFLOW_ENDED` | On `withWorkflow()` exit |
+| `SWARM_STARTED` | On `withSwarm()` enter |
+| `SWARM_ENDED` | On `withSwarm()` exit |
+| `CHAIN_EXECUTION` | Per LangChain `chain.invoke()` |
+| `GRAPH_EXECUTION` | Per LangGraph `graph.invoke()` |
+| `NODE_EXECUTION` | Per LangGraph node invocation |
+| `HITL_INTERRUPT` | When LangGraph `interrupt()` is called |
+| `TOOL_CALL` | When an LLM tool call is made |
+| `TOOL_RESULT` | When a tool result is received |
+| `CONFIG_APPLIED` | When remote config is applied to a call |
+| `GOVERNANCE_TRIGGERED` | When any governance action fires |
+| `APPROVAL_REQUESTED` | HITL approval requested |
+| `APPROVAL_GRANTED` | HITL approval granted |
+| `APPROVAL_REJECTED` | HITL approval rejected |
 
 **Response:**
 
@@ -85,7 +110,18 @@ Submit a batch of telemetry events from an SDK session. The SDK calls this autom
 }
 ```
 
-`config_updates` is sparse — only changed fields are included. The SDK applies these to the next call automatically.
+`config_updates` is sparse — only changed fields are included. The SDK applies these to
+the next call automatically. Setting a field to `null` clears any active override.
+
+**Governance actions** the backend can include in the response:
+
+| Action type | Effect |
+|---|---|
+| `stop` | SDK raises `GovernanceStopError` on next intercepted call |
+| `inject_message` | SDK prepends a message to the next call's message list |
+| `alert` | SDK fires all registered `onAlert` callbacks |
+| `checkpoint` | SDK saves a conversation checkpoint |
+| `restore` | SDK restores a previously saved checkpoint |
 
 ```bash
 curl -X POST http://localhost:4000/ingest \
@@ -97,7 +133,7 @@ curl -X POST http://localhost:4000/ingest \
     "events": [{
       "event_id": "evt_001",
       "event_type": "LLM_CALL",
-      "timestamp": "2026-04-09T12:00:00Z",
+      "timestamp": "2026-04-11T12:00:00Z",
       "model": "gpt-4o",
       "input_tokens": 100,
       "output_tokens": 50,
@@ -164,7 +200,8 @@ curl http://localhost:4000/agents/my-agent/overrides \
 
 ### `POST /agents/:agent_id/config`
 
-Push config overrides to an agent. The SDK picks these up on the next `/ingest` response and applies them to the next LLM call.
+Push config overrides to an agent. The SDK picks these up on the next `/ingest` response
+and applies them to the next LLM call.
 
 ```json
 {
@@ -174,7 +211,7 @@ Push config overrides to an agent. The SDK picks these up on the next `/ingest` 
     "maxTokens": 500
   },
   "reason": "Cost reduction during load spike",
-  "expires_at": "2026-04-09T13:00:00Z"
+  "expires_at": "2026-04-11T13:00:00Z"
 }
 ```
 
@@ -221,10 +258,9 @@ Response:
 
 ### `DELETE /agents/:agent_id/config/:field_path`
 
-Clear a single config field for an agent. The field name must be URL-encoded if it contains slashes.
+Clear a single config field for an agent.
 
 ```bash
-# Clear temperature override
 curl -X DELETE http://localhost:4000/agents/my-agent/config/temperature \
   -H "Authorization: Bearer syrin_abc123"
 # → {"ok":true,"cleared":"temperature"}
@@ -241,7 +277,7 @@ Retrieve stored events for an agent, with optional filtering.
 | Param | Description | Default |
 |---|---|---|
 | `session_id` | Filter by session | all |
-| `event_type` | Filter by event type (e.g. `LLM_CALL`) | all |
+| `event_type` | Filter by event type (e.g. `LLM_CALL`, `GRAPH_EXECUTION`) | all |
 | `limit` | Max events to return | 50 |
 | `offset` | Pagination offset | 0 |
 
@@ -262,7 +298,7 @@ Response:
       "eventType": "LLM_CALL",
       "sessionId": "ses_abc",
       "agentId": "my-agent",
-      "timestamp": "2026-04-09T12:00:00.000Z",
+      "timestamp": "2026-04-11T12:00:00.000Z",
       "durationMs": 1240,
       "model": "gpt-4o",
       "inputTokens": 250,
@@ -291,17 +327,18 @@ curl "http://localhost:4000/agents/my-agent/sessions?limit=10" \
 
 ### `GET /agents/:agent_id/stream`
 
-Server-Sent Events (SSE) stream — receives config updates pushed in real-time. The SDK connects to this when `sse: true` is set in `init()`.
+Server-Sent Events (SSE) stream — receives config updates pushed in real-time.
+The SDK connects to this when `sse: true` is set in `init()`.
 
-Auth via query param (browsers/EventSource can't set headers):
+Auth via query param (browsers/EventSource cannot set headers):
 
 ```typescript
 const es = new EventSource(
   `http://localhost:4000/agents/my-agent/stream?api_key=syrin_abc123`
 );
-es.addEventListener('config_update', (e) => {
+es.addEventListener("config_update", (e) => {
   const updates = JSON.parse(e.data);
-  console.log('Config update:', updates);
+  console.log("Config update:", updates);
 });
 ```
 
@@ -318,7 +355,18 @@ data: {"temperature":0.3,"model":"gpt-4o-mini"}
 : heartbeat
 ```
 
-A `config_update` event is sent immediately on connect with all current pending overrides, then again whenever `POST /agents/:agent_id/config` is called.
+A `config_update` event is sent immediately on connect with all current pending overrides,
+then again whenever `POST /agents/:agent_id/config` is called.
+
+---
+
+## Input Validation
+
+`agent_id` and `session_id` values are validated on all endpoints:
+
+- Maximum 128 characters
+- Allowed characters: alphanumeric (`A-Z`, `a-z`, `0-9`) plus `-`, `_`, `.`, `@`, `:`
+- Violating values return `400 Bad Request` with a descriptive error
 
 ---
 
@@ -332,7 +380,7 @@ All endpoints return a consistent error shape:
 
 | Status | Meaning |
 |---|---|
-| 400 | Validation error (invalid request body) |
+| 400 | Validation error (invalid request body or invalid `agent_id` / `session_id`) |
 | 401 | Missing or invalid API key |
 | 404 | Agent not found |
 | 500 | Internal server error |

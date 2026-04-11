@@ -18,12 +18,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import type { SyrinConfig } from '@/types';
+import type { SyrinSDKConfig } from '@/types';
 import { SessionStore, sessionStorage } from '@/core/session';
 import { Emitter } from '@/observability/emitter';
 import { OTelBridge } from '@/observability/otel';
 import { CheckpointClient } from '@/core/checkpoint';
-import { SyrinCore } from '@/core/engine';
+import { SyrinSDKCore } from '@/core/engine';
 import { patchWithModule, unpatch, isPatched } from '@/adapters/openai/index';
 import { AnthropicAdapter } from '@/adapters/anthropic/index';
 import { tune, globalRegistry, TunableRegistry } from '@/tunable/tunable';
@@ -57,7 +57,7 @@ async function getMockCreate(): Promise<ReturnType<typeof vi.fn>> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
+function makeConfig(overrides: Partial<SyrinSDKConfig> = {}): SyrinSDKConfig {
   return {
     apiKey: 'syrin_test',
     agentId: 'stress-test-agent',
@@ -75,13 +75,13 @@ function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
 }
 
 /** Build one fully-wired test environment — single core/emitter/sessionStore. */
-function makeEnv(configOverrides: Partial<SyrinConfig> = {}) {
+function makeEnv(configOverrides: Partial<SyrinSDKConfig> = {}) {
   const config = makeConfig(configOverrides);
   const sessionStore = new SessionStore();
   const emitter = new Emitter(config, sessionStore);
   const otelBridge = new OTelBridge(config);
   const checkpointClient = new CheckpointClient(config);
-  const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+  const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
   return { config, sessionStore, emitter, core };
 }
 
