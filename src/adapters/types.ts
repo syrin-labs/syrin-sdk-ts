@@ -247,7 +247,7 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
    * Build and emit a normalised LLM_CALL event via the core emitter.
    * Eliminates the per-adapter boilerplate.
    */
-  protected emitLlmCallEvent(data: {
+  emitLlmCallEvent(data: {
     agentName?: string;
     model: string;
     provider: string;

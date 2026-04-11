@@ -46,6 +46,7 @@ export class MastraAdapter extends BaseFrameworkAdapter {
         { name: 'frequency_penalty', type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
         { name: 'presence_penalty',  type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
         { name: 'seed',              type: 'int',   default: null },
+        { name: 'system_prompt',     type: 'str',   default: null, multiline: true },
       ],
       mastra: [
         /** Max reasoning/tool-call steps per agent.generate() call */

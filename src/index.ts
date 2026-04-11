@@ -20,6 +20,7 @@ import { clearHooks } from '@/observability/hooks.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
 import type { SyrinConfig, SyrinSDK, SyrinEvent } from '@/types.js';
 import type { SyrinAdapter } from '@/adapters/types.js';
+import { _setAutoRefreshCallback } from '@/tunable/tunable.js';
 
 
 export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData } from '@/types.js';
@@ -33,6 +34,7 @@ export { OpenAIAdapter } from '@/adapters/openai/index.js';
 export { ConfigStore } from '@/config/store.js';
 export type { FieldSchema } from '@/config/store.js';
 export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry } from '@/tunable/tunable.js';
+export type { TuneOptions, TuneFieldDef } from '@/tunable/tunable.js';
 export { AnthropicAdapter } from '@/adapters/anthropic/index.js';
 export { LangChainAdapter } from '@/adapters/langchain/index.js';
 export { LangGraphAdapter } from '@/adapters/langgraph/index.js';
@@ -332,6 +334,9 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // POST config schema to backend so the dashboard knows what's remotely configurable
   await core.register();
 
+  // Wire auto-refresh: tune() calls after init() automatically push schema without needing refreshSchema()
+  _setAutoRefreshCallback(() => core.register());
+
   // Start heartbeat — keeps agent lastSeen fresh every 30 s + signals graceful shutdown
   const heartbeat = new Heartbeat({
     agentId: config.agentId,
@@ -388,6 +393,7 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
 }
 
 function _teardown(): void {
+  _setAutoRefreshCallback(null); // Stop auto-refresh on shutdown
   if (_primaryInstance) {
     const inst = _primaryInstance as unknown as { _pollTimer?: ReturnType<typeof setInterval> };
     if (inst._pollTimer) {

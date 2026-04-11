@@ -297,15 +297,27 @@ export class SyrinCore implements ISyrinCore {
     // System prompt injection
     if ('system_prompt' in effectiveConfig) {
       const systemPrompt = effectiveConfig['system_prompt'] as string | null;
-      const msgs: Record<string, unknown>[] = Array.isArray(modifiedRaw['messages'])
-        ? [...(modifiedRaw['messages'] as Record<string, unknown>[])]
-        : [];
-      if (systemPrompt === null) {
-        modifiedRaw['messages'] = msgs.filter((m: Record<string, unknown>) => m?.role !== 'system');
-      } else if (msgs.length > 0 && msgs[0]?.role === 'system') {
-        modifiedRaw['messages'] = [{ role: 'system', content: String(systemPrompt) }, ...msgs.slice(1)];
+      const isAnthropicFormat = 'system' in modifiedRaw;
+
+      if (isAnthropicFormat) {
+        // Anthropic: system prompt is a top-level `system` string field
+        if (systemPrompt === null) {
+          delete modifiedRaw['system'];
+        } else {
+          modifiedRaw['system'] = String(systemPrompt);
+        }
       } else {
-        modifiedRaw['messages'] = [{ role: 'system', content: String(systemPrompt) }, ...msgs];
+        // OpenAI-style: system prompt is the first message with role=system
+        const msgs: Record<string, unknown>[] = Array.isArray(modifiedRaw['messages'])
+          ? [...(modifiedRaw['messages'] as Record<string, unknown>[])]
+          : [];
+        if (systemPrompt === null) {
+          modifiedRaw['messages'] = msgs.filter((m: Record<string, unknown>) => m?.role !== 'system');
+        } else if (msgs.length > 0 && msgs[0]?.role === 'system') {
+          modifiedRaw['messages'] = [{ role: 'system', content: String(systemPrompt) }, ...msgs.slice(1)];
+        } else {
+          modifiedRaw['messages'] = [{ role: 'system', content: String(systemPrompt) }, ...msgs];
+        }
       }
       configApplied = true;
     }
@@ -332,8 +344,15 @@ export class SyrinCore implements ISyrinCore {
       configApplied = true;
     }
 
+    const rawMessages = Array.isArray(modifiedRaw['messages']) ? modifiedRaw['messages'] : [];
+    // Anthropic passes the system prompt as a separate top-level `system` field
+    // (not inside the messages array). Prepend it as a synthetic system message
+    // so it appears in prompt_messages in the dashboard context window.
+    const anthropicSystem = modifiedRaw['system'];
     const modifiedMessages = (
-      Array.isArray(modifiedRaw['messages']) ? modifiedRaw['messages'] : []
+      anthropicSystem && typeof anthropicSystem === 'string'
+        ? [{ role: 'system', content: anthropicSystem }, ...rawMessages]
+        : rawMessages
     ) as NormalizedMessage[];
 
     return {

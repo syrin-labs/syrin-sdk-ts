@@ -31,11 +31,21 @@ export interface TunableFieldOptions {
   applyTiming?: 'immediate' | 'beforeNextCall' | 'manual';
 }
 
+/** Rich field definition for tune() — use instead of a bare type string. */
+export interface TuneFieldDef {
+  type: 'number' | 'string' | 'boolean' | 'array';
+  default?: unknown;
+  description?: string;
+  ge?: number;
+  le?: number;
+  enum?: unknown[];
+}
+
 export interface TuneOptions {
   target: object;
   namespace: string;
   /** Either fields or schema must be provided */
-  fields?: Record<string, 'number' | 'string' | 'boolean' | 'array'>;
+  fields?: Record<string, 'number' | 'string' | 'boolean' | 'array' | TuneFieldDef>;
   schema?: object;  // Zod schema (optional, ignored if Zod not installed)
   apply?: (target: object, key: string, value: unknown) => void;
   applyTiming?: 'immediate' | 'beforeNextCall' | 'manual';
@@ -48,6 +58,28 @@ export interface TuneOptions {
 // ---------------------------------------------------------------------------
 
 export const TUNABLE_FIELD_MARKER = '__tunableField__';
+
+// ---------------------------------------------------------------------------
+// Auto-refresh hook — set by init() so tune() triggers schema push
+// ---------------------------------------------------------------------------
+
+let _autoRefreshCallback: (() => Promise<void>) | null = null;
+let _autoRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** @internal Called by init() to wire automatic schema refresh after tune(). */
+export function _setAutoRefreshCallback(cb: (() => Promise<void>) | null): void {
+  _autoRefreshCallback = cb;
+}
+
+function _scheduleAutoRefresh(): void {
+  if (!_autoRefreshCallback) return;
+  if (_autoRefreshTimer) clearTimeout(_autoRefreshTimer);
+  // Debounce: wait 50ms so multiple tune() calls in the same tick are batched
+  _autoRefreshTimer = setTimeout(() => {
+    _autoRefreshTimer = null;
+    _autoRefreshCallback?.().catch(() => { /* non-fatal */ });
+  }, 50);
+}
 
 export type TunableFieldMarker = TunableFieldOptions & { [TUNABLE_FIELD_MARKER]: true };
 
@@ -281,8 +313,21 @@ export function tune(options: TuneOptions): void {
   const current: Record<string, unknown> = {};
 
   if (options.fields) {
-    for (const [key, type] of Object.entries(options.fields)) {
-      fields[key] = { name: key, type, default: null };
+    for (const [key, typeOrDef] of Object.entries(options.fields)) {
+      if (typeof typeOrDef === 'string') {
+        fields[key] = { name: key, type: typeOrDef, default: null };
+      } else {
+        // Rich TuneFieldDef object
+        fields[key] = {
+          name: key,
+          type: typeOrDef.type,
+          default: typeOrDef.default ?? null,
+          description: typeOrDef.description,
+          constraints: (typeOrDef.ge !== undefined || typeOrDef.le !== undefined || typeOrDef.enum !== undefined)
+            ? { ge: typeOrDef.ge, le: typeOrDef.le, enum: typeOrDef.enum }
+            : undefined,
+        };
+      }
       // Read the current value from the target (supports dotted paths via apply fn)
       current[key] = readNestedValue(options.target, key);
     }
@@ -312,6 +357,11 @@ export function tune(options: TuneOptions): void {
     pending: {},
     current,
   });
+
+  // Auto-push schema to backend if SDK is initialized (no need to call refreshSchema() manually)
+  if (registry === globalRegistry) {
+    _scheduleAutoRefresh();
+  }
 }
 
 /**
