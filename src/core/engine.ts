@@ -14,15 +14,17 @@
  * to plug any LLM SDK into this engine without re-implementing any of the above.
  */
 
-import type { SyrinConfig, SyrinEvent } from '@/types.js';
+import type { SyrinSDKConfig, SyrinEvent } from '@/types.js';
 import { SDK_VERSION } from '@/config/config.js';
 import type { SessionStore } from '@/core/session.js';
 import { sessionStorage } from '@/core/session.js';
 import type { Emitter } from '@/observability/emitter.js';
 import type { OTelBridge } from '@/observability/otel.js';
 import type { CheckpointClient } from '@/core/checkpoint.js';
+import type { ConfigStore } from '@/config/store.js';
+import type { TunableRegistry } from '@/tunable/tunable.js';
 import type {
-  SyrinAdapter,
+  SyrinSDKAdapter,
   ISyrinCore,
   NormalizedCallParams,
   NormalizedCallResult,
@@ -52,20 +54,104 @@ import { detectProvider } from '@/utils/provider.js';
 // Re-export for convenience
 export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types.js';
 
-export class SyrinCore implements ISyrinCore {
-  private readonly _adapters = new Map<string, SyrinAdapter>();
+export class SyrinSDKCore implements ISyrinCore {
+  private readonly _adapters = new Map<string, SyrinSDKAdapter>();
+
+  /**
+   * Optional ConfigStore wired in by init() — exposes remote config to framework adapters.
+   * @internal Set by init() after construction; typed via getter.
+   */
+  private _configStore: ConfigStore | null = null;
+
+  /**
+   * Optional TunableRegistry wired in by init() — exposes @tunable params to the core.
+   * @internal Set by init() after construction; typed via getter.
+   */
+  private _tunableRegistry: TunableRegistry | null = null;
+
+  /** Auto-detection state — populated from the first LLM call's params. */
+  private _autoDetectedDefaults: Record<string, unknown> = {};
+  private _autoDetectedSections: Record<string, SchemaField[]> = {};
+  private _autoDetectDone = false;
 
   constructor(
-    readonly config: SyrinConfig,
+    readonly config: SyrinSDKConfig,
     readonly sessionStore: SessionStore,
     private readonly _emitter: Emitter,
     private readonly _otelBridge: OTelBridge,
     readonly checkpointClient: CheckpointClient,
   ) {}
 
+  // ── Typed accessors ──────────────────────────────────────────────────────
+
+  /**
+   * Typed accessor for the ConfigStore wired in by init().
+   * @returns The ConfigStore instance, or null if not yet wired.
+   */
+  getConfigStore(): ConfigStore | null {
+    return this._configStore;
+  }
+
+  /**
+   * Wire a ConfigStore into the core. Called by init() after construction.
+   * @param store - The ConfigStore instance to wire.
+   */
+  setConfigStore(store: ConfigStore): void {
+    this._configStore = store;
+  }
+
+  /**
+   * Typed accessor for the TunableRegistry wired in by init().
+   * @returns The TunableRegistry instance, or null if not yet wired.
+   */
+  getTunableRegistry(): TunableRegistry | null {
+    return this._tunableRegistry;
+  }
+
+  /**
+   * Wire a TunableRegistry into the core. Called by init() after construction.
+   * @param registry - The TunableRegistry instance to wire.
+   */
+  setTunableRegistry(registry: TunableRegistry): void {
+    this._tunableRegistry = registry;
+  }
+
+  /**
+   * Typed accessor for the Emitter instance.
+   * @returns The Emitter instance used for telemetry emission.
+   */
+  getEmitter(): Emitter {
+    return this._emitter;
+  }
+
   // ── Adapter registry ────────────────────────────────────────────────────
 
-  async registerAdapter(adapter: SyrinAdapter): Promise<void> {
+  /**
+   * Register and install an adapter into the core.
+   * Validates that the adapter satisfies the SyrinSDKAdapter interface.
+   * Idempotent — re-registering the same adapter name replaces the old one.
+   *
+   * @param adapter - Object implementing SyrinSDKAdapter (must have install, uninstall, isInstalled, name, configSchema).
+   * @throws Error if the passed object does not implement SyrinSDKAdapter.
+   *
+   * @example
+   * await core.registerAdapter(new OpenAIAdapter());
+   */
+  async registerAdapter(adapter: SyrinSDKAdapter): Promise<void> {
+    // Task 8: validate that the object actually implements SyrinSDKAdapter
+    if (
+      !adapter ||
+      typeof adapter !== 'object' ||
+      typeof (adapter as SyrinSDKAdapter).install !== 'function' ||
+      typeof (adapter as SyrinSDKAdapter).uninstall !== 'function' ||
+      typeof (adapter as SyrinSDKAdapter).isInstalled !== 'function' ||
+      typeof (adapter as SyrinSDKAdapter).name !== 'string' ||
+      typeof (adapter as SyrinSDKAdapter).configSchema !== 'function'
+    ) {
+      throw new Error(
+        `[Syrin] registerAdapter() requires an object implementing SyrinSDKAdapter (with install, uninstall, isInstalled, name, configSchema). Got: ${typeof adapter}`
+      );
+    }
     this._adapters.set(adapter.name, adapter);
     await adapter.install(this);
   }
@@ -95,6 +181,7 @@ export class SyrinCore implements ISyrinCore {
   buildSchema(): Record<string, unknown> {
     const sections: Record<string, Record<string, SchemaField>> = {};
 
+    // 1. Merge adapter schemas (first-writer wins per field)
     for (const adapter of this._adapters.values()) {
       const adapterSchema = adapter.configSchema();
       for (const [sectionName, fields] of Object.entries(adapterSchema)) {
@@ -107,10 +194,54 @@ export class SyrinCore implements ISyrinCore {
       }
     }
 
-    // Apply schemaDefaults — patch matching field defaults before returning.
-    // Parity with Python SDK's schema_defaults option.
-    const defaults = this.config.schemaDefaults ?? {};
-    for (const [path, value] of Object.entries(defaults)) {
+    // 2. Merge auto-detected sections (e.g. tools section from first LLM call)
+    for (const [sectionName, fields] of Object.entries(this._autoDetectedSections)) {
+      if (!sections[sectionName]) sections[sectionName] = {};
+      for (const field of fields) {
+        if (!sections[sectionName][field.name]) {
+          sections[sectionName][field.name] = field;
+        }
+      }
+    }
+
+    // 3. Merge TunableRegistry sections (registered via tune()) — converts FieldSchema → SchemaField
+    const tunableSchemas = this._tunableRegistry?.exportSchemas() ?? {};
+    const tunableTypeMap: Record<string, SchemaField['type']> = {
+      boolean: 'bool', number: 'float', string: 'str', array: 'str', object: 'str',
+    };
+    for (const [ns, fieldMap] of Object.entries(tunableSchemas)) {
+      if (!sections[ns]) sections[ns] = {};
+      for (const [fieldName, fs] of Object.entries(fieldMap)) {
+        if (!sections[ns][fieldName]) {
+          const constraints: NonNullable<SchemaField['constraints']> = {};
+          if (fs.ge !== undefined) constraints.ge = fs.ge;
+          if (fs.le !== undefined) constraints.le = fs.le;
+          if (fs.enum !== undefined) constraints.enum = fs.enum;
+          sections[ns][fieldName] = {
+            name: fieldName,
+            type: tunableTypeMap[fs.type] ?? 'str',
+            default: fs.default ?? null,
+            ...(Object.keys(constraints).length > 0 ? { constraints } : {}),
+          };
+        }
+      }
+    }
+
+    // 4. Apply auto-detected defaults (lower priority — user's schemaDefaults win)
+    const userDefaults = this.config.schemaDefaults ?? {};
+    for (const [path, value] of Object.entries(this._autoDetectedDefaults)) {
+      if (path in userDefaults) continue; // explicit user default wins
+      const dot = path.indexOf('.');
+      if (dot === -1) continue;
+      const sec = path.slice(0, dot);
+      const fieldName = path.slice(dot + 1);
+      if (sections[sec]?.[fieldName]) {
+        sections[sec][fieldName] = { ...sections[sec][fieldName], default: value };
+      }
+    }
+
+    // 5. Apply explicit schemaDefaults (highest priority)
+    for (const [path, value] of Object.entries(userDefaults)) {
       const dot = path.indexOf('.');
       if (dot === -1) continue;
       const sec = path.slice(0, dot);
@@ -164,7 +295,7 @@ export class SyrinCore implements ISyrinCore {
       if (res.ok) {
         const body = await res.json() as { configDelta?: Record<string, unknown> };
         const delta = body.configDelta ?? {};
-        const configStore = (this as unknown as { _configStore?: { set(ns: string, key: string, value: unknown): void } })._configStore;
+        const configStore = this._configStore;
         if (configStore) {
           for (const [path, value] of Object.entries(delta)) {
             const dot = path.indexOf('.');
@@ -201,6 +332,72 @@ export class SyrinCore implements ISyrinCore {
   // ── Call lifecycle ───────────────────────────────────────────────────────
 
   /**
+   * Auto-detect schema defaults from the first intercepted LLM call.
+   * Extracts model, temperature, max_tokens, system_prompt, and tool names so
+   * users don't need to declare them manually in schemaDefaults.
+   * User-provided schemaDefaults always win over auto-detected values.
+   */
+  private _detectDefaultsFromCall(params: NormalizedCallParams): void {
+    const userDefaults = this.config.schemaDefaults ?? {};
+    const autoDefaults: Record<string, unknown> = {};
+    const autoSections: Record<string, SchemaField[]> = {};
+    const raw = params.raw;
+
+    // LLM parameter fields
+    const llmMappings: Array<[string, string]> = [
+      ['model',             'llm.model'],
+      ['temperature',       'llm.temperature'],
+      ['max_tokens',        'llm.max_tokens'],
+      ['top_p',            'llm.top_p'],
+      ['frequency_penalty','llm.frequency_penalty'],
+      ['presence_penalty', 'llm.presence_penalty'],
+      ['seed',             'llm.seed'],
+    ];
+    for (const [rawKey, schemaPath] of llmMappings) {
+      if (!(schemaPath in userDefaults) && raw[rawKey] != null) {
+        autoDefaults[schemaPath] = raw[rawKey];
+      }
+    }
+
+    // System prompt — first system message (OpenAI) or top-level system field (Anthropic)
+    if (!('prompt.system_prompt' in userDefaults)) {
+      const msgs = Array.isArray(raw['messages']) ? raw['messages'] as Record<string, unknown>[] : [];
+      const sysMsg = msgs.find((m) => m?.['role'] === 'system');
+      if (sysMsg && typeof sysMsg['content'] === 'string' && sysMsg['content'].trim()) {
+        autoDefaults['prompt.system_prompt'] = sysMsg['content'];
+      } else if (typeof raw['system'] === 'string' && (raw['system'] as string).trim()) {
+        autoDefaults['prompt.system_prompt'] = raw['system'];
+      }
+    }
+
+    // Tools → register a 'tools' section with boolean toggles (enabled/disabled per tool)
+    const rawTools = raw['tools'] as Array<Record<string, unknown>> | undefined;
+    if (Array.isArray(rawTools) && rawTools.length > 0) {
+      const toolFields: SchemaField[] = [];
+      for (const tool of rawTools) {
+        const fn = tool?.['function'] as { name?: string } | undefined;
+        const toolName = fn?.name ?? (tool?.['name'] as string | undefined);
+        if (toolName) {
+          toolFields.push({ name: toolName, type: 'bool', default: true });
+        }
+      }
+      if (toolFields.length > 0) {
+        autoSections['tools'] = toolFields;
+      }
+    }
+
+    this._autoDetectedDefaults = autoDefaults;
+    this._autoDetectedSections = autoSections;
+
+    if (this.config.debug) {
+      const keys = [...Object.keys(autoDefaults), ...Object.values(autoSections).flat().map((f) => `tools.${f.name}`)];
+      if (keys.length > 0) {
+        console.log(`[Syrin] Auto-detected schema defaults: ${keys.join(', ')}`);
+      }
+    }
+  }
+
+  /**
    * Called by the adapter BEFORE invoking the underlying SDK.
    *
    * Executes pending governance actions (stop → throw GovernanceStopError,
@@ -210,6 +407,14 @@ export class SyrinCore implements ISyrinCore {
    * @throws GovernanceStopError if the backend sent a stop action.
    */
   async beforeCall(params: NormalizedCallParams): Promise<BeforeCallResult> {
+    // Auto-detect schema defaults from the first LLM call — fires register() in background
+    // so the dashboard shows real defaults without requiring schemaDefaults in init().
+    if (!this._autoDetectDone) {
+      this._autoDetectDone = true;
+      this._detectDefaultsFromCall(params);
+      this.register().catch(() => { /* non-fatal */ });
+    }
+
     // 1. Resolve session + agent context
     const sessionId = sessionStorage.getStore() ?? this.config.sessionId ?? generateId('ses_');
     const runCtx = agentStorage.getStore();
@@ -471,7 +676,7 @@ export class SyrinCore implements ISyrinCore {
     } = ctx;
     const {
       model, inputTokens, outputTokens, finishReason, durationMs,
-      toolCalls, toolDefinitions, responseText, stream,
+      toolCalls, toolDefinitions, responseText, stream, ttftMs,
     } = result;
 
     const costUsd = estimateCost(model, inputTokens, outputTokens);
@@ -488,6 +693,18 @@ export class SyrinCore implements ISyrinCore {
     const conversationHash = stableHash(
       JSON.stringify(modifiedMessages.map((m) => ({ role: m.role ?? '', content: String(m.content ?? '') })))
     );
+
+    // Compute mutationHash — tracks how the conversation input changed between calls
+    const session2 = this.sessionStore.getSession(sessionId);
+    const prevConvHash = session2?.lastConversationHash ?? null;
+    const mutationHash = _hashMutation(prevConvHash, conversationHash);
+    // Update session's lastConversationHash for the next call
+    if (session2) {
+      session2.lastConversationHash = conversationHash;
+    }
+
+    // Compute toolCallHash — hash of tool calls returned in the response
+    const toolCallHash = _hashToolCalls(toolCalls);
 
     const event: SyrinEvent = {
       event_id: generateId('evt_'),
@@ -523,6 +740,9 @@ export class SyrinCore implements ISyrinCore {
         context_utilization: parseFloat((totalTokens / ctxSize).toFixed(4)),
       } : {}),
       conversation_hash: conversationHash,
+      mutation_hash: mutationHash,
+      tool_call_hash: toolCallHash,
+      ...(ttftMs != null ? { ttft_ms: ttftMs } : {}),
       response_char_count: responseText?.length,
       has_refusal: detectRefusal(responseText),
       last_checkpoint_id: updatedSession?.lastCheckpointId,
@@ -543,7 +763,63 @@ export class SyrinCore implements ISyrinCore {
       })(),
     };
 
+    // Emit TOOL_RESULT for each role='tool' message BEFORE the LLM_CALL event.
+    // These represent tool outputs that were submitted as part of this request,
+    // meaning they happened chronologically before the LLM produced its response.
+    for (const msg of ctx.modifiedMessages ?? []) {
+      if ((msg as unknown as Record<string, unknown>)['role'] === 'tool') {
+        const m = msg as unknown as Record<string, unknown>;
+        const toolResultEvent: SyrinEvent = {
+          event_id: generateId('evt_'),
+          event_type: 'TOOL_RESULT',
+          timestamp: nowIso(),
+          session_id: sessionId,
+          agent_id: agentId ?? undefined,
+          run_id: agentStorage.getStore()?.runId,
+          trace_id: agentStorage.getStore()?.traceId,
+          tool_call_id: (m['tool_call_id'] as string | undefined) ?? '',
+          tool_name:    (m['name']         as string | undefined) ?? '',
+          tool_result:  String(m['content'] ?? ''),
+          model,
+          provider,
+          duration_ms: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cost_usd: 0,
+          stream: false,
+          config_applied: false,
+        };
+        try { this._emitter.emit(toolResultEvent, sessionId); } catch { /* fail-open */ }
+      }
+    }
+
     this._emitter.emit(event, sessionId);
+
+    // Emit TOOL_CALL for each tool call in the LLM response AFTER the LLM_CALL event.
+    // These represent function calls the model decided to make.
+    for (const tc of toolCalls ?? []) {
+      const toolCallEvent: SyrinEvent = {
+        event_id: generateId('evt_'),
+        event_type: 'TOOL_CALL',
+        timestamp: nowIso(),
+        session_id: sessionId,
+        agent_id: agentId ?? undefined,
+        run_id: agentStorage.getStore()?.runId,
+        trace_id: agentStorage.getStore()?.traceId,
+        tool_name:      tc.name      ?? '',
+        tool_call_id:   tc.id        ?? '',
+        tool_arguments: tc.arguments ?? '',
+        model,
+        provider,
+        duration_ms: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        stream: false,
+        config_applied: false,
+      };
+      try { this._emitter.emit(toolCallEvent, sessionId); } catch { /* fail-open */ }
+    }
 
     if (this.config.toolValidation && toolCalls?.length) {
       this._emitter.flush().catch((err) => {
@@ -588,6 +864,28 @@ export class SyrinCore implements ISyrinCore {
       messageCount: modifiedMessages.length,
     });
   }
+}
+
+/**
+ * Compute mutationHash — hash of (prevConversationHash + currentConversationHash).
+ * Tracks how the conversation input changed between calls.
+ */
+function _hashMutation(prevHash: string | null | undefined, currentHash: string): string {
+  return stableHash(`${prevHash ?? ''}|${currentHash}`).slice(0, 16);
+}
+
+/**
+ * Compute toolCallHash — order-independent hash of tool calls returned in a response.
+ * Returns null when there are no tool calls.
+ */
+function _hashToolCalls(
+  toolCalls: Array<{ id: string; name: string; arguments: string }> | undefined
+): string | null {
+  if (!toolCalls?.length) return null;
+  const entries = toolCalls
+    .map((tc) => ({ name: tc.name ?? '', args: tc.arguments ?? '' }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  return stableHash(JSON.stringify(entries)).slice(0, 16);
 }
 
 /** Read current run context fields — safe to call anywhere. */

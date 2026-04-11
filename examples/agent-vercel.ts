@@ -52,11 +52,9 @@ const sdk = await init({
   idleFlushMs: 2_000,
   configPollIntervalMs: 5_000,
   adapters: [vercelAdapter],
+  // llm.* and prompt.system_prompt are auto-detected from the first LLM call —
+  // no need to declare them here. Only list framework-specific overrides.
   schemaDefaults: {
-    'llm.model': 'gpt-4o-mini',
-    'llm.temperature': 0.7,
-    'llm.max_tokens': 400,
-    'prompt.system_prompt': 'You are a helpful assistant.',
     'vercel.max_steps': 5,
     'vercel.max_retries': 2,
     'vercel.abort_after_ms': 0,

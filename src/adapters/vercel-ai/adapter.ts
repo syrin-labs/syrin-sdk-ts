@@ -2,12 +2,12 @@
  * Vercel AI Adapter — Adapter class
  */
 
-import { BaseFrameworkAdapter } from '@/adapters/types.js';
+import { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types.js';
 import type { ISyrinCore, SchemaField } from '@/adapters/types.js';
 import { patchVercelAI, unpatchVercelAI, _originalGenerateText, _originalStreamText, _originalGenerateObject } from './patch.js';
 import { makeGenerateTextWrapper, makeStreamTextWrapper, makeGenerateObjectWrapper } from './wrappers.js';
 
-export class VercelAIAdapter extends BaseFrameworkAdapter {
+export class VercelAIAdapter extends SyrinSDKBaseFrameworkAdapter {
   readonly name = 'vercel-ai';
 
   override configSchema(): Record<string, SchemaField[]> {
@@ -20,6 +20,9 @@ export class VercelAIAdapter extends BaseFrameworkAdapter {
         { name: 'frequency_penalty', type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
         { name: 'presence_penalty',  type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
         { name: 'seed',              type: 'int',   default: null },
+      ],
+      prompt: [
+        { name: 'system_prompt', type: 'str', default: null, multiline: true },
       ],
       vercel: [
         /** Max agentic tool-call rounds per generateText() call */
