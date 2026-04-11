@@ -34,7 +34,7 @@ export const agentStorage = new AsyncLocalStorage<RunContext>();
 export async function withAgent<T>(
   agentId: string,
   fn: (ctx: RunContext) => Promise<T>,
-  options?: { runId?: string; workflowId?: string; swarmId?: string }
+  options?: { runId?: string; workflowId?: string; swarmId?: string; traceId?: string }
 ): Promise<T> {
   const parent = agentStorage.getStore();
   const ctx: RunContext = {
@@ -43,6 +43,8 @@ export async function withAgent<T>(
     workflowId: options?.workflowId ?? parent?.workflowId,
     swarmId: options?.swarmId ?? parent?.swarmId,
     parentRunId: parent?.runId,
+    traceId: options?.traceId ?? parent?.traceId ?? generateId('trc_'),
+    callDepth: parent ? parent.callDepth + 1 : 0,
   };
   return agentStorage.run(ctx, () => fn(ctx));
 }
@@ -60,13 +62,15 @@ export async function withAgent<T>(
 export async function withWorkflow<T>(
   workflowId: string | undefined,
   fn: (ctx: RunContext) => Promise<T>,
-  options?: { runId?: string }
+  options?: { runId?: string; traceId?: string }
 ): Promise<T> {
   const parent = agentStorage.getStore();
   const ctx: RunContext = {
     workflowId: workflowId ?? generateId('wf_'),
     runId: options?.runId ?? generateId('run_'),
     parentRunId: parent?.runId,
+    traceId: options?.traceId ?? parent?.traceId ?? generateId('trc_'),
+    callDepth: parent ? parent.callDepth + 1 : 0,
   };
   return agentStorage.run(ctx, () => fn(ctx));
 }
@@ -86,13 +90,15 @@ export async function withWorkflow<T>(
 export async function withSwarm<T>(
   swarmId: string | undefined,
   fn: (ctx: RunContext) => Promise<T>,
-  options?: { runId?: string }
+  options?: { runId?: string; traceId?: string }
 ): Promise<T> {
   const parent = agentStorage.getStore();
   const ctx: RunContext = {
     swarmId: swarmId ?? generateId('swarm_'),
     runId: options?.runId ?? generateId('run_'),
     parentRunId: parent?.runId,
+    traceId: options?.traceId ?? parent?.traceId ?? generateId('trc_'),
+    callDepth: parent ? parent.callDepth + 1 : 0,
   };
   return agentStorage.run(ctx, () => fn(ctx));
 }

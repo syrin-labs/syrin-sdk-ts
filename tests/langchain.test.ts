@@ -60,8 +60,8 @@ function makeMockChain(name = 'mock_chain') {
       if (config?.callbacks) {
         for (const cb of config.callbacks) {
           const handler = cb as Record<string, (...args: unknown[]) => void>;
-          handler['onChainStart']?.({}, inputs, { runId: 'run_test' });
-          handler['onChainEnd']?.({ result: 'ok' });
+          handler['handleChainStart']?.({}, inputs, 'run_test');
+          handler['handleChainEnd']?.({ result: 'ok' });
         }
       }
       return { result: 'ok' };
@@ -70,8 +70,8 @@ function makeMockChain(name = 'mock_chain') {
       if (config?.callbacks) {
         for (const cb of config.callbacks) {
           const handler = cb as Record<string, (...args: unknown[]) => void>;
-          handler['onChainStart']?.({}, inputs, { runId: 'run_async' });
-          handler['onChainEnd']?.({ result: 'ok_async' });
+          handler['handleChainStart']?.({}, inputs, 'run_async');
+          handler['handleChainEnd']?.({ result: 'ok_async' });
         }
       }
       return { result: 'ok_async' };
@@ -131,54 +131,54 @@ describe('LangChainAdapter', () => {
   it('onChainEnd emits CHAIN_EXECUTION event', async () => {
     await adapter.install(coreResult.core);
     const handler = adapter.callbackHandler('test_chain');
-    handler.onChainStart({}, {}, { runId: 'run_001' });
-    handler.onChainEnd({ result: 'ok' });
+    handler.handleChainStart({}, {}, 'run_001');
+    handler.handleChainEnd({ result: 'ok' });
 
     expect(coreResult.emitted.length).toBe(1);
     const event = coreResult.emitted[0] as Record<string, unknown>;
-    expect(event['eventType']).toBe('CHAIN_EXECUTION');
+    expect(event['event_type']).toBe('CHAIN_EXECUTION');
   });
 
   it('onChainError emits CHAIN_EXECUTION event with error field', async () => {
     await adapter.install(coreResult.core);
     const handler = adapter.callbackHandler('error_chain');
-    handler.onChainStart({}, {}, { runId: 'run_002' });
-    handler.onChainError(new Error('chain boom'));
+    handler.handleChainStart({}, {}, 'run_002');
+    handler.handleChainError(new Error('chain boom'));
 
     expect(coreResult.emitted.length).toBe(1);
     const event = coreResult.emitted[0] as Record<string, unknown>;
-    expect(event['eventType']).toBe('CHAIN_EXECUTION');
+    expect(event['event_type']).toBe('CHAIN_EXECUTION');
     expect(event['error']).toBe('chain boom');
   });
 
   it('CHAIN_EXECUTION event has chainName field', async () => {
     await adapter.install(coreResult.core);
     const handler = adapter.callbackHandler('my_chain');
-    handler.onChainStart({}, {}, { runId: 'run_003' });
-    handler.onChainEnd({});
+    handler.handleChainStart({}, {}, 'run_003');
+    handler.handleChainEnd({});
 
     const event = coreResult.emitted[0] as Record<string, unknown>;
-    expect(event['chainName']).toBe('my_chain');
+    expect(event['chain_name']).toBe('my_chain');
   });
 
   it('CHAIN_EXECUTION event has durationMs > 0', async () => {
     await adapter.install(coreResult.core);
     const handler = adapter.callbackHandler('timed_chain');
-    handler.onChainStart({}, {}, { runId: 'run_004' });
+    handler.handleChainStart({}, {}, 'run_004');
     // Small artificial delay
     await new Promise((r) => setTimeout(r, 5));
-    handler.onChainEnd({});
+    handler.handleChainEnd({});
 
     const event = coreResult.emitted[0] as Record<string, unknown>;
-    expect(typeof event['durationMs']).toBe('number');
-    expect(event['durationMs'] as number).toBeGreaterThanOrEqual(0);
+    expect(typeof event['duration_ms']).toBe('number');
+    expect(event['duration_ms'] as number).toBeGreaterThanOrEqual(0);
   });
 
   it('CHAIN_EXECUTION event has framework=langchain', async () => {
     await adapter.install(coreResult.core);
     const handler = adapter.callbackHandler('fw_chain');
-    handler.onChainStart({}, {}, { runId: 'run_005' });
-    handler.onChainEnd({});
+    handler.handleChainStart({}, {}, 'run_005');
+    handler.handleChainEnd({});
 
     const event = coreResult.emitted[0] as Record<string, unknown>;
     expect(event['framework']).toBe('langchain');
@@ -199,12 +199,8 @@ describe('LangChainAdapter', () => {
     const wrapped = adapter.wrap(chain);
     await wrapped.invoke({ input: 'hello' });
 
-    // The mock chain fires callbacks — so onChainStart/onChainEnd were called
-    // Verify the underlying invoke was called with a config containing callbacks
+    // wrap() emits events directly — verify the underlying invoke was called
     expect(chain.invoke).toHaveBeenCalledOnce();
-    const [, config] = (chain.invoke as ReturnType<typeof vi.fn>).mock.calls[0] as [unknown, { callbacks: unknown[] }];
-    expect(Array.isArray(config?.callbacks)).toBe(true);
-    expect(config.callbacks.length).toBeGreaterThan(0);
   });
 
   it('wrapped invoke emits CHAIN_EXECUTION event', async () => {
@@ -215,7 +211,7 @@ describe('LangChainAdapter', () => {
 
     expect(coreResult.emitted.length).toBe(1);
     const event = coreResult.emitted[0] as Record<string, unknown>;
-    expect(event['eventType']).toBe('CHAIN_EXECUTION');
+    expect(event['event_type']).toBe('CHAIN_EXECUTION');
   });
 
   it('wrapped ainvoke emits CHAIN_EXECUTION event', async () => {
@@ -226,7 +222,7 @@ describe('LangChainAdapter', () => {
 
     expect(coreResult.emitted.length).toBe(1);
     const event = coreResult.emitted[0] as Record<string, unknown>;
-    expect(event['eventType']).toBe('CHAIN_EXECUTION');
+    expect(event['event_type']).toBe('CHAIN_EXECUTION');
   });
 
   it('wrap preserves other chain properties via proxy', async () => {
@@ -245,7 +241,7 @@ describe('LangChainAdapter', () => {
     await wrapped.invoke({ input: 'test' });
 
     const event = coreResult.emitted[0] as Record<string, unknown>;
-    expect(event['chainName']).toBe('named_chain');
+    expect(event['chain_name']).toBe('named_chain');
   });
 
   // ── _buildConfig ─────────────────────────────────────────────────────────

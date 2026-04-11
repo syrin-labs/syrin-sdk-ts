@@ -425,29 +425,46 @@ export class SyrinCore implements ISyrinCore {
       ..._runCtxFields(),
     };
 
-    this._emitter.emit(errorEvent, sessionId);
-
-    this._otelBridge.recordSpan({
-      model,
-      provider,
-      temperature: tempUnsupported ? undefined : params.temperature,
-      maxTokens: params.max_tokens,
-      inputTokens: 0,
-      outputTokens: 0,
-      finishReason: 'error',
-      durationMs,
-      costUsd: 0,
-      cumulativeCostUsd: ctx?.initialCumulativeCostUsd ?? 0,
-      agentId: ctx?.agentId,
-      sessionId,
-      configApplied,
-      error,
-    });
+    try {
+      this._emitter.emit(errorEvent, sessionId);
+    } catch (emitErr) {
+      if (this.config.debug) console.warn('[Syrin] Error event emit failed (non-fatal):', emitErr);
+    }
+    try {
+      this._otelBridge.recordSpan({
+        model,
+        provider,
+        temperature: tempUnsupported ? undefined : params.temperature,
+        maxTokens: params.max_tokens,
+        inputTokens: 0,
+        outputTokens: 0,
+        finishReason: 'error',
+        durationMs,
+        costUsd: 0,
+        cumulativeCostUsd: ctx?.initialCumulativeCostUsd ?? 0,
+        agentId: ctx?.agentId,
+        sessionId,
+        configApplied,
+        error,
+      });
+    } catch (otelErr) {
+      if (this.config.debug) console.warn('[Syrin] OTel error span failed (non-fatal):', otelErr);
+    }
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────
 
   private _recordAndEmit(ctx: BeforeCallResult, result: NormalizedCallResult): void {
+    try {
+      this._doRecordAndEmit(ctx, result);
+    } catch (err) {
+      if (this.config.debug) {
+        console.warn('[Syrin] Telemetry error (non-fatal — user call succeeded):', err);
+      }
+    }
+  }
+
+  private _doRecordAndEmit(ctx: BeforeCallResult, result: NormalizedCallResult): void {
     const {
       sessionId, agentId, configApplied, governanceApplied,
       modifiedMessages, modifiedRaw, tempUnsupported,
@@ -574,7 +591,7 @@ export class SyrinCore implements ISyrinCore {
 }
 
 /** Read current run context fields — safe to call anywhere. */
-function _runCtxFields(): Pick<SyrinEvent, 'run_id' | 'workflow_id' | 'swarm_id' | 'parent_run_id'> {
+function _runCtxFields(): Pick<SyrinEvent, 'run_id' | 'workflow_id' | 'swarm_id' | 'parent_run_id' | 'trace_id' | 'call_depth'> {
   const ctx = agentStorage.getStore();
   if (!ctx) return {};
   return {
@@ -582,5 +599,7 @@ function _runCtxFields(): Pick<SyrinEvent, 'run_id' | 'workflow_id' | 'swarm_id'
     workflow_id: ctx.workflowId,
     swarm_id: ctx.swarmId,
     parent_run_id: ctx.parentRunId,
+    trace_id: ctx.traceId,
+    call_depth: ctx.callDepth,
   };
 }

@@ -59,6 +59,8 @@ export interface SyrinEvent {
   workflow_id?: string;
   swarm_id?: string;
   parent_run_id?: string;
+  trace_id?: string;
+  call_depth?: number;
   // Tool contract validation
   tool_calls?: Array<{ id: string; name: string; arguments: string }>;
   tool_definitions?: Array<{ name: string | undefined; parameters: unknown }>;
@@ -98,6 +100,10 @@ export interface RunContext {
   workflowId?: string;
   swarmId?: string;
   parentRunId?: string;
+  /** Spans the entire multi-agent call tree — inherited by child agents. Generated at root. */
+  traceId: string;
+  /** Nesting level: 0 = outermost call, 1 = first nested agent, etc. */
+  callDepth: number;
 }
 
 export interface IngestPayload {

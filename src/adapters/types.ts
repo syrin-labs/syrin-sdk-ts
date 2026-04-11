@@ -209,8 +209,15 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
 
   emitEvent(event: Record<string, unknown>): void {
     if (this._core) {
-      (this._core as unknown as { _emitter: { emit: (e: unknown, s: string) => void } })
-        ._emitter.emit(event as never, this.sessionId ?? 'unknown');
+      try {
+        (this._core as unknown as { _emitter: { emit: (e: unknown, s: string) => void } })
+          ._emitter.emit(event as never, this.sessionId ?? 'unknown');
+      } catch (err) {
+        // Non-fatal: telemetry errors must never crash user code
+        // Silent in production; only log in debug
+        const cfg = (this._core as unknown as { config?: { debug?: boolean } })?.config;
+        if (cfg?.debug) console.warn('[Syrin] Framework event emit failed (non-fatal):', err);
+      }
     }
   }
 
