@@ -52,14 +52,7 @@ const sdk = await init({
   idleFlushMs: 2_000,
   configPollIntervalMs: 5_000,
   adapters: [vercelAdapter],
-  // llm.* and prompt.system_prompt are auto-detected from the first LLM call —
-  // no need to declare them here. Only list framework-specific overrides.
-  schemaDefaults: {
-    'vercel.max_steps': 5,
-    'vercel.max_retries': 2,
-    'vercel.abort_after_ms': 0,
-    'vercel.structured_output': false,
-  },
+  // No schemaDefaults needed — auto-detected from cfg() calls in this file.
 });
 
 const cfg = (key: string, fallback: unknown): unknown => sdk.activeConfig()[key] ?? fallback;

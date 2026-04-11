@@ -34,7 +34,7 @@ import cors from 'cors';
 import { StateGraph, Annotation, END, START } from '@langchain/langgraph';
 import { ChatOpenAI } from '@langchain/openai';
 import { HumanMessage, SystemMessage } from '@langchain/core/messages';
-import { init, withSession, shutdown, tune, refreshSchema, mountConfigEndpoint, LangGraphAdapter, OpenAIAdapter } from '../src/index.js';
+import { init, withSession, shutdown, tune, refreshSchema, mountConfigEndpoint, LangGraphAdapter, OpenAIAdapter } from '../dist/index.js';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -51,12 +51,7 @@ const sdk = await init({
   idleFlushMs: 2_000,
   configPollIntervalMs: 5_000,
   adapters: [new OpenAIAdapter(), new LangGraphAdapter()],
-  schemaDefaults: {
-    'llm.model': 'gpt-4o-mini',
-    'llm.temperature': 0.7,
-    'llm.max_tokens': 500,
-    'langgraph.recursion_limit': 25,
-  },
+  // No schemaDefaults needed — auto-detected from cfg() calls in this file.
 });
 
 const cfg = (key: string, fallback: unknown): unknown => sdk.activeConfig()[key] ?? fallback;

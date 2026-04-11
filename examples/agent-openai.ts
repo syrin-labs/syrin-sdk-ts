@@ -28,7 +28,7 @@
 import express, { Request, Response } from 'express';
 import cors from 'cors';
 import OpenAI from 'openai';
-import { init, withSession, shutdown, tune, refreshSchema, mountConfigEndpoint } from '../src/index.js';
+import { init, withSession, shutdown, tune, refreshSchema, mountConfigEndpoint } from '../dist/index.js';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -44,12 +44,8 @@ const sdk = await init({
   batchSize: 1,
   idleFlushMs: 2_000,
   configPollIntervalMs: 5_000,
-  schemaDefaults: {
-    'llm.model': 'gpt-4o-mini',
-    'llm.temperature': 0.7,
-    'llm.max_tokens': 500,
-    'prompt.system_prompt': 'You are a helpful assistant.',
-  },
+  // No schemaDefaults needed — the SDK scans this file for cfg() calls and
+  // auto-detects all defaults (model, temperature, system_prompt, tools, etc.).
 });
 
 const cfg = (key: string, fallback: unknown): unknown => sdk.activeConfig()[key] ?? fallback;

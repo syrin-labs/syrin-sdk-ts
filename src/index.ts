@@ -12,27 +12,30 @@ import { SessionStore, sessionStorage, resolveSessionId } from '@/core/session.j
 import { Emitter } from '@/observability/emitter.js';
 import { OTelBridge } from '@/observability/otel.js';
 import { CheckpointClient } from '@/core/checkpoint.js';
-import { SyrinCore } from '@/core/engine.js';
+import { SyrinSDKCore } from '@/core/engine.js';
 import { Heartbeat } from '@/core/heartbeat.js';
 import { load as loadPersistedConfig, save as savePersistedConfig } from '@/config/persist.js';
-import { OpenAIAdapter, unpatch, isPatched } from '@/adapters/openai/index.js';
+import { OpenAIAdapter } from '@/adapters/openai/index.js';
 import { clearHooks } from '@/observability/hooks.js';
+import { installForActiveLibraries, installModuleHook, uninstallModuleHook } from '@/utils/auto-detect.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
-import type { SyrinConfig, SyrinSDK, SyrinEvent } from '@/types.js';
-import type { SyrinAdapter } from '@/adapters/types.js';
+import type { SyrinSDKConfig, SyrinSDK, SyrinEvent, ConfigUpdate, MessageParam } from '@/types.js';
+import type { SyrinSDKAdapter } from '@/adapters/types.js';
 import { _setAutoRefreshCallback } from '@/tunable/tunable.js';
+import { _setLifecycleEmitter } from '@/agent/context.js';
 
 
-export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData } from '@/types.js';
-export { withAgent, withWorkflow, withSwarm, getRunContext } from '@/agent/context.js';
+export type { SyrinSDKConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ConfigUpdate, MessageParam } from '@/types.js';
+export { withAgent, withWorkflow, withSwarm, getRunContext, _setLifecycleEmitter } from '@/agent/context.js';
+export { withTool, ToolSpan, withMemory, MemorySpan } from '@/agent/tool-context.js';
 export { GovernanceStopError } from '@/core/governance.js';
 export type { Checkpoint } from '@/core/checkpoint.js';
 export { onConfigChange, onAlert } from '@/observability/hooks.js';
-export { SyrinCore } from '@/core/engine.js';
-export type { SyrinAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore, SchemaField as AdapterSchemaField } from '@/adapters/types.js';
+export { SyrinSDKCore } from '@/core/engine.js';
+export type { SyrinSDKAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore, SchemaField as AdapterSchemaField } from '@/adapters/types.js';
 export { OpenAIAdapter } from '@/adapters/openai/index.js';
 export { ConfigStore } from '@/config/store.js';
-export type { FieldSchema } from '@/config/store.js';
+export type { FieldSchema, ConfigVersion, AuditEntry } from '@/config/store.js';
 export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry } from '@/tunable/tunable.js';
 export type { TuneOptions, TuneFieldDef } from '@/tunable/tunable.js';
 export { AnthropicAdapter } from '@/adapters/anthropic/index.js';
@@ -40,24 +43,26 @@ export { LangChainAdapter } from '@/adapters/langchain/index.js';
 export { LangGraphAdapter } from '@/adapters/langgraph/index.js';
 export { MastraAdapter } from '@/adapters/mastra/index.js';
 export { VercelAIAdapter } from '@/adapters/vercel-ai/index.js';
-export { BaseFrameworkAdapter } from '@/adapters/types.js';
-export type { FrameworkAdapter } from '@/adapters/types.js';
+export { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types.js';
+export type { SyrinSDKFrameworkAdapter } from '@/adapters/types.js';
 
 export class SyrinSDKInstance implements SyrinSDK {
   private _sessionId: string;
-  private _config: SyrinConfig;
+  private _config: SyrinSDKConfig;
   private _sessionStore: SessionStore;
   private _emitter: Emitter;
   private _otelBridge: OTelBridge;
-  private _core: SyrinCore;
+  private _core: SyrinSDKCore;
   private _heartbeat: Heartbeat;
+  /** Config poll timer — set by init() when configPollIntervalMs > 0. */
+  _pollTimer: ReturnType<typeof setInterval> | undefined = undefined;
 
   constructor(
-    config: SyrinConfig,
+    config: SyrinSDKConfig,
     sessionStore: SessionStore,
     emitter: Emitter,
     otelBridge: OTelBridge,
-    core: SyrinCore,
+    core: SyrinSDKCore,
     heartbeat: Heartbeat,
   ) {
     this._config = config;
@@ -73,19 +78,23 @@ export class SyrinSDKInstance implements SyrinSDK {
     return this._sessionId;
   }
 
-  get config(): SyrinConfig {
+  get config(): SyrinSDKConfig {
     return this._config;
   }
 
   /**
    * Register a custom adapter (e.g. LangChain, Anthropic) after init().
+   * Returns `this` so calls can be chained (after awaiting).
    *
    * @example
    * import { MyCustomAdapter } from './my-adapter';
    * await sdk.registerAdapter(new MyCustomAdapter());
+   * // or chained:
+   * await (await sdk.registerAdapter(adapterA)).registerAdapter(adapterB);
    */
-  async registerAdapter(adapter: SyrinAdapter): Promise<void> {
+  async registerAdapter(adapter: SyrinSDKAdapter): Promise<this> {
     await this._core.registerAdapter(adapter);
+    return this;
   }
 
   /**
@@ -102,14 +111,28 @@ export class SyrinSDKInstance implements SyrinSDK {
 
   /**
    * Set local config overrides — takes priority over remote config.
+   * Returns `this` so calls can be chained.
+   *
+   * @param overrides - Config fields to override. Only provided keys are changed.
+   * @param sessionId - Target session. Defaults to the instance's default session.
+   *
+   * @example
+   * sdk.configure({ temperature: 0.3 }).configure({ model: 'gpt-4o-mini' });
    */
-  configure(overrides: Record<string, unknown>, sessionId?: string): void {
+  configure(overrides: ConfigUpdate, sessionId?: string): this {
     const sid = sessionId ?? this._sessionId;
-    this._sessionStore.setLocalConfig(sid, overrides);
+    this._sessionStore.setLocalConfig(sid, overrides as Record<string, unknown>);
+    return this;
   }
 
   /**
-   * Return the currently active remote config for a session.
+   * Return the currently active config for a session (remote overrides + local overrides merged).
+   *
+   * Keys use `"namespace.field"` notation (e.g. `"llm.temperature"`, `"llm.model"`).
+   * Only fields with non-null values are included — missing keys mean "use the library default".
+   *
+   * @example
+   * const temp = sdk.activeConfig()['llm.temperature'] as number | undefined ?? 0.7;
    */
   activeConfig(sessionId?: string): Record<string, unknown> {
     const sid = sessionId ?? this._sessionId;
@@ -119,14 +142,21 @@ export class SyrinSDKInstance implements SyrinSDK {
   /**
    * Create a checkpoint of the current conversation state.
    * Persisted to the Syrin backend; falls back to local cache if offline.
+   *
+   * @param messages - Conversation messages to snapshot.
+   * @param options - Optional session ID, label, and metadata.
+   * @returns The created Checkpoint record.
+   *
+   * @example
+   * const cp = await sdk.createCheckpoint(messages, { label: 'before-tool-call' });
    */
   async createCheckpoint(
-    messages: Array<Record<string, unknown>>,
+    messages: MessageParam[] | Array<Record<string, unknown>>,
     options: { sessionId?: string; label?: string; metadata?: Record<string, unknown> } = {}
   ): Promise<import('./core/checkpoint.js').Checkpoint> {
     const sid = options.sessionId ?? this._sessionId;
     const session = this._sessionStore.getSession(sid);
-    const cp = await this._core.checkpointClient.save(sid, messages, {
+    const cp = await this._core.checkpointClient.save(sid, messages as Array<Record<string, unknown>>, {
       label: options.label,
       metadata: options.metadata,
       activeConfig: session?.activeConfig ?? {},
@@ -142,6 +172,13 @@ export class SyrinSDKInstance implements SyrinSDK {
   /**
    * Restore messages from a saved checkpoint.
    * Fetches from backend if not in local cache.
+   *
+   * @returns The saved message array, or `undefined` if the checkpoint ID is not found.
+   *          Always check for `undefined` before using the result.
+   *
+   * @example
+   * const messages = await sdk.restoreCheckpoint(cp.checkpointId);
+   * if (!messages) throw new Error(`Checkpoint ${cp.checkpointId} not found`);
    */
   async restoreCheckpoint(checkpointId: string): Promise<Array<Record<string, unknown>> | undefined> {
     const cp = await this._core.checkpointClient.getById(checkpointId);
@@ -186,6 +223,8 @@ export class SyrinSDKInstance implements SyrinSDK {
   }
 
   async shutdown(): Promise<void> {
+    _setLifecycleEmitter(null);
+    uninstallModuleHook();
     await this._heartbeat.stop();
     await this._emitter.stop();
     this._core.uninstallAll();
@@ -203,54 +242,156 @@ const _instances = new Map<string, SyrinSDKInstance>();
 let _primaryInstance: SyrinSDKInstance | null = null;
 
 
+/**
+ * Options accepted by `init()`.
+ * All fields are optional — the SDK reads defaults from environment variables.
+ *
+ * @example
+ * const sdk = await init({
+ *   apiKey: 'syrin_...',
+ *   agentId: 'my-agent',
+ *   debug: true,
+ * });
+ */
 export interface SyrinInitOptions {
+  /**
+   * Syrin API key. Falls back to the `SYRIN_API_KEY` environment variable.
+   * Required — init() throws if neither is set.
+   */
   apiKey?: string;
-  agentId?: string;
+  /**
+   * The name of your AI application or service as it appears in the Syrin dashboard.
+   * E.g. `'customer-support-bot'`, `'research-pipeline'`.
+   *
+   * For multi-agent apps this is the **service** name — individual agent runs are
+   * scoped with `withAgent('researcher', ...)`. Max 128 chars. Alphanumeric + `-_.@:`.
+   * Falls back to `SYRIN_NAME` env var.
+   */
+  name?: string;
+  /**
+   * Override the session ID for this instance.
+   * Max 128 chars. Alphanumeric, hyphens, underscores, dots, colons, @.
+   * Auto-generated if not provided.
+   */
   sessionId?: string;
-  backendUrl?: string;
+  /**
+   * Syrin backend URL. Defaults to `https://api.syrin.ai`.
+   * Must use HTTPS except for `http://localhost` and `http://127.0.0.1`.
+   * Falls back to `SYRIN_URL` env var.
+   */
+  url?: string;
+  /**
+   * OTel span exporter. One of `'none'` (default), `'console'`, `'otlp'`.
+   * Falls back to `SYRIN_OTEL_EXPORTER` env var.
+   */
   otelExporter?: 'none' | 'console' | 'otlp';
+  /**
+   * OTLP endpoint URL (only used when otelExporter is `'otlp'`).
+   * Defaults to `http://localhost:4318`. Falls back to `SYRIN_OTEL_ENDPOINT`.
+   */
   otelEndpoint?: string;
+  /**
+   * Print all SDK activity to stderr. Useful during development.
+   * Falls back to `SYRIN_DEBUG=true` env var. Default: `false`.
+   */
   debug?: boolean;
+  /**
+   * Include prompt messages and completion text in telemetry events.
+   * **On by default.** Set to `false` to redact content for privacy-sensitive deployments.
+   * Falls back to `SYRIN_CAPTURE_CONTENT` env var.
+   */
   captureContent?: boolean;
+  /**
+   * Run the SDK without sending any network requests.
+   * Events are queued locally and discarded on shutdown. Default: `false`.
+   */
   offline?: boolean;
-  /** Flush the event queue after this many ms of inactivity (default: 10 000). */
+  /**
+   * Flush the event queue after this many ms of inactivity.
+   * Default: 10 000 (10 seconds). Falls back to `SYRIN_IDLE_FLUSH_MS`.
+   */
   idleFlushMs?: number;
+  /**
+   * Flush the event queue immediately when it reaches this size.
+   * Default: 100. Falls back to `SYRIN_BATCH_SIZE`.
+   */
   batchSize?: number;
+  /**
+   * Enable tool call validation. When true, tool call args and schemas are
+   * sent to the backend for validation. Default: `false`.
+   */
   toolValidation?: boolean;
+  /**
+   * Auto-delete sessions older than this many ms (undefined = disabled).
+   */
   sessionTtlMs?: number;
-  /** Public URL of this agent server — stored by dashboard to enable the "Run" button. */
+  /**
+   * Public URL of this agent server — stored by the dashboard to enable
+   * the "Run" button for remote agent invocations.
+   */
   serverUrl?: string;
-  adapters?: import('./adapters/types.js').SyrinAdapter[];
+  /**
+   * Additional adapters to install after the built-in ones.
+   * Each adapter is registered in order; explicit adapters take precedence
+   * over auto-detected ones of the same name.
+   *
+   * @example
+   * import { LangChainAdapter } from '@syrin/sdk';
+   * await init({ adapters: [new LangChainAdapter()] });
+   */
+  adapters?: import('./adapters/types.js').SyrinSDKAdapter[];
   /**
    * Name for this SDK instance in the registry.
-   * Defaults to 'default'. Multiple named instances can coexist.
+   * Defaults to `'default'`. Multiple named instances can coexist in one process.
+   *
+   * @example
+   * const researcher = await init({ instanceName: 'researcher', apiKey: '...' });
+   * const writer = await init({ instanceName: 'writer', apiKey: '...' });
    */
   instanceName?: string;
   /**
-   * How often (in ms) to poll the backend for config overrides.
-   * 0 (default) disables polling.
+   * How often (in ms) to poll the backend for remote config overrides.
+   * 0 or undefined (default) disables polling.
+   * Falls back to `SYRIN_CONFIG_POLL_INTERVAL_MS` env var.
    */
   configPollIntervalMs?: number;
   /**
    * Default values for schema fields shown in the dashboard.
-   * Keys use dot-notation: { 'llm.model': 'gpt-4o-mini', 'llm.temperature': 0.7 }.
-   * Parity with Python SDK's schema_defaults option.
+   * Keys use dot-notation (e.g. `'llm.model'`, `'llm.temperature'`).
+   * Parity with Python SDK's `schema_defaults` option.
+   *
+   * @example
+   * schemaDefaults: { 'llm.model': 'gpt-4o-mini', 'llm.temperature': 0.7 }
    */
   schemaDefaults?: Record<string, unknown>;
 }
 
 /**
- * Initialize the Syrin SDK.
- * Patches the OpenAI SDK and starts the event emitter.
+ * Initialize the Syrin SDK and return an instrumented instance.
+ *
+ * Automatically patches OpenAI (always), Anthropic, LangChain, LangGraph,
+ * Mastra, and Vercel AI SDK providers when their libraries are installed.
+ * Starts the event batcher, registers the agent schema with the backend,
+ * and begins the heartbeat keep-alive.
+ *
+ * @param options - Init options. All fields optional; API key required either
+ *   here or via `SYRIN_API_KEY` env var.
+ * @returns A fully initialized `SyrinSDKInstance`.
  *
  * @remarks
- * ⚠️ You MUST await init(). If you skip await, the OpenAI SDK may not be
- * patched before your first API call and telemetry will be silently missed.
+ * You MUST `await init()`. If you skip `await`, provider patches may not be
+ * applied before your first API call and telemetry will be silently missed.
  *
- * Pass `instanceName` to support multiple named SDK instances.
- * Without `instanceName` (or `instanceName: 'default'`), behaves exactly as before.
+ * @example
+ * import { init } from '@syrin/sdk';
+ * const sdk = await init({ apiKey: 'syrin_...', name: 'my-agent' });
+ * // All subsequent OpenAI / Anthropic calls are now instrumented automatically
  */
 export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInstance> {
+  // Capture the call stack NOW (synchronously) before any await — this is the only
+  // moment when the caller's file appears in the stack trace.
+  const _initStack = new Error().stack ?? '';
+
   const name = options.instanceName ?? 'default';
 
   const existing = _instances.get(name);
@@ -263,17 +404,17 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
     _instances.delete(name);
   }
 
-  // For 'default' instance, warn and tear down legacy singleton if present (backward compat)
-  if (name === 'default' && _primaryInstance !== null) {
-    console.warn(
-      '[Syrin] init() called more than once for the default instance. Reinitializing. Call shutdown() first to avoid this warning.'
-    );
-    _teardown();
-  }
-
   clearHooks();
 
-  const config = createConfig(options as Partial<SyrinConfig> & { apiKey?: string });
+  // Map `name` → `agentId` and `url` → `backendUrl` (internal config field names).
+  // Only set when provided so DEFAULTS in createConfig() still apply.
+  const configInput: Partial<SyrinSDKConfig> & { apiKey?: string } = {
+    ...(options as Partial<SyrinSDKConfig>),
+  };
+  if (options.name !== undefined) configInput.agentId = options.name;
+  if (options.url !== undefined) configInput.backendUrl = options.url;
+
+  const config = createConfig(configInput);
 
   const sessionId = resolveSessionId(config.sessionId);
   config.sessionId = sessionId;
@@ -286,8 +427,11 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   otelBridge.setup();
   emitter.start();
 
-  // Build SyrinCore — the provider-agnostic instrumentation engine
-  const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+  // Wire lifecycle emitter for withAgent/withWorkflow/withSwarm events
+  _setLifecycleEmitter(emitter);
+
+  // Build SyrinSDKCore — the provider-agnostic instrumentation engine
+  const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
 
   // Register the built-in OpenAI adapter (loads openai module lazily)
   await core.registerAdapter(new OpenAIAdapter());
@@ -295,26 +439,38 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // Wire ConfigStore into core so framework adapters can read config
   const { ConfigStore } = await import('./config/store.js');
   const configStore = new ConfigStore();
-  (core as unknown as Record<string, unknown>)['_configStore'] = configStore;
+  core.setConfigStore(configStore);
 
   // Wire global TunableRegistry into core
   const { globalRegistry } = await import('./tunable/tunable.js');
-  (core as unknown as Record<string, unknown>)['_tunableRegistry'] = globalRegistry;
+  core.setTunableRegistry(globalRegistry);
 
-  // Try to auto-install Anthropic adapter if @anthropic-ai/sdk is available
+  // Scan the user's source file(s) for cfg()/activeConfig() patterns and pre-populate
+  // schema defaults — so the dashboard shows real values before the first LLM call.
+  // This is best-effort: failures are silently swallowed.
   try {
-    const { AnthropicAdapter } = await import('./adapters/anthropic/index.js');
-    await core.registerAdapter(new AnthropicAdapter());
-  } catch {
-    // @anthropic-ai/sdk not installed — skip silently
-  }
+    const { scanCallerDefaults } = await import('./utils/code-scanner.js');
+    const scanned = scanCallerDefaults(_initStack);
+    if (scanned.length > 0) {
+      core.setCodeScannedDefaults(scanned);
+      if (config.debug) {
+        console.log(`[Syrin] Code-scan detected ${scanned.length} config defaults:`, scanned.map(d => d.path).join(', '));
+      }
+    }
+  } catch { /* non-fatal */ }
 
-  // Register user-provided adapters
+  // Register user-provided adapters first — they always take precedence over auto-detection
   if (options.adapters) {
     for (const adapter of options.adapters) {
       await core.registerAdapter(adapter);
     }
   }
+
+  // Auto-detect framework libraries: inspect require.cache for libraries already loaded,
+  // then hook Module._load to catch libraries loaded after init().
+  // Only libraries actively used in this process are instrumented (not merely installed).
+  await installForActiveLibraries(core, config);
+  installModuleHook(core, config);
 
   // Load persisted config from previous run (.syrin/syrin.config.json).
   // Parity with Python SDK — overrides survive restarts without waiting for polling.
@@ -372,7 +528,7 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
       }
     }, pollIntervalMs);
 
-    (instance as unknown as { _pollTimer: ReturnType<typeof setInterval> })._pollTimer = pollTimer;
+    instance._pollTimer = pollTimer;
   }
 
   // Register in named registry
@@ -390,23 +546,6 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   sessionStore.getOrCreate(sessionId, config.agentId).catch(() => { /* ignore */ });
 
   return instance;
-}
-
-function _teardown(): void {
-  _setAutoRefreshCallback(null); // Stop auto-refresh on shutdown
-  if (_primaryInstance) {
-    const inst = _primaryInstance as unknown as { _pollTimer?: ReturnType<typeof setInterval> };
-    if (inst._pollTimer) {
-      clearInterval(inst._pollTimer);
-      inst._pollTimer = undefined;
-    }
-    _primaryInstance.shutdown().catch(() => { /* ignore */ });
-    _primaryInstance = null;
-  }
-  _instances.delete('default');
-  if (isPatched()) {
-    unpatch();
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -452,18 +591,17 @@ export function mountConfigEndpoint(instanceName = 'default') {
     const overrides = body as Record<string, unknown>;
 
     // Apply to all active sessions
-    const store = (inst as unknown as { _sessionStore: SessionStore })._sessionStore;
-    const ids = typeof (store as unknown as { getSessionIds?(): string[] }).getSessionIds === 'function'
-      ? (store as unknown as { getSessionIds(): string[] }).getSessionIds()
+    const store = inst['_sessionStore'] as SessionStore;
+    const ids = typeof (store as SessionStore & { getSessionIds?(): string[] }).getSessionIds === 'function'
+      ? (store as SessionStore & { getSessionIds(): string[] }).getSessionIds()
       : [];
     for (const sid of ids) {
-      if (typeof (store as unknown as { applyConfigUpdate?(s: string, o: Record<string, unknown>): void }).applyConfigUpdate === 'function') {
-        (store as unknown as { applyConfigUpdate(s: string, o: Record<string, unknown>): void }).applyConfigUpdate(sid, overrides);
-      }
+      store.applyConfigUpdate(sid, overrides);
     }
 
     // Also apply to the primary session config
-    inst.configure(overrides);
+    // Cast is safe: overrides came from trusted backend JSON
+    inst.configure(overrides as ConfigUpdate);
 
     // Persist to disk
     savePersistedConfig(overrides);
@@ -480,10 +618,9 @@ export async function shutdown(name = 'default'): Promise<void> {
   const inst = _instances.get(name);
   if (!inst) return;
 
-  const instWithTimer = inst as unknown as { _pollTimer?: ReturnType<typeof setInterval> };
-  if (instWithTimer._pollTimer) {
-    clearInterval(instWithTimer._pollTimer);
-    instWithTimer._pollTimer = undefined;
+  if (inst._pollTimer) {
+    clearInterval(inst._pollTimer);
+    inst._pollTimer = undefined;
   }
 
   await inst.shutdown();
@@ -494,6 +631,13 @@ export async function shutdown(name = 'default'): Promise<void> {
   }
 }
 
+/**
+ * Return the currently active session ID.
+ * Prefers the session ID from AsyncLocalStorage (set by withSession()),
+ * falls back to the default instance's session ID, or generates a new one.
+ *
+ * @returns The active session ID string.
+ */
 export function getSessionId(): string {
   if (_primaryInstance) {
     return sessionStorage.getStore() ?? _primaryInstance.sessionId;
@@ -501,11 +645,25 @@ export function getSessionId(): string {
   return sessionStorage.getStore() ?? generateId('ses_');
 }
 
+/**
+ * Run an async function in the scope of a named session.
+ * Emits SESSION_STARTED / SESSION_ENDED events around the function call.
+ * All LLM calls made within `fn` will be tagged with `sessionId`.
+ *
+ * @param sessionId - The session identifier to scope.
+ * @param fn - Async function to run within the session.
+ * @returns The return value of `fn`.
+ *
+ * @example
+ * const result = await withSession('ses_user123', async () => {
+ *   return await openai.chat.completions.create({ ... });
+ * });
+ */
 export async function withSession<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
   const inst = _primaryInstance;
   const agentId = inst?.config.agentId;
   const startTime = Date.now();
-  const emitter = inst ? (inst as unknown as { _emitter: Emitter })._emitter : null;
+  const emitter = inst ? inst['_emitter'] as Emitter : null;
 
   if (emitter) {
     const startedEvent: SyrinEvent = {
@@ -566,6 +724,18 @@ export function getInstance(name?: string): SyrinSDKInstance | null {
   return inst;
 }
 
+/**
+ * Return the tool validation result for a given tool_call_id on the default instance.
+ * Requires `toolValidation: true` in init() options.
+ *
+ * @param toolCallId - The tool call ID from the LLM response.
+ * @param sessionId - Optional session to query. Defaults to the primary session.
+ * @returns Validation result `{ valid, error? }` or undefined if not found.
+ *
+ * @example
+ * const result = getToolValidation('call_abc123');
+ * if (result && !result.valid) console.error(result.error);
+ */
 export function getToolValidation(
   toolCallId: string,
   sessionId?: string
@@ -573,29 +743,85 @@ export function getToolValidation(
   return _primaryInstance?.getToolValidation(toolCallId, sessionId);
 }
 
-export function configure(overrides: Record<string, unknown>, sessionId?: string): void {
+/**
+ * Set local config overrides on the default SDK instance.
+ * Shorthand for `sdk.configure(overrides)`.
+ *
+ * @param overrides - Config fields to override.
+ * @param sessionId - Optional session to target. Defaults to the primary session.
+ *
+ * @example
+ * configure({ temperature: 0.3 });
+ */
+export function configure(overrides: ConfigUpdate, sessionId?: string): void {
   _primaryInstance?.configure(overrides, sessionId);
 }
 
+/**
+ * Create a checkpoint of the current conversation state on the default SDK instance.
+ *
+ * @param messages - Conversation messages to snapshot.
+ * @param options - Optional session ID, label, and metadata.
+ * @returns The created Checkpoint, or undefined if no SDK instance is initialized.
+ *
+ * @example
+ * const cp = await createCheckpoint(messages, { label: 'pre-tool' });
+ */
 export async function createCheckpoint(
-  messages: Array<Record<string, unknown>>,
+  messages: MessageParam[] | Array<Record<string, unknown>>,
   options: { sessionId?: string; label?: string; metadata?: Record<string, unknown> } = {}
 ): Promise<import('./core/checkpoint.js').Checkpoint | undefined> {
   return _primaryInstance?.createCheckpoint(messages, options);
 }
 
+/**
+ * Restore messages from a previously saved checkpoint on the default SDK instance.
+ *
+ * @param checkpointId - The checkpoint ID (from a Checkpoint object's `checkpointId` field).
+ * @returns The stored messages array, or undefined if the checkpoint was not found.
+ *
+ * @example
+ * const messages = await restoreCheckpoint('ckpt_abc123');
+ * if (messages) { ... }
+ */
 export async function restoreCheckpoint(checkpointId: string): Promise<Array<Record<string, unknown>> | undefined> {
   return _primaryInstance?.restoreCheckpoint(checkpointId);
 }
 
+/**
+ * Delete a session's data from memory on the default SDK instance.
+ * Useful in long-running applications to prevent unbounded memory growth.
+ *
+ * @param sessionId - The session identifier to delete.
+ */
 export function deleteSession(sessionId: string): void {
   _primaryInstance?.deleteSession(sessionId);
 }
 
+/**
+ * Delete all sessions older than `olderThanMs` milliseconds from the default instance.
+ * Returns the number of sessions deleted.
+ *
+ * @param olderThanMs - Age threshold in ms. Default: 3 600 000 (1 hour).
+ * @returns The number of sessions deleted.
+ *
+ * @example
+ * const deleted = clearStaleSessions(7_200_000); // delete sessions older than 2h
+ */
 export function clearStaleSessions(olderThanMs = 3_600_000): number {
   return _primaryInstance?.clearStaleSessions(olderThanMs) ?? 0;
 }
 
+/**
+ * Return a sanitized config snapshot for the default SDK instance.
+ * The API key is replaced with `'****'` for safe logging.
+ *
+ * @returns The config object with the API key masked, or null if not initialized.
+ *
+ * @example
+ * console.log(configSnapshot());
+ * // { backendUrl: 'https://api.syrin.ai', apiKey: '****', ... }
+ */
 export function configSnapshot(): Record<string, unknown> | null {
   return _primaryInstance?.configSnapshot() ?? null;
 }

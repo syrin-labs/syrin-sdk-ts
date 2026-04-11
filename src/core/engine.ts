@@ -50,6 +50,7 @@ import {
   stableHash,
 } from '@/utils/helpers.js';
 import { detectProvider } from '@/utils/provider.js';
+import { inferFieldType } from '@/utils/code-scanner.js';
 
 // Re-export for convenience
 export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types.js';
@@ -68,6 +69,9 @@ export class SyrinSDKCore implements ISyrinCore {
    * @internal Set by init() after construction; typed via getter.
    */
   private _tunableRegistry: TunableRegistry | null = null;
+
+  /** Code-scan state — populated at init() from static analysis of the user's source files. */
+  private _codeScannedDefaults: Array<{ path: string; default: unknown }> = [];
 
   /** Auto-detection state — populated from the first LLM call's params. */
   private _autoDetectedDefaults: Record<string, unknown> = {};
@@ -114,6 +118,14 @@ export class SyrinSDKCore implements ISyrinCore {
    */
   setTunableRegistry(registry: TunableRegistry): void {
     this._tunableRegistry = registry;
+  }
+
+  /**
+   * Store defaults detected by scanning the user's source files at init() time.
+   * Called by init() once, before the first LLM call.
+   */
+  setCodeScannedDefaults(defaults: Array<{ path: string; default: unknown }>): void {
+    this._codeScannedDefaults = defaults;
   }
 
   /**
@@ -194,7 +206,7 @@ export class SyrinSDKCore implements ISyrinCore {
       }
     }
 
-    // 2. Merge auto-detected sections (e.g. tools section from first LLM call)
+    // 2. Merge auto-detected sections from first LLM call (e.g. tools section)
     for (const [sectionName, fields] of Object.entries(this._autoDetectedSections)) {
       if (!sections[sectionName]) sections[sectionName] = {};
       for (const field of fields) {
@@ -227,10 +239,38 @@ export class SyrinSDKCore implements ISyrinCore {
       }
     }
 
-    // 4. Apply auto-detected defaults (lower priority — user's schemaDefaults win)
+    // 4. Apply code-scanned defaults (from static analysis of user source at init() time).
+    //    Creates new sections/fields when the key is not in any adapter schema.
+    //    Lower priority: user's schemaDefaults override these.
     const userDefaults = this.config.schemaDefaults ?? {};
+    for (const { path: fieldPath, default: defaultVal } of this._codeScannedDefaults) {
+      if (fieldPath in userDefaults) continue; // explicit user wins
+      const dot = fieldPath.indexOf('.');
+      if (dot === -1) continue;
+      const sec = fieldPath.slice(0, dot);
+      const fieldName = fieldPath.slice(dot + 1);
+
+      // Create section if missing (e.g. 'agent', 'tools' not in any adapter schema)
+      if (!sections[sec]) sections[sec] = {};
+
+      // Create field if missing — infer type from the default value
+      if (!sections[sec][fieldName]) {
+        sections[sec][fieldName] = {
+          name: fieldName,
+          type: inferFieldType(defaultVal),
+          default: null,
+        };
+      }
+
+      sections[sec][fieldName] = { ...sections[sec][fieldName], default: defaultVal };
+    }
+
+    // 5. Apply first-call auto-detected LLM defaults (lowest auto-priority)
+    //    Skipped when code-scan already set a value for the same key.
+    const codeScannedPaths = new Set(this._codeScannedDefaults.map(d => d.path));
     for (const [path, value] of Object.entries(this._autoDetectedDefaults)) {
-      if (path in userDefaults) continue; // explicit user default wins
+      if (path in userDefaults) continue; // explicit user wins
+      if (codeScannedPaths.has(path)) continue; // code-scan wins
       const dot = path.indexOf('.');
       if (dot === -1) continue;
       const sec = path.slice(0, dot);

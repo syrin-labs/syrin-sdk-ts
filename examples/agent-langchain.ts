@@ -34,7 +34,7 @@ import cors from 'cors';
 import { ChatOpenAI } from '@langchain/openai';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
 import { StringOutputParser } from '@langchain/core/output_parsers';
-import { init, withSession, shutdown, tune, refreshSchema, mountConfigEndpoint, LangChainAdapter, OpenAIAdapter } from '../src/index.js';
+import { init, withSession, shutdown, tune, refreshSchema, mountConfigEndpoint, LangChainAdapter, OpenAIAdapter } from '../dist/index.js';
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
@@ -53,12 +53,7 @@ const sdk = await init({
   idleFlushMs: 2_000,
   configPollIntervalMs: 5_000,
   adapters: [new OpenAIAdapter(), adapter],
-  schemaDefaults: {
-    'llm.model': 'gpt-4o-mini',
-    'llm.temperature': 0.7,
-    'llm.max_tokens': 500,
-    'prompt.system_prompt': 'You are a helpful assistant.',
-  },
+  // No schemaDefaults needed — auto-detected from cfg() calls in this file.
 });
 
 const cfg = (key: string, fallback: unknown): unknown => sdk.activeConfig()[key] ?? fallback;
