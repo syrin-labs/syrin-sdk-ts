@@ -9,6 +9,7 @@ import type { BaseFrameworkAdapter } from '@/adapters/types.js';
 export interface VercelAIAdapterLike extends BaseFrameworkAdapter {
   readonly agentId: string | undefined;
   readonly sessionId: string | undefined;
+  readonly captureContent: boolean;
   getConfig(namespace: string): Record<string, unknown>;
 }
 
@@ -34,19 +35,26 @@ export function extractModelInfo(model: unknown): { modelId: string; provider: s
 function _injectLlmConfig(
   opts: Record<string, unknown>,
   llmCfg: Record<string, unknown>,
+  vercelCfg: Record<string, unknown> = {},
 ): Record<string, unknown> {
-  const hasOverrides = Object.values(llmCfg).some((v) => v != null);
-  if (!hasOverrides) return opts;
-
   const result = { ...opts };
-  for (const key of ['temperature', 'max_tokens', 'model', 'seed'] as const) {
+
+  // LLM params (snake_case → camelCase where Vercel AI expects it)
+  for (const key of ['temperature', 'model', 'seed'] as const) {
     if (llmCfg[key] != null) result[key] = llmCfg[key];
   }
+  if (llmCfg['max_tokens'] != null)        result['maxTokens']        = llmCfg['max_tokens'];
   if (llmCfg['top_p'] != null)             result['topP']             = llmCfg['top_p'];
   if (llmCfg['frequency_penalty'] != null) result['frequencyPenalty'] = llmCfg['frequency_penalty'];
   if (llmCfg['presence_penalty'] != null)  result['presencePenalty']  = llmCfg['presence_penalty'];
-  if (llmCfg['max_retries'] != null)       result['maxRetries']       = llmCfg['max_retries'];
-  if (llmCfg['max_steps'] != null)         result['maxSteps']         = llmCfg['max_steps'];
+
+  // Vercel-specific params
+  if (vercelCfg['max_steps'] != null)   result['maxSteps']   = vercelCfg['max_steps'];
+  if (vercelCfg['max_retries'] != null) result['maxRetries'] = vercelCfg['max_retries'];
+  if (vercelCfg['abort_after_ms'] != null && Number(vercelCfg['abort_after_ms']) > 0) {
+    result['abortSignal'] = AbortSignal.timeout(Number(vercelCfg['abort_after_ms']));
+  }
+
   return result;
 }
 
@@ -61,7 +69,8 @@ export function makeGenerateTextWrapper(
     const { modelId, provider } = extractModelInfo(opts['model']);
 
     const llmCfg = adapter.getConfig('llm');
-    const injectedOpts = _injectLlmConfig(opts, llmCfg);
+    const vercelCfg = adapter.getConfig('vercel');
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, vercelCfg);
 
     const runId = generateId('vairun_');
     const start = Date.now();
@@ -81,12 +90,25 @@ export function makeGenerateTextWrapper(
             usage?: {
               promptTokens?: number;
               completionTokens?: number;
+              inputTokens?: number;
+              outputTokens?: number;
             } | null;
           } | null;
 
-          const usage = result?.usage;
-          const inputTokens = usage?.promptTokens ?? 0;
-          const outputTokens = usage?.completionTokens ?? 0;
+          const usage = result?.usage as Record<string, number> | null | undefined;
+          // Support both legacy (promptTokens/completionTokens) and new Responses API (inputTokens/outputTokens)
+          const inputTokens = usage?.['inputTokens'] ?? usage?.['promptTokens'] ?? 0;
+          const outputTokens = usage?.['outputTokens'] ?? usage?.['completionTokens'] ?? 0;
+
+          // Build prompt messages for content capture
+          const promptMessages: Array<{ role: string; content: string }> = [];
+          if (injectedOpts['system']) promptMessages.push({ role: 'system', content: String(injectedOpts['system']) });
+          if (injectedOpts['prompt']) promptMessages.push({ role: 'user', content: String(injectedOpts['prompt']) });
+          if (Array.isArray(injectedOpts['messages'])) {
+            for (const m of injectedOpts['messages'] as Array<{ role: string; content: string }>) {
+              promptMessages.push({ role: m.role, content: String(m.content) });
+            }
+          }
 
           adapter.emitLlmCallEvent({
             model: modelId,
@@ -95,6 +117,8 @@ export function makeGenerateTextWrapper(
             outputTokens,
             durationMs: Date.now() - start,
             error: null,
+            promptMessages: promptMessages.length > 0 ? promptMessages : undefined,
+            completionText: result?.text,
           });
 
           return result;
@@ -126,7 +150,8 @@ export function makeStreamTextWrapper(
     const { modelId, provider } = extractModelInfo(opts['model']);
 
     const llmCfg = adapter.getConfig('llm');
-    const injectedOpts = _injectLlmConfig(opts, llmCfg);
+    const vercelCfg = adapter.getConfig('vercel');
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, vercelCfg);
 
     const start = Date.now();
 
@@ -144,13 +169,16 @@ export function makeStreamTextWrapper(
           usage: Promise<{
             promptTokens?: number;
             completionTokens?: number;
+            inputTokens?: number;
+            outputTokens?: number;
           } | null | undefined>;
         };
 
         const wrappedUsage: Promise<unknown> = streamResult.usage.then(
           (usage) => {
-            const inputTokens = usage?.promptTokens ?? 0;
-            const outputTokens = usage?.completionTokens ?? 0;
+            const u = usage as Record<string, number> | null | undefined;
+            const inputTokens = u?.['inputTokens'] ?? u?.['promptTokens'] ?? 0;
+            const outputTokens = u?.['outputTokens'] ?? u?.['completionTokens'] ?? 0;
             adapter.emitLlmCallEvent({
               model: modelId,
               provider,
@@ -195,7 +223,8 @@ export function makeGenerateObjectWrapper(
     const { modelId, provider } = extractModelInfo(opts['model']);
 
     const llmCfg = adapter.getConfig('llm');
-    const injectedOpts = _injectLlmConfig(opts, llmCfg);
+    const vercelCfg = adapter.getConfig('vercel');
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, vercelCfg);
 
     const runId = generateId('vairun_');
     const start = Date.now();
@@ -215,12 +244,14 @@ export function makeGenerateObjectWrapper(
             usage?: {
               promptTokens?: number;
               completionTokens?: number;
+              inputTokens?: number;
+              outputTokens?: number;
             } | null;
           } | null;
 
-          const usage = result?.usage;
-          const inputTokens = usage?.promptTokens ?? 0;
-          const outputTokens = usage?.completionTokens ?? 0;
+          const usage = result?.usage as Record<string, number> | null | undefined;
+          const inputTokens = usage?.['inputTokens'] ?? usage?.['promptTokens'] ?? 0;
+          const outputTokens = usage?.['outputTokens'] ?? usage?.['completionTokens'] ?? 0;
 
           adapter.emitLlmCallEvent({
             model: modelId,

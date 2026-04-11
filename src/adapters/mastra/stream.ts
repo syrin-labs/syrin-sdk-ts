@@ -10,6 +10,7 @@ import { extractModelInfo } from './adapter.js';
 export interface MastraAdapterLike extends BaseFrameworkAdapter {
   readonly agentId: string | undefined;
   readonly sessionId: string | undefined;
+  readonly captureContent: boolean;
   getConfig(namespace: string): Record<string, unknown>;
 }
 
@@ -27,7 +28,8 @@ export function makeGenerateWrapper(
     const { modelId, provider } = extractModelInfo(this['model']);
 
     const llmCfg = adapter.getConfig('llm');
-    const injectedOpts = _injectLlmConfig(opts, llmCfg);
+    const mastraCfg = adapter.getConfig('mastra');
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, mastraCfg);
 
     const runId = generateId('mrun_');
     const start = Date.now();
@@ -52,8 +54,12 @@ export function makeGenerateWrapper(
           } | null;
 
           const usage = result?.usage as Record<string, number> | null | undefined;
-          const inputTokens = (usage?.['inputTokens'] ?? usage?.['promptTokens']) as number | undefined ?? 0;
-          const outputTokens = (usage?.['outputTokens'] ?? usage?.['completionTokens']) as number | undefined ?? 0;
+          const inputTokens = (usage?.['inputTokens'] ?? usage?.['promptTokens']) ?? 0;
+          const outputTokens = (usage?.['outputTokens'] ?? usage?.['completionTokens']) ?? 0;
+
+          // Build prompt messages for content capture
+          const promptMsg: Array<{ role: string; content: string }> = [];
+          if (typeof prompt === 'string') promptMsg.push({ role: 'user', content: prompt });
 
           adapter.emitLlmCallEvent({
             agentName,
@@ -63,6 +69,8 @@ export function makeGenerateWrapper(
             outputTokens,
             durationMs: Date.now() - start,
             error: null,
+            promptMessages: promptMsg.length > 0 ? promptMsg : undefined,
+            completionText: result?.text,
           });
 
           return result;
@@ -98,7 +106,8 @@ export function makeStreamWrapper(
     const { modelId, provider } = extractModelInfo(this['model']);
 
     const llmCfg = adapter.getConfig('llm');
-    const injectedOpts = _injectLlmConfig(opts, llmCfg);
+    const mastraCfg = adapter.getConfig('mastra');
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, mastraCfg);
 
     const start = Date.now();
 
@@ -183,14 +192,19 @@ export function makeStreamWrapper(
 function _injectLlmConfig(
   opts: Record<string, unknown> | undefined,
   llmCfg: Record<string, unknown>,
+  mastraCfg: Record<string, unknown> = {},
 ): Record<string, unknown> {
-  const hasOverrides = Object.values(llmCfg).some((v) => v != null);
-  if (!hasOverrides) return opts ?? {};
-
   const result = { ...(opts ?? {}) };
-  for (const key of ['temperature', 'max_tokens', 'model', 'top_p', 'frequency_penalty', 'presence_penalty', 'seed'] as const) {
+
+  // LLM params
+  for (const key of ['temperature', 'model', 'top_p', 'frequency_penalty', 'presence_penalty', 'seed'] as const) {
     if (llmCfg[key] != null) result[key] = llmCfg[key];
   }
-  if (llmCfg['max_steps'] != null) result['maxSteps'] = llmCfg['max_steps'];
+  if (llmCfg['max_tokens'] != null) result['maxTokens'] = llmCfg['max_tokens'];
+
+  // Mastra-specific params
+  if (mastraCfg['max_steps'] != null) result['maxSteps'] = mastraCfg['max_steps'];
+  if (mastraCfg['max_retries'] != null) result['maxRetries'] = mastraCfg['max_retries'];
+
   return result;
 }

@@ -430,7 +430,8 @@ describe('VercelAIAdapter', () => {
       adapter.uninstall();
 
       expect((capturedOpts as Record<string, unknown>)?.['temperature']).toBe(0.2);
-      expect((capturedOpts as Record<string, unknown>)?.['max_tokens']).toBe(1000);
+      // Vercel AI uses camelCase maxTokens
+      expect((capturedOpts as Record<string, unknown>)?.['maxTokens']).toBe(1000);
     });
 
     it('empty config store causes no injection side-effects', async () => {

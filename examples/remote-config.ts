@@ -1,43 +1,44 @@
 /**
- * Example 3: Remote Config in Action — Multiple OpenAI API Patterns
- *
+ * Remote Config — Syrin SDK
+ * ==========================
  * Shows how Syrin remote config applies transparently across every
- * OpenAI API pattern — basic chat, streaming, tool calling, multi-turn
- * conversations, and per-agent tool toggling.
+ * OpenAI API pattern: basic chat, streaming, tool calling, multi-turn,
+ * per-agent tool toggling, and system prompt injection.
  *
- * How to run
- * ----------
- * Terminal 1 — start the backend:
- *   cd syrin-backend && npm run dev   (or docker compose up)
+ * Prerequisites
+ * -------------
+ *   1. Backend running:  cd syrin-backend && npm run dev
+ *   2. After first run, "remote-config-demo" appears in the dashboard.
+ *      Use the Config tab to push overrides live while this script runs.
  *
- * Terminal 2 — run this example:
- *   SYRIN_API_KEY=syrin_test SYRIN_BACKEND_URL=http://localhost:4000 \
- *   OPENAI_API_KEY=sk-... \
- *     npx tsx examples/03-remote-config.ts
+ * Run
+ * ---
+ *   SYRIN_API_KEY=syrin_... OPENAI_API_KEY=sk-... \
+ *     npx tsx examples/remote-config.ts
  *
- * Between rounds, inject config changes from Terminal 3:
+ * Inject config changes from another terminal while the script runs:
  *
  *   # Swap model + tighten temperature:
  *   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
  *        -H "Content-Type: application/json" \
- *        -H "Authorization: Bearer syrin_test" \
+ *        -H "Authorization: Bearer $SYRIN_API_KEY" \
  *        -d '{"overrides": {"temperature": 0.1, "model": "gpt-4o-mini"}}'
  *
  *   # Cap output length:
  *   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
  *        -H "Content-Type: application/json" \
- *        -H "Authorization: Bearer syrin_test" \
+ *        -H "Authorization: Bearer $SYRIN_API_KEY" \
  *        -d '{"overrides": {"max_tokens": 30}}'
  *
- *   # Disable a tool (Round 5):
+ *   # Disable a tool (visible in Round 5):
  *   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
  *        -H "Content-Type: application/json" \
- *        -H "Authorization: Bearer syrin_test" \
+ *        -H "Authorization: Bearer $SYRIN_API_KEY" \
  *        -d '{"overrides": {"disabled_tools": ["send_email"]}}'
  *
  *   # Reset everything:
  *   curl -X DELETE http://localhost:4000/agents/remote-config-demo/config \
- *        -H "Authorization: Bearer syrin_test"
+ *        -H "Authorization: Bearer $SYRIN_API_KEY"
  */
 
 import OpenAI from 'openai';
@@ -51,7 +52,7 @@ const AGENT_ID = 'remote-config-demo';
 // ---------------------------------------------------------------------------
 
 const sdk = await init({
-  apiKey: process.env['SYRIN_API_KEY'] ?? 'syrin_demo',
+  apiKey: process.env['SYRIN_API_KEY']!,
   agentId: 'remote-config-demo',
   backendUrl: BACKEND_URL,
   debug: true,
@@ -62,7 +63,7 @@ const sdk = await init({
 });
 
 const openai = new OpenAI({
-  apiKey: process.env['OPENAI_API_KEY'] ?? 'sk-demo',
+  apiKey: process.env['OPENAI_API_KEY']!,
 });
 
 // ---------------------------------------------------------------------------

@@ -495,6 +495,16 @@ export class SyrinCore implements ISyrinCore {
         prompt_messages: modifiedMessages,
         ...(responseText != null ? { completion_text: responseText } : {}),
       } : {}),
+      // Framework context — injected by Tier 2 adapters (LangGraph, LangChain, etc.)
+      ...(() => {
+        const fwCtx = getFrameworkContext();
+        if (!fwCtx) return {};
+        return {
+          framework: fwCtx.framework,
+          ...(fwCtx.graphId ? { graph_id: fwCtx.graphId } : {}),
+          ...(fwCtx.nodeName ? { node_name: fwCtx.nodeName } : {}),
+        };
+      })(),
     };
 
     this._emitter.emit(event, sessionId);

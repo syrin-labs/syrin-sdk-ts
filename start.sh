@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
 # syrin-sdk-ts/start.sh
-# Starts the mock backend and runs TypeScript SDK examples.
+#
+# Runs TypeScript SDK examples against the Syrin backend.
+# Set SYRIN_API_KEY and OPENAI_API_KEY in examples/.env before running.
 #
 # Usage:
-#   ./start.sh                   # backend + example 03 (remote config)
-#   ./start.sh --example 01      # run 01-basic-chat.ts
-#   ./start.sh --example 04      # run 04-multi-agent.ts
-#   ./start.sh --backend         # start backend only, keep it running
-#   ./start.sh --tests           # run test suite
+#   ./start.sh                              # run agent-server (the full demo)
+#   ./start.sh --example basic-instrumentation
+#   ./start.sh --example remote-config
+#   ./start.sh --example agent-server       # default
+#   ./start.sh --tests                      # run test suite
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BACKEND_DIR="$SCRIPT_DIR/../mock-backend"
-BACKEND_PORT="${SYRIN_BACKEND_PORT:-4318}"
-BACKEND_PID=""
 
 # ── Colours ──────────────────────────────────────────────────────────────────
 BOLD="\033[1m"; CYAN="\033[36m"; GREEN="\033[32m"
@@ -25,9 +24,9 @@ success() { echo -e "${GREEN}✓${RESET}  $1"; }
 warn()    { echo -e "${YELLOW}!${RESET}  $1"; }
 err()     { echo -e "${RED}✗${RESET}  $1" >&2; }
 
-# ── Load .env ────────────────────────────────────────────────────────────────
+# ── Load examples/.env ────────────────────────────────────────────────────────
 load_env() {
-  local envfile="$SCRIPT_DIR/.env"
+  local envfile="$SCRIPT_DIR/examples/.env"
   if [[ -f "$envfile" ]]; then
     info "Loading $envfile"
     set -o allexport
@@ -35,18 +34,9 @@ load_env() {
     source "$envfile"
     set +o allexport
   else
-    warn ".env not found — set OPENAI_API_KEY manually or create $envfile"
+    warn "examples/.env not found — create it with SYRIN_API_KEY and OPENAI_API_KEY"
   fi
 }
-
-# ── Cleanup ───────────────────────────────────────────────────────────────────
-cleanup() {
-  if [[ -n "$BACKEND_PID" ]]; then
-    info "Stopping mock backend (PID $BACKEND_PID)…"
-    kill "$BACKEND_PID" 2>/dev/null || true
-  fi
-}
-trap cleanup EXIT INT TERM
 
 # ── Ensure node_modules ───────────────────────────────────────────────────────
 ensure_deps() {
@@ -57,78 +47,29 @@ ensure_deps() {
   fi
 }
 
-# ── Find Python for backend ───────────────────────────────────────────────────
-find_python() {
-  # Prefer the sibling SDK's .venv, then fall back to system python3
-  if [[ -x "$SCRIPT_DIR/../syrin-sdk-py/.venv/bin/python" ]]; then
-    echo "$SCRIPT_DIR/../syrin-sdk-py/.venv/bin/python"
-  elif command -v python3 &>/dev/null; then
-    echo "python3"
-  else
-    echo ""
-  fi
-}
-
-# ── Start mock backend ────────────────────────────────────────────────────────
-start_backend() {
-  if curl -sf "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1; then
-    success "Mock backend already running on port $BACKEND_PORT"
-    return
-  fi
-
-  local python
-  python="$(find_python)"
-  if [[ -z "$python" ]]; then
-    err "Python not found — needed to run the mock backend"
-    exit 1
-  fi
-
-  info "Starting mock backend on port $BACKEND_PORT…"
-
-  if ! "$python" -c "import fastapi" &>/dev/null 2>&1; then
-    info "Installing backend deps…"
-    if command -v uv &>/dev/null; then
-      uv pip install fastapi uvicorn --python "$python" --quiet
-    else
-      "$python" -m pip install fastapi uvicorn --quiet
-    fi
-  fi
-
-  "$python" "$BACKEND_DIR/server.py" --port "$BACKEND_PORT" &
-  BACKEND_PID=$!
-
-  local attempts=0
-  until curl -sf "http://localhost:$BACKEND_PORT/health" >/dev/null 2>&1; do
-    sleep 0.4; attempts=$((attempts + 1))
-    [[ $attempts -ge 25 ]] && { err "Backend did not start in time"; exit 1; }
-  done
-  success "Mock backend ready → ${CYAN}http://localhost:$BACKEND_PORT${RESET}"
-  echo -e "  ${DIM}Swagger UI: http://localhost:$BACKEND_PORT/docs${RESET}"
-}
-
 # ── Run example ───────────────────────────────────────────────────────────────
 run_example() {
-  local num="${1:-03}"
-  # zero-pad to 2 digits
-  local padded
-  padded=$(printf "%02d" "$num" 2>/dev/null || echo "$num")
-  local pattern="$SCRIPT_DIR/examples/${padded}-*.ts"
-  # shellcheck disable=SC2206
-  local files=($pattern)
-  local file="${files[0]:-}"
+  local name="${1:-agent-server}"
+  local file="$SCRIPT_DIR/examples/${name}.ts"
 
-  if [[ -z "$file" || ! -f "$file" ]]; then
-    err "No example matching: $pattern"
+  if [[ ! -f "$file" ]]; then
+    err "Example not found: $file"
     echo "Available examples:"
-    ls "$SCRIPT_DIR/examples/"
+    ls "$SCRIPT_DIR/examples/"*.ts 2>/dev/null | xargs -n1 basename | sed 's/\.ts$//'
     exit 1
   fi
 
-  export SYRIN_API_KEY="${SYRIN_API_KEY:-syrin_demo}"
-  export SYRIN_BACKEND_URL="http://localhost:$BACKEND_PORT"
+  # Verify required env vars are set
+  if [[ -z "${SYRIN_API_KEY:-}" ]]; then
+    err "SYRIN_API_KEY is not set. Add it to examples/.env or export it."
+    exit 1
+  fi
+
+  export SYRIN_BACKEND_URL="${SYRIN_BACKEND_URL:-http://localhost:4000}"
 
   echo ""
-  echo -e "${BOLD}Running: $(basename "$file")${RESET}"
+  echo -e "${BOLD}Running: ${name}.ts${RESET}"
+  echo -e "${DIM}  Backend: $SYRIN_BACKEND_URL${RESET}"
   echo -e "${DIM}─────────────────────────────────────────────────────${RESET}"
   (cd "$SCRIPT_DIR" && npx tsx "$file")
 }
@@ -141,20 +82,29 @@ run_tests() {
 }
 
 # ── Parse args ────────────────────────────────────────────────────────────────
-EXAMPLE_NUM="03"
-BACKEND_ONLY=false
+EXAMPLE_NAME="agent-openai"
 RUN_TESTS=false
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --example|-e) shift; EXAMPLE_NUM="$1" ;;
-    --backend)    BACKEND_ONLY=true ;;
+    --example|-e) shift; EXAMPLE_NAME="$1" ;;
     --tests|-t)   RUN_TESTS=true ;;
     --help|-h)
-      echo "Usage: $0 [--example NUM] [--backend] [--tests]"
-      echo "  --example 01-04   run a specific example (default: 03)"
-      echo "  --backend         start backend only, keep it running"
-      echo "  --tests           run the test suite"
+      echo "Usage: $0 [--example NAME] [--tests]"
+      echo ""
+      echo "Agent examples (each runs a separate HTTP server):"
+      echo "  --example agent-openai      OpenAI SDK         port 8001 (default)"
+      echo "  --example agent-anthropic   Anthropic SDK      port 8002"
+      echo "  --example agent-langchain   LangChain          port 8003"
+      echo "  --example agent-langgraph   LangGraph          port 8004"
+      echo "  --example agent-mastra      Mastra             port 8005"
+      echo "  --example agent-vercel      Vercel AI SDK      port 8006"
+      echo ""
+      echo "Other examples:"
+      echo "  --example basic-instrumentation   minimal OpenAI instrumentation"
+      echo "  --example remote-config           remote config demo"
+      echo ""
+      echo "  --tests                           run the test suite"
       exit 0 ;;
     *) warn "Unknown flag: $1" ;;
   esac
@@ -164,7 +114,7 @@ done
 # ── Main ──────────────────────────────────────────────────────────────────────
 echo ""
 echo -e "┌──────────────────────────────────────────────────────────┐"
-echo -e "│  ${BOLD}SYRIN SDK — TypeScript${RESET}                                   │"
+echo -e "│  ${BOLD}Syrin SDK — TypeScript${RESET}                                   │"
 echo -e "└──────────────────────────────────────────────────────────┘"
 echo ""
 
@@ -176,15 +126,7 @@ if $RUN_TESTS; then
   exit 0
 fi
 
-start_backend
-
-if $BACKEND_ONLY; then
-  info "Backend running on port $BACKEND_PORT. Press Ctrl+C to stop."
-  wait "$BACKEND_PID"
-  exit 0
-fi
-
-run_example "$EXAMPLE_NUM"
+run_example "$EXAMPLE_NAME"
 
 echo ""
-success "Done. Check the backend output above to see all /ingest traffic."
+success "Done."

@@ -82,23 +82,23 @@ function findPricing(model: string): { input: number; output: number } {
   }
 
   // Partial match for families
-  if (lower.includes('gpt-4o-mini')) return PRICING['gpt-4o-mini']!;
-  if (lower.includes('gpt-4o')) return PRICING['gpt-4o']!;
-  if (lower.includes('gpt-4-turbo')) return PRICING['gpt-4-turbo']!;
-  if (lower.includes('gpt-4')) return PRICING['gpt-4']!;
-  if (lower.includes('gpt-3.5')) return PRICING['gpt-3.5-turbo']!;
-  if (lower.includes('o1-mini')) return PRICING['o1-mini']!;
-  if (lower.includes('o1')) return PRICING['o1']!;
-  if (lower.includes('o3-mini')) return PRICING['o3-mini']!;
-  if (lower.includes('o3')) return PRICING['o3']!;
-  if (lower.includes('claude-3-5-sonnet')) return PRICING['claude-3-5-sonnet-20241022']!;
-  if (lower.includes('claude-3-5-haiku')) return PRICING['claude-3-5-haiku-20241022']!;
-  if (lower.includes('claude-3-opus')) return PRICING['claude-3-opus-20240229']!;
-  if (lower.includes('claude-3-sonnet')) return PRICING['claude-3-sonnet-20240229']!;
-  if (lower.includes('claude-3-haiku')) return PRICING['claude-3-haiku-20240307']!;
-  if (lower.includes('gemini-1.5-pro')) return PRICING['gemini-1.5-pro']!;
-  if (lower.includes('gemini-1.5-flash')) return PRICING['gemini-1.5-flash']!;
-  if (lower.includes('gemini')) return PRICING['gemini-2.0-flash']!;
+  if (lower.includes('gpt-4o-mini')) return PRICING['gpt-4o-mini'];
+  if (lower.includes('gpt-4o')) return PRICING['gpt-4o'];
+  if (lower.includes('gpt-4-turbo')) return PRICING['gpt-4-turbo'];
+  if (lower.includes('gpt-4')) return PRICING['gpt-4'];
+  if (lower.includes('gpt-3.5')) return PRICING['gpt-3.5-turbo'];
+  if (lower.includes('o1-mini')) return PRICING['o1-mini'];
+  if (lower.includes('o1')) return PRICING['o1'];
+  if (lower.includes('o3-mini')) return PRICING['o3-mini'];
+  if (lower.includes('o3')) return PRICING['o3'];
+  if (lower.includes('claude-3-5-sonnet')) return PRICING['claude-3-5-sonnet-20241022'];
+  if (lower.includes('claude-3-5-haiku')) return PRICING['claude-3-5-haiku-20241022'];
+  if (lower.includes('claude-3-opus')) return PRICING['claude-3-opus-20240229'];
+  if (lower.includes('claude-3-sonnet')) return PRICING['claude-3-sonnet-20240229'];
+  if (lower.includes('claude-3-haiku')) return PRICING['claude-3-haiku-20240307'];
+  if (lower.includes('gemini-1.5-pro')) return PRICING['gemini-1.5-pro'];
+  if (lower.includes('gemini-1.5-flash')) return PRICING['gemini-1.5-flash'];
+  if (lower.includes('gemini')) return PRICING['gemini-2.0-flash'];
 
   return FALLBACK_PRICING;
 }

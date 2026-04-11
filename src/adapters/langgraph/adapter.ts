@@ -12,6 +12,7 @@ import {
   unpatchCompiledGraph,
   unpatchInterrupt,
 } from './patch.js';
+import { patchBaseChatModel, unpatchBaseChatModel } from '../langchain/patch-llm.js';
 
 export class LangGraphAdapter extends BaseFrameworkAdapter {
   readonly name = 'langgraph';
@@ -39,11 +40,13 @@ export class LangGraphAdapter extends BaseFrameworkAdapter {
     await patchStateGraph(this);
     await patchCompiledGraph(this);
     await patchInterrupt(this);
+    await patchBaseChatModel(this);
   }
 
   protected _doUninstall(): void {
     unpatchStateGraph();
     unpatchCompiledGraph();
     unpatchInterrupt();
+    unpatchBaseChatModel();
   }
 }

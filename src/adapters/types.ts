@@ -12,7 +12,8 @@
  * The core is responsible for governance, config injection, telemetry building, and emitting.
  */
 
-import { generateId, nowIso } from '../utils/helpers.js';
+import { generateId, nowIso, estimateCost } from '../utils/helpers.js';
+import { sessionStorage } from '../core/session.js';
 
 // ---------------------------------------------------------------------------
 // Normalised request / response shapes
@@ -219,11 +220,16 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
   }
 
   get sessionId(): string | undefined {
-    return (this._core as unknown as { config: { sessionId?: string } })?.config?.sessionId;
+    // Prefer AsyncLocalStorage value set by withSession() over static config
+    return sessionStorage.getStore() ?? (this._core as unknown as { config: { sessionId?: string } })?.config?.sessionId;
   }
 
   get agentId(): string | undefined {
     return (this._core as unknown as { config: { agentId?: string } })?.config?.agentId;
+  }
+
+  get captureContent(): boolean {
+    return (this._core as unknown as { config: { captureContent?: boolean } })?.config?.captureContent ?? false;
   }
 
   /**
@@ -250,8 +256,11 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
     durationMs: number;
     error: string | null;
     operation?: string;
+    promptMessages?: Array<{ role: string; content: string }>;
+    completionText?: string;
   }): void {
-    this.emitEvent({
+    const costUsd = estimateCost(data.model, data.inputTokens, data.outputTokens);
+    const event: Record<string, unknown> = {
       event_id: generateId('evt_'),
       event_type: 'LLM_CALL',
       timestamp: nowIso(),
@@ -264,9 +273,15 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
       input_tokens: data.inputTokens,
       output_tokens: data.outputTokens,
       duration_ms: data.durationMs,
+      cost_usd: costUsd,
       error: data.error,
       ...(data.operation != null ? { operation: data.operation } : {}),
-    });
+    };
+    if (this.captureContent) {
+      if (data.promptMessages != null) event['prompt_messages'] = data.promptMessages;
+      if (data.completionText != null) event['completion_text'] = data.completionText;
+    }
+    this.emitEvent(event);
   }
 
   /**
@@ -298,7 +313,7 @@ export abstract class BaseFrameworkAdapter implements FrameworkAdapter {
   ): { inputTokens: number; outputTokens: number } {
     const pick = (fields: string[]) => {
       for (const f of fields) {
-        if (usage?.[f] != null) return usage[f] as number;
+        if (usage?.[f] != null) return usage[f];
       }
       return 0;
     };

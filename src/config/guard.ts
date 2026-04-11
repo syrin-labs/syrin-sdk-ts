@@ -6,8 +6,8 @@
  * for config updates.
  */
 
-import { ConfigStore } from '@/config/store.js';
-import { TunableRegistry } from '@/tunable/tunable.js';
+import type { ConfigStore } from '@/config/store.js';
+import type { TunableRegistry } from '@/tunable/tunable.js';
 import { randomUUID } from 'crypto';
 
 // ---------------------------------------------------------------------------

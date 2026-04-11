@@ -2,12 +2,13 @@
  * LangChain Adapter — Adapter class and wrap() method
  */
 
-import { generateId } from '@/utils/helpers.js';
+import { generateId, nowIso } from '@/utils/helpers.js';
 import { withFrameworkContext } from '@/agent/framework-context.js';
 import type { FrameworkContext } from '@/agent/framework-context.js';
 import { BaseFrameworkAdapter } from '@/adapters/types.js';
 import type { ISyrinCore, SchemaField } from '@/adapters/types.js';
 import { SyrinLangChainCallback } from './callback.js';
+import { patchBaseChatModel, unpatchBaseChatModel } from './patch-llm.js';
 
 interface RunnableLike {
   name?: string;
@@ -33,12 +34,12 @@ export class LangChainAdapter extends BaseFrameworkAdapter {
     };
   }
 
-  protected _doInstall(_core: ISyrinCore): void {
-    // No global patching — callback-based approach, nothing to patch
+  protected async _doInstall(_core: ISyrinCore): Promise<void> {
+    await patchBaseChatModel(this);
   }
 
   protected _doUninstall(): void {
-    // Nothing to clean up globally
+    unpatchBaseChatModel();
   }
 
   callbackHandler(chainName = 'langchain'): SyrinLangChainCallback {
@@ -51,7 +52,7 @@ export class LangChainAdapter extends BaseFrameworkAdapter {
   ): T & { ainvoke(...args: unknown[]): Promise<unknown> } {
     const adapter = this;
     const chainName =
-      options?.chainName ?? (chain.name as string | undefined) ?? 'langchain';
+      options?.chainName ?? (chain.name) ?? 'langchain';
 
     const originalInvoke = chain.invoke.bind(chain) as (...args: unknown[]) => unknown;
     const originalAInvoke = (chain.ainvoke?.bind(chain) ?? originalInvoke) as (
@@ -66,8 +67,7 @@ export class LangChainAdapter extends BaseFrameworkAdapter {
             config?: Record<string, unknown>,
             ...rest: unknown[]
           ): Promise<unknown> {
-            const handler = adapter.callbackHandler(chainName);
-            const enrichedConfig = adapter._buildConfig(config, handler);
+            const enrichedConfig = adapter._buildConfig(config);
             const runId = generateId('lcrun_');
             const ctx: FrameworkContext = {
               framework: 'langchain',
@@ -76,9 +76,39 @@ export class LangChainAdapter extends BaseFrameworkAdapter {
               runId,
               extra: {},
             };
-            return withFrameworkContext(ctx, () =>
-              originalInvoke(inputs, enrichedConfig, ...rest) as Promise<unknown>,
-            );
+            const start = Date.now();
+            return withFrameworkContext(ctx, async () => {
+              try {
+                const result = await (originalInvoke(inputs, enrichedConfig, ...rest) as Promise<unknown>);
+                adapter.emitEvent({
+                  event_id: generateId('evt_'),
+                  event_type: 'CHAIN_EXECUTION',
+                  timestamp: nowIso(),
+                  session_id: adapter.sessionId,
+                  agent_id: adapter.agentId,
+                  chain_run_id: runId,
+                  chain_name: chainName,
+                  duration_ms: Date.now() - start,
+                  error: null,
+                  framework: 'langchain',
+                });
+                return result;
+              } catch (err) {
+                adapter.emitEvent({
+                  event_id: generateId('evt_'),
+                  event_type: 'CHAIN_EXECUTION',
+                  timestamp: nowIso(),
+                  session_id: adapter.sessionId,
+                  agent_id: adapter.agentId,
+                  chain_run_id: runId,
+                  chain_name: chainName,
+                  duration_ms: Date.now() - start,
+                  error: err instanceof Error ? err.message : String(err),
+                  framework: 'langchain',
+                });
+                throw err;
+              }
+            });
           };
         }
 
@@ -88,8 +118,7 @@ export class LangChainAdapter extends BaseFrameworkAdapter {
             config?: Record<string, unknown>,
             ...rest: unknown[]
           ): Promise<unknown> {
-            const handler = adapter.callbackHandler(chainName);
-            const enrichedConfig = adapter._buildConfig(config, handler);
+            const enrichedConfig = adapter._buildConfig(config);
             const runId = generateId('lcrun_');
             const ctx: FrameworkContext = {
               framework: 'langchain',
@@ -98,9 +127,39 @@ export class LangChainAdapter extends BaseFrameworkAdapter {
               runId,
               extra: {},
             };
-            return withFrameworkContext(ctx, () =>
-              originalAInvoke(inputs, enrichedConfig, ...rest),
-            );
+            const start = Date.now();
+            return withFrameworkContext(ctx, async () => {
+              try {
+                const result = await originalAInvoke(inputs, enrichedConfig, ...rest);
+                adapter.emitEvent({
+                  event_id: generateId('evt_'),
+                  event_type: 'CHAIN_EXECUTION',
+                  timestamp: nowIso(),
+                  session_id: adapter.sessionId,
+                  agent_id: adapter.agentId,
+                  chain_run_id: runId,
+                  chain_name: chainName,
+                  duration_ms: Date.now() - start,
+                  error: null,
+                  framework: 'langchain',
+                });
+                return result;
+              } catch (err) {
+                adapter.emitEvent({
+                  event_id: generateId('evt_'),
+                  event_type: 'CHAIN_EXECUTION',
+                  timestamp: nowIso(),
+                  session_id: adapter.sessionId,
+                  agent_id: adapter.agentId,
+                  chain_run_id: runId,
+                  chain_name: chainName,
+                  duration_ms: Date.now() - start,
+                  error: err instanceof Error ? err.message : String(err),
+                  framework: 'langchain',
+                });
+                throw err;
+              }
+            });
           };
         }
 
@@ -111,15 +170,17 @@ export class LangChainAdapter extends BaseFrameworkAdapter {
 
   _buildConfig(
     config: Record<string, unknown> | undefined,
-    handler: SyrinLangChainCallback,
+    handler?: SyrinLangChainCallback,
   ): Record<string, unknown> {
     const result: Record<string, unknown> = { ...(config ?? {}) };
 
-    // Merge callbacks
-    const existing = Array.isArray(result['callbacks'])
-      ? (result['callbacks'] as unknown[])
-      : [];
-    result['callbacks'] = [...existing, handler];
+    // Optionally merge a callback handler
+    if (handler) {
+      const existing = Array.isArray(result['callbacks'])
+        ? (result['callbacks'] as unknown[])
+        : [];
+      result['callbacks'] = [...existing, handler];
+    }
 
     // Inject LLM config updates via `configurable` (LangChain reads these)
     const llmCfg = this.getConfig('llm');

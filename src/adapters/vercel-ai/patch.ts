@@ -24,19 +24,24 @@ export async function patchVercelAI(adapter: VercelAIAdapterLike): Promise<void>
 
   _aiModuleRef = aiModule;
 
+  // ESM live bindings are read-only — use a safe setter
+  const trySet = (key: string, value: unknown): boolean => {
+    try { aiModule[key] = value; return true; } catch { return false; }
+  };
+
   if (typeof aiModule['generateText'] === 'function') {
     _originalGenerateText = aiModule['generateText'] as (...args: unknown[]) => unknown;
-    aiModule['generateText'] = makeGenerateTextWrapper(adapter, _originalGenerateText);
+    trySet('generateText', makeGenerateTextWrapper(adapter, _originalGenerateText));
   }
 
   if (typeof aiModule['streamText'] === 'function') {
     _originalStreamText = aiModule['streamText'] as (...args: unknown[]) => unknown;
-    aiModule['streamText'] = makeStreamTextWrapper(adapter, _originalStreamText);
+    trySet('streamText', makeStreamTextWrapper(adapter, _originalStreamText));
   }
 
   if (typeof aiModule['generateObject'] === 'function') {
     _originalGenerateObject = aiModule['generateObject'] as (...args: unknown[]) => unknown;
-    aiModule['generateObject'] = makeGenerateObjectWrapper(adapter, _originalGenerateObject);
+    trySet('generateObject', makeGenerateObjectWrapper(adapter, _originalGenerateObject));
   }
 
   _patchedVercelAI = true;
@@ -44,10 +49,13 @@ export async function patchVercelAI(adapter: VercelAIAdapterLike): Promise<void>
 
 export function unpatchVercelAI(): void {
   if (!_patchedVercelAI) return;
+  const trySet = (ref: Record<string, unknown>, key: string, value: unknown) => {
+    try { ref[key] = value; } catch { /* read-only ESM binding */ }
+  };
   if (_aiModuleRef) {
-    if (_originalGenerateText) _aiModuleRef['generateText'] = _originalGenerateText;
-    if (_originalStreamText) _aiModuleRef['streamText'] = _originalStreamText;
-    if (_originalGenerateObject) _aiModuleRef['generateObject'] = _originalGenerateObject;
+    if (_originalGenerateText) trySet(_aiModuleRef, 'generateText', _originalGenerateText);
+    if (_originalStreamText) trySet(_aiModuleRef, 'streamText', _originalStreamText);
+    if (_originalGenerateObject) trySet(_aiModuleRef, 'generateObject', _originalGenerateObject);
   }
   _aiModuleRef = null;
   _originalGenerateText = null;

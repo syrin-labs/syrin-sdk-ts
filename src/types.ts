@@ -85,6 +85,10 @@ export interface SyrinEvent {
   // Recovery tracking
   last_checkpoint_id?: string;
   governance_applied?: boolean;
+  // Framework context — set when a Tier 2 adapter (LangGraph, LangChain, etc.) is active
+  framework?: string;
+  graph_id?: string;
+  node_name?: string;
 }
 
 /** Snapshot of the active execution context (multi-agent). */

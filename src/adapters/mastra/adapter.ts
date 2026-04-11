@@ -15,7 +15,17 @@ interface ModelObject {
 
 export function extractModelInfo(model: unknown): { modelId: string; provider: string } {
   if (model == null) return { modelId: 'unknown', provider: 'unknown' };
-  if (typeof model === 'string') return { modelId: model, provider: 'unknown' };
+  if (typeof model === 'string') {
+    // Mastra uses "{provider}/{model}" format e.g. "openai/gpt-4o-mini"
+    const slashIdx = model.indexOf('/');
+    if (slashIdx > 0) {
+      return {
+        provider: model.slice(0, slashIdx),
+        modelId: model.slice(slashIdx + 1),
+      };
+    }
+    return { modelId: model, provider: 'unknown' };
+  }
   const m = model as ModelObject;
   const modelId = m.modelId ?? m.name ?? 'unknown';
   const rawProvider = m.provider ?? m.config?.provider ?? 'unknown';
@@ -36,7 +46,14 @@ export class MastraAdapter extends BaseFrameworkAdapter {
         { name: 'frequency_penalty', type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
         { name: 'presence_penalty',  type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
         { name: 'seed',              type: 'int',   default: null },
-        { name: 'max_steps',         type: 'int',   default: null, constraints: { ge: 1, le: 100 } },
+      ],
+      mastra: [
+        /** Max reasoning/tool-call steps per agent.generate() call */
+        { name: 'max_steps',     type: 'int',   default: 5,    constraints: { ge: 1, le: 100 } },
+        /** Retry failed steps this many times before surfacing the error */
+        { name: 'max_retries',   type: 'int',   default: 2,    constraints: { ge: 0, le: 10  } },
+        /** Telemetry: record intermediate step results in the event */
+        { name: 'record_steps',  type: 'bool',  default: false },
       ],
     };
   }

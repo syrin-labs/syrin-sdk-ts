@@ -139,7 +139,7 @@ export class Emitter {
     const batch = this.queue.splice(0, this.config.batchSize);
 
     // Group events by sessionId for the payload
-    const primarySessionId = batch[0]!.sessionId;
+    const primarySessionId = batch[0].sessionId;
     const session = this.sessionStore.getSession(primarySessionId);
 
     const payload: IngestPayload = {

@@ -4,7 +4,7 @@
 
 import { AsyncLocalStorage } from 'async_hooks';
 import { createHash } from 'crypto';
-import { withFrameworkContext } from '@/agent/framework-context.js';
+import { withFrameworkContext, getFrameworkContext } from '@/agent/framework-context.js';
 import { generateId } from '@/utils/helpers.js';
 import { emitGraphExecution, emitNodeExecution, emitHITL, injectLangGraphConfig, type LangGraphAdapterEmitter } from './events.js';
 
@@ -94,16 +94,29 @@ function wrapNode(
     const inputHash = hashState(state);
     const graphRunId = _graphRunIdStorage.getStore() ?? 'unknown';
     const start = Date.now();
-    try {
-      const result = await Promise.resolve(fn(...args));
-      const outputHash = hashState(result ?? state);
-      emitNodeExecution(adapter, nodeName, graphRunId, inputHash, outputHash, Date.now() - start, null);
-      return result;
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      emitNodeExecution(adapter, nodeName, graphRunId, inputHash, inputHash, Date.now() - start, error);
-      throw err;
+
+    // Update FrameworkContext with the current node name so LLM_CALL events
+    // emitted by a Tier 1 adapter (OpenAI) know which node triggered them.
+    const parentCtx = getFrameworkContext();
+
+    const runNode = async () => {
+      try {
+        const result = await Promise.resolve(fn(...args));
+        const outputHash = hashState(result ?? state);
+        emitNodeExecution(adapter, nodeName, graphRunId, inputHash, outputHash, Date.now() - start, null);
+        return result;
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        emitNodeExecution(adapter, nodeName, graphRunId, inputHash, inputHash, Date.now() - start, error);
+        throw err;
+      }
+    };
+
+    if (parentCtx) {
+      // Run inside updated context so LLM calls inherit nodeName
+      return withFrameworkContext({ ...parentCtx, nodeName }, runNode);
     }
+    return runNode();
   };
 }
 
@@ -231,11 +244,17 @@ export async function patchInterrupt(adapter: LangGraphAdapterEmitter): Promise<
   _lgModuleRef = lgModule;
   _originalInterrupt = lgModule['interrupt'] as (...args: unknown[]) => unknown;
 
-  lgModule['interrupt'] = function patchedInterrupt(value: unknown, ...rest: unknown[]): unknown {
-    const graphRunId = _graphRunIdStorage.getStore() ?? 'unknown';
-    emitHITL(adapter, graphRunId, value);
-    return _originalInterrupt!(value, ...rest);
-  };
+  try {
+    lgModule['interrupt'] = function patchedInterrupt(value: unknown, ...rest: unknown[]): unknown {
+      const graphRunId = _graphRunIdStorage.getStore() ?? 'unknown';
+      emitHITL(adapter, graphRunId, value);
+      return _originalInterrupt!(value, ...rest);
+    };
+  } catch {
+    // ESM module bindings are read-only — skip patching interrupt (non-fatal)
+    _patchedInterrupt = false;
+    return;
+  }
 
   _patchedInterrupt = true;
 }
@@ -243,7 +262,7 @@ export async function patchInterrupt(adapter: LangGraphAdapterEmitter): Promise<
 export function unpatchInterrupt(): void {
   if (!_patchedInterrupt) return;
   if (_lgModuleRef && _originalInterrupt) {
-    _lgModuleRef['interrupt'] = _originalInterrupt;
+    try { _lgModuleRef['interrupt'] = _originalInterrupt; } catch { /* read-only ESM binding */ }
   }
   _lgModuleRef = null;
   _originalInterrupt = null;

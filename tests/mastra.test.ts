@@ -394,7 +394,8 @@ describe('MastraAdapter', () => {
       FakeAgent.prototype.generate = origGenerate;
 
       expect((capturedOpts as Record<string, unknown>)?.['temperature']).toBe(0.3);
-      expect((capturedOpts as Record<string, unknown>)?.['max_tokens']).toBe(500);
+      // Mastra uses camelCase maxTokens
+      expect((capturedOpts as Record<string, unknown>)?.['maxTokens']).toBe(500);
     });
 
     it('empty config store causes no injection side-effects', async () => {
