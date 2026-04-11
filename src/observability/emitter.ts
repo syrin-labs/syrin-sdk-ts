@@ -7,13 +7,26 @@
  *      the first queued event when a full batch hasn't triggered first.
  */
 
-import type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse } from '@/types.js';
+import type { SyrinSDKConfig, SyrinEvent, SyrinEventBase, IngestPayload, IngestResponse } from '@/types.js';
 import type { SessionStore } from '@/core/session.js';
 import { SDK_VERSION } from '@/config/config.js';
 import { GovernanceResponse } from '@/core/governance.js';
 import { fireConfigChange, fireAlert } from '@/observability/hooks.js';
+import { generateId, nowIso } from '@/utils/helpers.js';
 
 const MAX_QUEUE_SIZE = 1000;
+
+/**
+ * Redact the API key from error messages and log strings to prevent key leakage.
+ *
+ * @param text - The string that may contain the API key.
+ * @param apiKey - The API key to redact.
+ * @returns The string with all occurrences of the API key replaced with '****'.
+ */
+function redactApiKey(text: string, apiKey: string): string {
+  if (!apiKey || !text) return text;
+  return text.split(apiKey).join('****');
+}
 
 interface QueuedEvent {
   event: SyrinEvent;
@@ -21,14 +34,17 @@ interface QueuedEvent {
 }
 
 export class Emitter {
-  private config: SyrinConfig;
+  private config: SyrinSDKConfig;
   private sessionStore: SessionStore;
   private queue: QueuedEvent[] = [];
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
   private flushPromise: Promise<void> | null = null;
+  /** Snapshot of the last config_updates map received from the backend.
+   *  Used to suppress CONFIG_APPLIED spam: we only emit when values actually change. */
+  private _lastConfigSnapshot: Record<string, unknown> = {};
 
-  constructor(config: SyrinConfig, sessionStore: SessionStore) {
+  constructor(config: SyrinSDKConfig, sessionStore: SessionStore) {
     this.config = config;
     this.sessionStore = sessionStore;
   }
@@ -161,8 +177,9 @@ export class Emitter {
       });
 
       if (!response.ok) {
+        // Only log status code and URL — never log request headers (they contain the API key)
         console.warn(
-          `[Syrin] Ingest failed (HTTP ${response.status}). Re-queuing events.`
+          `[Syrin] Ingest failed (HTTP ${response.status} at ${this.config.backendUrl}/ingest). Re-queuing events.`
         );
         this._requeue(batch);
       } else {
@@ -175,13 +192,41 @@ export class Emitter {
         }
 
         if (data.config_updates && Object.keys(data.config_updates).length > 0) {
+          // Diff against the last known snapshot — only act when values actually changed.
+          // The backend always echoes the full active config on every ingest response,
+          // so without this guard every flush would emit a CONFIG_APPLIED event.
+          const changedKeys = Object.keys(data.config_updates).filter(
+            (k) => this._lastConfigSnapshot[k] !== (data.config_updates as Record<string, unknown>)[k],
+          );
+          this._lastConfigSnapshot = { ...data.config_updates } as Record<string, unknown>;
+
           if (this.config.debug) {
-            console.log('[Syrin] Received config_updates:', data.config_updates);
+            console.log('[Syrin] Received config_updates:', data.config_updates, '— changed:', changedKeys);
           }
+
           const sessionIds = new Set(batch.map((q) => q.sessionId));
           for (const sid of sessionIds) {
             this.sessionStore.applyConfigUpdate(sid, data.config_updates);
-            fireConfigChange(sid, data.config_updates);
+            if (changedKeys.length > 0) {
+              fireConfigChange(sid, data.config_updates);
+              // Emit CONFIG_APPLIED only when something actually changed
+              const configEvent: SyrinEvent = {
+                event_id: generateId('evt_'),
+                event_type: 'CONFIG_APPLIED',
+                timestamp: nowIso(),
+                session_id: sid,
+                config_keys: changedKeys,
+                model: '',
+                provider: '',
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: 0,
+                stream: false,
+                config_applied: true,
+                duration_ms: 0,
+              };
+              try { this.emit(configEvent, sid); } catch { /* fail-open */ }
+            }
           }
         }
 
@@ -197,14 +242,22 @@ export class Emitter {
 
         if (data.governance) {
           const sessionIds = new Set(batch.map((q) => q.sessionId));
+          const pollPromises: Promise<void>[] = [];
           for (const sid of sessionIds) {
-            this._applyGovernance(sid, data.governance);
+            const polls = this._applyGovernance(sid, data.governance);
+            pollPromises.push(...polls);
+          }
+          // Await all approval polls so events are visible before flush() resolves
+          if (pollPromises.length > 0) {
+            await Promise.allSettled(pollPromises);
           }
         }
       }
     } catch (err) {
       if (this.config.debug) {
-        console.warn('[Syrin] Ingest network error (detail):', err);
+        // Redact API key from error messages before logging
+        const errMsg = err instanceof Error ? redactApiKey(err.message, this.config.apiKey) : String(err);
+        console.warn('[Syrin] Ingest network error (detail):', errMsg);
       } else {
         console.warn('[Syrin] Failed to reach Syrin backend. Events re-queued.');
       }
@@ -212,8 +265,84 @@ export class Emitter {
     }
   }
 
-  private _applyGovernance(sessionId: string, governanceData: import('../types.js').GovernanceData): void {
+  /**
+   * Build a minimal SyrinEvent for approval lifecycle events.
+   * DRY helper used by all three APPROVAL_* event types.
+   */
+  private _buildApprovalEvent(
+    eventType: SyrinEvent['event_type'],
+    sessionId: string,
+    approvalId: string,
+    toolName: string,
+    reason?: string,
+  ): SyrinEvent {
+    const base: SyrinEventBase & { event_type: SyrinEvent['event_type']; approval_id: string; tool_name: string; reason: string | null } = {
+      event_id: generateId('evt_'),
+      event_type: eventType,
+      timestamp: nowIso(),
+      session_id: sessionId,
+      approval_id: approvalId,
+      tool_name: toolName,
+      reason: reason ?? null,
+      model: '',
+      provider: '',
+      duration_ms: 0,
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_usd: 0,
+      stream: false,
+      config_applied: false,
+    };
+    // Cast is safe: the event_type discriminant is set from the caller
+    return base as SyrinEvent;
+  }
+
+  /**
+   * Poll the backend for the outcome of a `require_approval` action and emit
+   * the appropriate APPROVAL_GRANTED or APPROVAL_REJECTED event.
+   * Non-fatal — any network or parsing error is swallowed.
+   */
+  private async _pollApproval(
+    sessionId: string,
+    approvalId: string,
+    toolName: string,
+  ): Promise<void> {
+    try {
+      const res = await fetch(
+        `${this.config.backendUrl}/approvals/${approvalId}`,
+        {
+          method: 'GET',
+          headers: { 'Authorization': `Bearer ${this.config.apiKey}` },
+          signal: AbortSignal.timeout(5_000),
+        },
+      );
+      if (!res.ok) return;
+
+      let body: Record<string, unknown>;
+      try {
+        body = (await res.json()) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+
+      const status = body['status'] as string | undefined;
+
+      if (status === 'approved') {
+        const ev = this._buildApprovalEvent('APPROVAL_GRANTED', sessionId, approvalId, toolName);
+        try { this.emit(ev, sessionId); } catch { /* fail-open */ }
+      } else if (status === 'rejected' || status === 'expired') {
+        const ev = this._buildApprovalEvent('APPROVAL_REJECTED', sessionId, approvalId, toolName, status);
+        try { this.emit(ev, sessionId); } catch { /* fail-open */ }
+      }
+      // 'pending' → no event; caller decides whether to retry
+    } catch {
+      // Network failure — non-fatal
+    }
+  }
+
+  private _applyGovernance(sessionId: string, governanceData: import('../types.js').GovernanceData): Promise<void>[] {
     const gov = new GovernanceResponse(governanceData);
+    const pollPromises: Promise<void>[] = [];
 
     if (gov.loopDetected && this.config.debug) {
       console.warn(`[Syrin] Backend detected loop for session ${sessionId} (drift_score=${gov.driftScore}, incident=${gov.incidentId})`);
@@ -221,7 +350,43 @@ export class Emitter {
 
     for (const action of gov.actions) {
       const actionType = action.type;
-      if (actionType === 'stop') {
+
+      // Emit GOVERNANCE_TRIGGERED before processing (even for unknown types)
+      const govEvent: SyrinEvent = {
+        event_id: generateId('evt_'),
+        event_type: 'GOVERNANCE_TRIGGERED',
+        timestamp: nowIso(),
+        session_id: sessionId,
+        action_type: actionType,
+        incident_id: (action as Record<string, unknown>)['incident_id'] as string ?? null,
+        reason: (action as Record<string, unknown>)['reason'] as string ?? null,
+        model: '',
+        provider: '',
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        stream: false,
+        config_applied: false,
+        duration_ms: 0,
+      };
+      try { this.emit(govEvent, sessionId); } catch { /* fail-open */ }
+
+      if (actionType === 'require_approval') {
+        const approvalId = (action as Record<string, unknown>)['approval_id'] as string | undefined;
+        const toolName   = (action as Record<string, unknown>)['tool_name']   as string | undefined;
+        // Guard: approval_id is required to emit events and poll
+        if (!approvalId) continue;
+        const resolvedToolName = toolName ?? '';
+        const requestedEv = this._buildApprovalEvent(
+          'APPROVAL_REQUESTED',
+          sessionId,
+          approvalId,
+          resolvedToolName,
+        );
+        try { this.emit(requestedEv, sessionId); } catch { /* fail-open */ }
+        // Collect poll promise — awaited by _doFlush() via pollPromises
+        pollPromises.push(this._pollApproval(sessionId, approvalId, resolvedToolName));
+      } else if (actionType === 'stop') {
         this.sessionStore.appendGovernanceAction(sessionId, action);
         console.warn(`[Syrin] Backend sent STOP action for session ${sessionId} — reason: ${action['reason'] ?? '?'}`);
       } else if (actionType === 'inject_message') {
@@ -242,6 +407,8 @@ export class Emitter {
         }
       }
     }
+
+    return pollPromises;
   }
 
   private _requeue(batch: QueuedEvent[]): void {
