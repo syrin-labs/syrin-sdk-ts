@@ -5,7 +5,7 @@
  * The `dir` parameter (default: process.cwd()) lets tests point at a temp dir.
  */
 
-import { readFileSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs';
 import { join } from 'path';
 
 const SYRIN_DIR = '.syrin';
@@ -36,8 +36,7 @@ export function save(overrides: Record<string, unknown>, dir = process.cwd()): v
     const target = configPath(dir);
     const tmp = target + '.tmp';
     writeFileSync(tmp, JSON.stringify(overrides, null, 2), 'utf8');
-    // Node.js fs.rename is atomic on POSIX (same filesystem)
-    const { renameSync } = require('fs') as typeof import('fs');
+    // Node.js fs.renameSync is atomic on POSIX (same filesystem)
     renameSync(tmp, target);
   } catch {
     // Non-fatal — persistence is best-effort

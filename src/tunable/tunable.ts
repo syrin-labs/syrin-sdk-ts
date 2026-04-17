@@ -71,6 +71,14 @@ export function _setAutoRefreshCallback(cb: (() => Promise<void>) | null): void 
   _autoRefreshCallback = cb;
 }
 
+/** @internal Cancel any pending auto-refresh timer. Called by shutdown(). */
+export function clearAutoRefreshTimer(): void {
+  if (_autoRefreshTimer) {
+    clearTimeout(_autoRefreshTimer);
+    _autoRefreshTimer = null;
+  }
+}
+
 function _scheduleAutoRefresh(): void {
   if (!_autoRefreshCallback) return;
   if (_autoRefreshTimer) clearTimeout(_autoRefreshTimer);

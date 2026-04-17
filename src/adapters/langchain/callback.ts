@@ -6,6 +6,7 @@
  */
 
 import { generateId, nowIso } from '@/utils/helpers.js';
+import { isLLMPatched } from './patch-llm.js';
 
 // Forward declaration to avoid circular import
 export interface LangChainAdapterLike {
@@ -125,6 +126,11 @@ export class SyrinLangChainCallback {
     _tags?: string[],
     _extraParams?: unknown,
   ): void {
+    // Guard: when the BaseChatModel prototype patch is active it already emits LLM_CALL
+    // for every generate() invocation. Emitting here too would double-count token usage,
+    // costs, and call counts in the dashboard.
+    if (isLLMPatched()) return;
+
     const durationMs = Date.now() - this._llmStartTime;
 
     // Extract token usage from LangChain LLMResult
@@ -170,6 +176,9 @@ export class SyrinLangChainCallback {
     _tags?: string[],
     _extraParams?: unknown,
   ): void {
+    // Guard: same as handleLLMEnd — prototype patch already captures error events
+    if (isLLMPatched()) return;
+
     const durationMs = Date.now() - this._llmStartTime;
     this._adapter.emitEvent({
       event_id: generateId('evt_'),

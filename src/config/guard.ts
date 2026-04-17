@@ -320,10 +320,14 @@ export class ConfigGuard {
    * - Takes an anchor before applying.
    * - Validates each field against the ConfigStore schema.
    * - On partial failure, behaviour depends on policy.onValidationFail.
-   * - Runs healthCheck if provided; rolls back on failure.
+   * - Runs healthCheck if provided; rolls back on failure (sync or async).
    * - Notifies ConfigFuse of success or failure.
+   *
+   * Returns a `SafeApplyResult` synchronously when no health check is provided
+   * or the health check is synchronous. Returns `Promise<SafeApplyResult>` when
+   * the health check returns a Promise.
    */
-  safeApply(namespace: string, updates: Record<string, unknown>): SafeApplyResult {
+  safeApply(namespace: string, updates: Record<string, unknown>): SafeApplyResult | Promise<SafeApplyResult> {
     // Check fuse first
     if (!this.fuse.isAccepting()) {
       return {
@@ -388,11 +392,32 @@ export class ConfigGuard {
       if (this.healthCheck) {
         const healthResult = this.healthCheck();
         if (healthResult instanceof Promise) {
-          // We handle the sync path; treat async as best-effort
-          healthResult.catch(() => {
-            // Can't rollback here synchronously; ignored for async
-          });
+          // Async health check: await it and rollback on rejection
+          return healthResult.then(
+            () => {
+              // Health check passed
+              this.autoRevert.recordApply();
+              result.success = Object.keys(result.rejected).length === 0;
+              if (result.success) {
+                this.fuse.recordSuccess();
+              } else {
+                this.fuse.recordFailure();
+              }
+              return result;
+            },
+            (err: unknown) => {
+              // Health check failed → rollback
+              const error = err instanceof Error ? err : new Error(String(err));
+              result.error = error;
+              result.rolledBack = true;
+              result.success = false;
+              this.anchorStore.restore(anchor.anchorId);
+              this.fuse.recordFailure();
+              return result;
+            },
+          );
         }
+        // Sync health check: if it throws, the outer catch handles it
       }
 
       this.autoRevert.recordApply();
@@ -404,7 +429,7 @@ export class ConfigGuard {
         this.fuse.recordFailure();
       }
     } catch (err) {
-      // Error during apply → rollback
+      // Error during apply (or sync health check threw) → rollback
       const error = err instanceof Error ? err : new Error(String(err));
       result.error = error;
       result.rolledBack = true;

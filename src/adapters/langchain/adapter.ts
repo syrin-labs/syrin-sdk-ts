@@ -21,17 +21,8 @@ export class LangChainAdapter extends SyrinSDKBaseFrameworkAdapter {
   readonly name = 'langchain';
 
   override configSchema(): Record<string, SchemaField[]> {
-    return {
-      llm: [
-        { name: 'model',             type: 'str',   default: null },
-        { name: 'temperature',       type: 'float', default: null, constraints: { ge: 0.0, le: 2.0 } },
-        { name: 'max_tokens',        type: 'int',   default: null, constraints: { ge: 1 } },
-        { name: 'top_p',             type: 'float', default: null, constraints: { ge: 0.0, le: 1.0 } },
-        { name: 'frequency_penalty', type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
-        { name: 'presence_penalty',  type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
-        { name: 'seed',              type: 'int',   default: null },
-      ],
-    };
+    // Adapters are telemetry-only — config schema is declared by users via sdk.cfg()
+    return {};
   }
 
   protected async _doInstall(_core: ISyrinCore): Promise<void> {
@@ -160,6 +151,106 @@ export class LangChainAdapter extends SyrinSDKBaseFrameworkAdapter {
                 throw err;
               }
             });
+          };
+        }
+
+        if (prop === 'stream') {
+          return async function* (
+            inputs: unknown,
+            config?: Record<string, unknown>,
+            ...rest: unknown[]
+          ): AsyncGenerator<unknown> {
+            const enrichedConfig = adapter._buildConfig(config);
+            const runId = generateId('lcrun_');
+            const ctx: FrameworkContext = {
+              framework: 'langchain',
+              agentId: adapter.agentId,
+              sessionId: adapter.sessionId ?? 'unknown',
+              runId,
+              extra: {},
+            };
+            const start = Date.now();
+            let emitError: string | null = null;
+            const originalStream = (target as Record<string | symbol, unknown>)['stream'] as
+              | ((...args: unknown[]) => AsyncIterable<unknown>)
+              | undefined;
+            if (!originalStream) {
+              throw new Error('[Syrin] Wrapped chain does not have stream()');
+            }
+            try {
+              const iterable = await withFrameworkContext(ctx, () =>
+                Promise.resolve(originalStream.call(target, inputs, enrichedConfig, ...rest)),
+              );
+              for await (const chunk of iterable) {
+                yield chunk;
+              }
+            } catch (err) {
+              emitError = err instanceof Error ? err.message : String(err);
+              throw err;
+            } finally {
+              adapter.emitEvent({
+                event_id: generateId('evt_'),
+                event_type: 'CHAIN_EXECUTION',
+                timestamp: nowIso(),
+                session_id: adapter.sessionId,
+                agent_id: adapter.agentId,
+                chain_run_id: runId,
+                chain_name: chainName,
+                duration_ms: Date.now() - start,
+                error: emitError,
+                framework: 'langchain',
+              });
+            }
+          };
+        }
+
+        if (prop === 'astream') {
+          return async function* (
+            inputs: unknown,
+            config?: Record<string, unknown>,
+            ...rest: unknown[]
+          ): AsyncGenerator<unknown> {
+            const enrichedConfig = adapter._buildConfig(config);
+            const runId = generateId('lcrun_');
+            const ctx: FrameworkContext = {
+              framework: 'langchain',
+              agentId: adapter.agentId,
+              sessionId: adapter.sessionId ?? 'unknown',
+              runId,
+              extra: {},
+            };
+            const start = Date.now();
+            let emitError: string | null = null;
+            const astreamMethod = (target as Record<string | symbol, unknown>)['astream'] as
+              | ((...args: unknown[]) => AsyncIterable<unknown>)
+              | undefined;
+            if (!astreamMethod) {
+              throw new Error('[Syrin] Wrapped chain does not have astream()');
+            }
+            try {
+              const iterable = await withFrameworkContext(ctx, () =>
+                Promise.resolve(astreamMethod.call(target, inputs, enrichedConfig, ...rest)),
+              );
+              for await (const chunk of iterable) {
+                yield chunk;
+              }
+            } catch (err) {
+              emitError = err instanceof Error ? err.message : String(err);
+              throw err;
+            } finally {
+              adapter.emitEvent({
+                event_id: generateId('evt_'),
+                event_type: 'CHAIN_EXECUTION',
+                timestamp: nowIso(),
+                session_id: adapter.sessionId,
+                agent_id: adapter.agentId,
+                chain_run_id: runId,
+                chain_name: chainName,
+                duration_ms: Date.now() - start,
+                error: emitError,
+                framework: 'langchain',
+              });
+            }
           };
         }
 

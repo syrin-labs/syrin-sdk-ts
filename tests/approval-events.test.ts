@@ -114,7 +114,7 @@ describe('APPROVAL_REQUESTED events', () => {
           tool_name: 'delete_file',
         }],
       },
-      { status: 'approved' },
+      { ok: true, approval: { status: 'approved' } },
     );
 
     const sessionId = 'sess-appr-req';
@@ -135,7 +135,7 @@ describe('APPROVAL_REQUESTED events', () => {
           tool_name: 'send_email',
         }],
       },
-      { status: 'approved' },
+      { ok: true, approval: { status: 'approved' } },
     );
 
     const sessionId = 'sess-appr-fields';
@@ -159,7 +159,7 @@ describe('APPROVAL_REQUESTED events', () => {
           tool_name: 'deploy',
         }],
       },
-      { status: 'approved' },
+      { ok: true, approval: { status: 'approved' } },
     );
 
     const sessionId = 'sess-appr-noreason';
@@ -207,7 +207,7 @@ describe('APPROVAL_REQUESTED events', () => {
           tool_name: 'risky_op',
         }],
       },
-      { status: 'approved' },
+      { ok: true, approval: { status: 'approved' } },
     );
 
     const sessionId = 'sess-appr-nonfatal';
@@ -254,7 +254,7 @@ describe('APPROVAL_GRANTED events', () => {
           tool_name: 'run_query',
         }],
       },
-      { status: 'approved' },
+      { ok: true, approval: { status: 'approved' } },
     );
 
     const sessionId = 'sess-granted';
@@ -275,7 +275,7 @@ describe('APPROVAL_GRANTED events', () => {
           tool_name: 'execute_sql',
         }],
       },
-      { status: 'approved' },
+      { ok: true, approval: { status: 'approved' } },
     );
 
     const sessionId = 'sess-granted-fields';
@@ -298,7 +298,7 @@ describe('APPROVAL_GRANTED events', () => {
           tool_name: 'slow_op',
         }],
       },
-      { status: 'pending' },
+      { ok: true, approval: { status: 'pending' } },
     );
 
     const sessionId = 'sess-pending';
@@ -346,7 +346,7 @@ describe('APPROVAL_REJECTED events', () => {
           tool_name: 'delete_db',
         }],
       },
-      { status: 'rejected' },
+      { ok: true, approval: { status: 'rejected' } },
     );
 
     const sessionId = 'sess-rejected';
@@ -367,7 +367,7 @@ describe('APPROVAL_REJECTED events', () => {
           tool_name: 'drop_table',
         }],
       },
-      { status: 'rejected' },
+      { ok: true, approval: { status: 'rejected' } },
     );
 
     const sessionId = 'sess-rejected-reason';
@@ -388,7 +388,7 @@ describe('APPROVAL_REJECTED events', () => {
           tool_name: 'timed_op',
         }],
       },
-      { status: 'expired' },
+      { ok: true, approval: { status: 'expired' } },
     );
 
     const sessionId = 'sess-expired';
@@ -409,7 +409,7 @@ describe('APPROVAL_REJECTED events', () => {
           tool_name: 'expiring_op',
         }],
       },
-      { status: 'expired' },
+      { ok: true, approval: { status: 'expired' } },
     );
 
     const sessionId = 'sess-expired-reason';
@@ -430,7 +430,7 @@ describe('APPROVAL_REJECTED events', () => {
           tool_name: 'format_disk',
         }],
       },
-      { status: 'rejected' },
+      { ok: true, approval: { status: 'rejected' } },
     );
 
     const sessionId = 'sess-rej-fields';
@@ -453,7 +453,7 @@ describe('APPROVAL_REJECTED events', () => {
           tool_name: 'wait_op',
         }],
       },
-      { status: 'pending' },
+      { ok: true, approval: { status: 'pending' } },
     );
 
     const sessionId = 'sess-still-pending';

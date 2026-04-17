@@ -9,12 +9,13 @@
 
 import type { SyrinSDKConfig, SyrinEvent, SyrinEventBase, IngestPayload, IngestResponse } from '@/types.js';
 import type { SessionStore } from '@/core/session.js';
+import type { ConfigStore } from '@/config/store.js';
 import { SDK_VERSION } from '@/config/config.js';
 import { GovernanceResponse } from '@/core/governance.js';
 import { fireConfigChange, fireAlert } from '@/observability/hooks.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
 
-const MAX_QUEUE_SIZE = 1000;
+// MAX_QUEUE_SIZE is now read from config.maxQueueSize (default: 1000)
 
 /**
  * Redact the API key from error messages and log strings to prevent key leakage.
@@ -31,11 +32,16 @@ function redactApiKey(text: string, apiKey: string): string {
 interface QueuedEvent {
   event: SyrinEvent;
   sessionId: string;
+  /** Number of times this event has been re-queued after a failed POST. */
+  _syrinRetry?: number;
 }
+
+const MAX_RETRY = 3;
 
 export class Emitter {
   private config: SyrinSDKConfig;
   private sessionStore: SessionStore;
+  private _configStore: ConfigStore | null = null;
   private queue: QueuedEvent[] = [];
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
@@ -44,9 +50,20 @@ export class Emitter {
    *  Used to suppress CONFIG_APPLIED spam: we only emit when values actually change. */
   private _lastConfigSnapshot: Record<string, unknown> = {};
 
-  constructor(config: SyrinSDKConfig, sessionStore: SessionStore) {
+  constructor(config: SyrinSDKConfig, sessionStore: SessionStore, configStore?: ConfigStore) {
     this.config = config;
     this.sessionStore = sessionStore;
+    this._configStore = configStore ?? null;
+  }
+
+  /**
+   * Wire a ConfigStore into the emitter after construction.
+   * Called by init() once the ConfigStore is created and ready.
+   * This allows framework adapters to receive config_updates from the ingest
+   * response — not just the SessionStore / CallInterceptor path.
+   */
+  setConfigStore(store: ConfigStore): void {
+    this._configStore = store;
   }
 
   start(): void {
@@ -60,8 +77,9 @@ export class Emitter {
     const queued: QueuedEvent = { event, sessionId };
 
     // Enforce max queue size: drop oldest
-    if (this.queue.length >= MAX_QUEUE_SIZE) {
-      const excess = this.queue.length - MAX_QUEUE_SIZE + 1;
+    const maxQ = this.config.maxQueueSize ?? 1000;
+    if (this.queue.length >= maxQ) {
+      const excess = this.queue.length - maxQ + 1;
       this.queue.splice(0, excess);
       if (this.config.debug) {
         console.warn(`[Syrin] Queue full, dropped ${excess} oldest event(s).`);
@@ -150,16 +168,33 @@ export class Emitter {
   }
 
   private async _doFlush(): Promise<void> {
-
     // Take current batch
     const batch = this.queue.splice(0, this.config.batchSize);
 
-    // Group events by sessionId for the payload
-    const primarySessionId = batch[0].sessionId;
-    const session = this.sessionStore.getSession(primarySessionId);
+    // Group by sessionId — each session gets its own POST so session_id is always correct
+    const bySession = new Map<string, QueuedEvent[]>();
+    for (const qe of batch) {
+      let group = bySession.get(qe.sessionId);
+      if (!group) {
+        group = [];
+        bySession.set(qe.sessionId, group);
+      }
+      group.push(qe);
+    }
+
+    // Fire one POST per session group (in parallel); await all so flush() only resolves when done
+    await Promise.allSettled(
+      Array.from(bySession.entries()).map(([sessionId, group]) =>
+        this._postBatch(sessionId, group)
+      )
+    );
+  }
+
+  private async _postBatch(sessionId: string, batch: QueuedEvent[]): Promise<void> {
+    const session = this.sessionStore.getSession(sessionId);
 
     const payload: IngestPayload = {
-      session_id: primarySessionId,
+      session_id: sessionId,
       agent_id: session?.agentId ?? this.config.agentId,
       sdk: { language: 'typescript', version: SDK_VERSION },
       events: batch.map((q) => q.event),
@@ -187,46 +222,71 @@ export class Emitter {
 
         if (this.config.debug) {
           console.log(
-            `[Syrin] Flushed ${batch.length} event(s). Backend ok=${data.ok}`
+            `[Syrin] Flushed ${batch.length} event(s) for session ${sessionId}. Backend ok=${data.ok}`
           );
         }
 
-        if (data.config_updates && Object.keys(data.config_updates).length > 0) {
+        let configUpdates = data.config_updates;
+
+        // Enterprise controls: disableRemoteConfig / configUpdateAllowlist
+        if (configUpdates && Object.keys(configUpdates).length > 0) {
+          if (this.config.disableRemoteConfig) {
+            console.info('[Syrin] Remote config update ignored: disableRemoteConfig=true');
+            configUpdates = undefined;
+          } else if (this.config.configUpdateAllowlist) {
+            const allowlist = new Set(this.config.configUpdateAllowlist);
+            const rejected = Object.keys(configUpdates).filter((k) => !allowlist.has(k));
+            if (rejected.length > 0) {
+              console.info(`[Syrin] Remote config keys blocked by allowlist: ${rejected.join(', ')}`);
+            }
+            configUpdates = Object.fromEntries(
+              Object.entries(configUpdates).filter(([k]) => allowlist.has(k))
+            ) as typeof configUpdates;
+          }
+        }
+
+        if (configUpdates && Object.keys(configUpdates).length > 0) {
           // Diff against the last known snapshot — only act when values actually changed.
           // The backend always echoes the full active config on every ingest response,
           // so without this guard every flush would emit a CONFIG_APPLIED event.
-          const changedKeys = Object.keys(data.config_updates).filter(
-            (k) => this._lastConfigSnapshot[k] !== (data.config_updates as Record<string, unknown>)[k],
+          const changedKeys = Object.keys(configUpdates).filter(
+            (k) => this._lastConfigSnapshot[k] !== (configUpdates)[k],
           );
-          this._lastConfigSnapshot = { ...data.config_updates } as Record<string, unknown>;
+          this._lastConfigSnapshot = { ...configUpdates } as Record<string, unknown>;
 
-          if (this.config.debug) {
-            console.log('[Syrin] Received config_updates:', data.config_updates, '— changed:', changedKeys);
+          if (changedKeys.length > 0) {
+            console.info('[Syrin] Config update applied:', changedKeys.join(', '));
           }
 
-          const sessionIds = new Set(batch.map((q) => q.sessionId));
-          for (const sid of sessionIds) {
-            this.sessionStore.applyConfigUpdate(sid, data.config_updates);
-            if (changedKeys.length > 0) {
-              fireConfigChange(sid, data.config_updates);
-              // Emit CONFIG_APPLIED only when something actually changed
-              const configEvent: SyrinEvent = {
-                event_id: generateId('evt_'),
-                event_type: 'CONFIG_APPLIED',
-                timestamp: nowIso(),
-                session_id: sid,
-                config_keys: changedKeys,
-                model: '',
-                provider: '',
-                input_tokens: 0,
-                output_tokens: 0,
-                cost_usd: 0,
-                stream: false,
-                config_applied: true,
-                duration_ms: 0,
-              };
-              try { this.emit(configEvent, sid); } catch { /* fail-open */ }
-            }
+          // Update SessionStore — engine.beforeCall() reads effectiveConfig from here
+          this.sessionStore.applyConfigUpdate(sessionId, configUpdates);
+
+          // Update ConfigStore — framework adapters (LangChain _buildConfig, etc.) read from here
+          if (this._configStore) {
+            try {
+              this._configStore.applyUpdates(configUpdates, 'remote');
+            } catch { /* non-fatal — config store errors must not break event delivery */ }
+          }
+
+          if (changedKeys.length > 0) {
+            fireConfigChange(sessionId, configUpdates);
+            // Emit CONFIG_APPLIED only when something actually changed
+            const configEvent: SyrinEvent = {
+              event_id: generateId('evt_'),
+              event_type: 'CONFIG_APPLIED',
+              timestamp: nowIso(),
+              session_id: sessionId,
+              config_keys: changedKeys,
+              model: '',
+              provider: '',
+              input_tokens: 0,
+              output_tokens: 0,
+              cost_usd: 0,
+              stream: false,
+              config_applied: true,
+              duration_ms: 0,
+            };
+            try { this.emit(configEvent, sessionId); } catch { /* fail-open */ }
           }
         }
 
@@ -234,22 +294,13 @@ export class Emitter {
           if (this.config.debug) {
             console.log('[Syrin] Received tool_validation_results:', data.tool_validation_results);
           }
-          const sessionIds = new Set(batch.map((q) => q.sessionId));
-          for (const sid of sessionIds) {
-            await this.sessionStore.storeToolValidationResults(sid, data.tool_validation_results);
-          }
+          await this.sessionStore.storeToolValidationResults(sessionId, data.tool_validation_results);
         }
 
         if (data.governance) {
-          const sessionIds = new Set(batch.map((q) => q.sessionId));
-          const pollPromises: Promise<void>[] = [];
-          for (const sid of sessionIds) {
-            const polls = this._applyGovernance(sid, data.governance);
-            pollPromises.push(...polls);
-          }
-          // Await all approval polls so events are visible before flush() resolves
-          if (pollPromises.length > 0) {
-            await Promise.allSettled(pollPromises);
+          const polls = this._applyGovernance(sessionId, data.governance);
+          if (polls.length > 0) {
+            await Promise.allSettled(polls);
           }
         }
       }
@@ -325,7 +376,7 @@ export class Emitter {
         return;
       }
 
-      const status = body['status'] as string | undefined;
+      const status = (body['approval'] as Record<string, unknown> | undefined)?.['status'] as string | undefined;
 
       if (status === 'approved') {
         const ev = this._buildApprovalEvent('APPROVAL_GRANTED', sessionId, approvalId, toolName);
@@ -387,7 +438,11 @@ export class Emitter {
         // Collect poll promise — awaited by _doFlush() via pollPromises
         pollPromises.push(this._pollApproval(sessionId, approvalId, resolvedToolName));
       } else if (actionType === 'stop') {
-        this.sessionStore.appendGovernanceAction(sessionId, action);
+        // Attach drift_score from the GovernanceResponse envelope so engine can pass it to GovernanceStopError
+        const enrichedAction = gov.driftScore != null
+          ? { ...action, drift_score: gov.driftScore }
+          : action;
+        this.sessionStore.appendGovernanceAction(sessionId, enrichedAction);
         console.warn(`[Syrin] Backend sent STOP action for session ${sessionId} — reason: ${action['reason'] ?? '?'}`);
       } else if (actionType === 'inject_message') {
         this.sessionStore.appendInjectedMessage(sessionId, {
@@ -412,8 +467,14 @@ export class Emitter {
   }
 
   private _requeue(batch: QueuedEvent[]): void {
-    const available = MAX_QUEUE_SIZE - this.queue.length;
-    const toRequeue = batch.slice(0, Math.max(0, available));
+    // Increment retry counter; drop events that have already been retried MAX_RETRY times.
+    // After the Nth increment the event has failed N times total — drop at N >= MAX_RETRY.
+    const eligible = batch
+      .map((qe) => ({ ...qe, _syrinRetry: (qe._syrinRetry ?? 0) + 1 }))
+      .filter((qe) => qe._syrinRetry < MAX_RETRY);
+
+    const available = (this.config.maxQueueSize ?? 1000) - this.queue.length;
+    const toRequeue = eligible.slice(0, Math.max(0, available));
     this.queue.unshift(...toRequeue);
   }
 

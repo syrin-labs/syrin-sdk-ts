@@ -16,7 +16,7 @@ describe('createConfig', () => {
     expect(config.backendUrl).toBeDefined();
     expect(config.otelExporter).toBeDefined();
     expect(config.debug).toBe(false);
-    expect(config.captureContent).toBe(true);
+    expect(config.captureContent).toBe(false);
     expect(config.offline).toBe(false);
     expect(typeof config.idleFlushMs).toBe('number');
     expect(typeof config.batchSize).toBe('number');
@@ -29,7 +29,7 @@ describe('createConfig', () => {
     expect(config.otelExporter).toBe('none');
     expect(config.otelEndpoint).toBe('http://localhost:4318');
     expect(config.debug).toBe(false);
-    expect(config.captureContent).toBe(true);
+    expect(config.captureContent).toBe(false);
     expect(config.offline).toBe(false);
     expect(config.idleFlushMs).toBe(10_000);
     expect(config.batchSize).toBe(100);

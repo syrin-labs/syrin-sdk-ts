@@ -14,6 +14,7 @@ import { OTelBridge } from '@/observability/otel.js';
 import { CheckpointClient } from '@/core/checkpoint.js';
 import { SyrinSDKCore } from '@/core/engine.js';
 import { Heartbeat } from '@/core/heartbeat.js';
+import { ConfigSync } from '@/core/config-sync.js';
 import { load as loadPersistedConfig, save as savePersistedConfig } from '@/config/persist.js';
 import { OpenAIAdapter } from '@/adapters/openai/index.js';
 import { clearHooks } from '@/observability/hooks.js';
@@ -21,22 +22,39 @@ import { installForActiveLibraries, installModuleHook, uninstallModuleHook } fro
 import { generateId, nowIso } from '@/utils/helpers.js';
 import type { SyrinSDKConfig, SyrinSDK, SyrinEvent, ConfigUpdate, MessageParam } from '@/types.js';
 import type { SyrinSDKAdapter } from '@/adapters/types.js';
-import { _setAutoRefreshCallback } from '@/tunable/tunable.js';
-import { _setLifecycleEmitter } from '@/agent/context.js';
+import { _setAutoRefreshCallback, clearAutoRefreshTimer } from '@/tunable/tunable.js';
+import { _setLifecycleEmitter, agentStorage } from '@/agent/context.js';
+import { getCallInterceptor } from '@/control/call-interceptor.js';
+import type { CompleteControlConfig } from '@/control/complete-control-schema.js';
 
 
-export type { SyrinSDKConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ConfigUpdate, MessageParam } from '@/types.js';
+export type { SyrinSDKConfig, SyrinEvent, CustomLogEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ConfigUpdate, MessageParam } from '@/types.js';
 export { withAgent, withWorkflow, withSwarm, getRunContext, _setLifecycleEmitter } from '@/agent/context.js';
+export { TraceSpan } from '@/agent/trace-span.js';
+export type { TraceType } from '@/agent/trace-span.js';
 export { withTool, ToolSpan, withMemory, MemorySpan } from '@/agent/tool-context.js';
 export { GovernanceStopError } from '@/core/governance.js';
+export type { GovernancePolicy } from '@/core/governance.js';
 export type { Checkpoint } from '@/core/checkpoint.js';
+export { ConfigSync } from '@/core/config-sync.js';
+export type { ConfigSyncOptions } from '@/core/config-sync.js';
 export { onConfigChange, onAlert } from '@/observability/hooks.js';
 export { SyrinSDKCore } from '@/core/engine.js';
+export { SyrinLogger, getLogger, setLogger } from '@/observability/logger.js';
+export type { LogLevel, LogContext, LogEntry } from '@/observability/logger.js';
+export { IdentityManager, getIdentityManager, setIdentityManager } from '@/core/identity.js';
+export type { IdentityContext, CallContext } from '@/core/identity.js';
+export { CallInterceptor, getCallInterceptor, setCallInterceptor } from '@/control/call-interceptor.js';
+export type { InterceptedCall, GovernanceViolation } from '@/control/call-interceptor.js';
+export { ToolGovernance, getToolGovernance, setToolGovernance } from '@/control/tool-governance.js';
+export type { ToolCall, ApprovalRequest } from '@/control/tool-governance.js';
+export type { CompleteControlConfig, ToolConfig, ParameterMatrix } from '@/control/complete-control-schema.js';
+export { validateConfigValue, getConfigType, PARAMETER_CONSTRAINTS } from '@/control/complete-control-schema.js';
 export type { SyrinSDKAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore, SchemaField as AdapterSchemaField } from '@/adapters/types.js';
 export { OpenAIAdapter } from '@/adapters/openai/index.js';
 export { ConfigStore } from '@/config/store.js';
 export type { FieldSchema, ConfigVersion, AuditEntry } from '@/config/store.js';
-export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry } from '@/tunable/tunable.js';
+export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry, clearAutoRefreshTimer } from '@/tunable/tunable.js';
 export type { TuneOptions, TuneFieldDef } from '@/tunable/tunable.js';
 export { AnthropicAdapter } from '@/adapters/anthropic/index.js';
 export { LangChainAdapter } from '@/adapters/langchain/index.js';
@@ -46,6 +64,18 @@ export { VercelAIAdapter } from '@/adapters/vercel-ai/index.js';
 export { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types.js';
 export type { SyrinSDKFrameworkAdapter } from '@/adapters/types.js';
 
+/**
+ * Options for `cfg()` / `sdk.cfg()` — metadata about the remotely-configurable field.
+ */
+export interface CfgOptions {
+  label?: string;
+  description?: string;
+  ge?: number;
+  le?: number;
+  enum?: unknown[];
+  multiline?: boolean;
+}
+
 export class SyrinSDKInstance implements SyrinSDK {
   private _sessionId: string;
   private _config: SyrinSDKConfig;
@@ -54,8 +84,13 @@ export class SyrinSDKInstance implements SyrinSDK {
   private _otelBridge: OTelBridge;
   private _core: SyrinSDKCore;
   private _heartbeat: Heartbeat;
+  private _configDir: string | undefined;
   /** Config poll timer — set by init() when configPollIntervalMs > 0. */
   _pollTimer: ReturnType<typeof setInterval> | undefined = undefined;
+  /** Config sync manager — handles fetching and applying remote config via CallInterceptor. */
+  _configSync: ConfigSync | undefined = undefined;
+  /** Defaults detected by the code scanner at init(). Set by init() after construction. */
+  _scanReport: import('./utils/code-scanner.js').ScannedDefault[] = [];
 
   constructor(
     config: SyrinSDKConfig,
@@ -64,6 +99,7 @@ export class SyrinSDKInstance implements SyrinSDK {
     otelBridge: OTelBridge,
     core: SyrinSDKCore,
     heartbeat: Heartbeat,
+    configDir?: string,
   ) {
     this._config = config;
     this._sessionStore = sessionStore;
@@ -71,6 +107,7 @@ export class SyrinSDKInstance implements SyrinSDK {
     this._otelBridge = otelBridge;
     this._core = core;
     this._heartbeat = heartbeat;
+    this._configDir = configDir;
     this._sessionId = resolveSessionId(config.sessionId);
   }
 
@@ -123,6 +160,120 @@ export class SyrinSDKInstance implements SyrinSDK {
     const sid = sessionId ?? this._sessionId;
     this._sessionStore.setLocalConfig(sid, overrides as Record<string, unknown>);
     return this;
+  }
+
+  /**
+   * Declare a remotely configurable value and return its current value.
+   *
+   * @param key - Dot-notation key: "section.field" (e.g. "llm.temperature")
+   * @param defaultValue - Default value (used to infer type)
+   * @param options - Optional metadata: label, description, ge, le, enum, multiline
+   * @returns The current value: governance override > user configure() > remote > default
+   *
+   * @example
+   * const model = sdk.cfg('llm.model', 'gpt-4o', { label: 'LLM Model' });
+   * const temp  = sdk.cfg('llm.temperature', 0.7, { ge: 0.0, le: 2.0 });
+   */
+  cfg(key: string, defaultValue: string, options?: CfgOptions): string;
+  cfg(key: string, defaultValue: number, options?: CfgOptions): number;
+  cfg(key: string, defaultValue: boolean, options?: CfgOptions): boolean;
+  cfg(key: string, defaultValue?: unknown, options?: CfgOptions): unknown;
+  cfg(
+    key: string,
+    defaultValue: unknown = null,
+    options: CfgOptions = {},
+  ): unknown {
+    const parts = key.split('.');
+    if (parts.length < 2) return defaultValue;
+
+    const [section, ...rest] = parts;
+    const fieldName = rest.join('.');
+
+    // Determine namespace — check agent context (withAgent scope)
+    let namespace = `global.${section}`;
+    try {
+      const ctx = agentStorage.getStore();
+      if (ctx?.agentId) {
+        namespace = `agents.${ctx.agentId}.${section}`;
+      }
+    } catch { /* no agent context — use global */ }
+
+    // Access ConfigStore via core
+    const configStore = (this._core as unknown as Record<string, unknown>)['_configStore'] as import('./config/store.js').ConfigStore | undefined;
+    if (configStore) {
+      const sectionsRef = (configStore as unknown as { _sections: Record<string, Record<string, import('./config/store.js').FieldSchema>>; _values: Record<string, Record<string, unknown>> });
+      if (!sectionsRef._sections[namespace]) {
+        sectionsRef._sections[namespace] = {};
+        sectionsRef._values[namespace] = {};
+      }
+      if (!sectionsRef._sections[namespace][fieldName]) {
+        // Infer type from default value
+        const inferredType: import('./config/store.js').FieldSchema['type'] =
+          typeof defaultValue === 'number' ? 'number'
+          : typeof defaultValue === 'boolean' ? 'boolean'
+          : Array.isArray(defaultValue) ? 'array'
+          : typeof defaultValue === 'object' && defaultValue !== null ? 'object'
+          : 'string';
+
+        const fieldSchema: import('./config/store.js').FieldSchema = {
+          name: fieldName,
+          type: inferredType,
+          default: defaultValue,
+          ...(options.description ? { description: options.description } : {}),
+          ...(options.ge !== undefined ? { ge: options.ge } : {}),
+          ...(options.le !== undefined ? { le: options.le } : {}),
+          ...(options.enum !== undefined ? { enum: options.enum } : {}),
+          ...(options.label ? { label: options.label } : {}),
+          ...(options.multiline ? { multiline: options.multiline } : {}),
+        };
+
+        sectionsRef._sections[namespace][fieldName] = fieldSchema;
+        sectionsRef._values[namespace][fieldName] = defaultValue;
+      } else {
+        // Field already registered (e.g. by built-in fields or earlier cfg() call).
+        // Update the default so the user's value is reflected in the dashboard,
+        // and apply any explicitly provided schema options (label, constraints…).
+        const fs = sectionsRef._sections[namespace][fieldName];
+        fs.default = defaultValue;
+        if (sectionsRef._values[namespace][fieldName] == null) {
+          sectionsRef._values[namespace][fieldName] = defaultValue;
+        }
+        if (options.label) fs.label = options.label;
+        if (options.description) fs.description = options.description;
+        if (options.ge !== undefined) fs.ge = options.ge;
+        if (options.le !== undefined) fs.le = options.le;
+        if (options.enum !== undefined) fs.enum = options.enum;
+        if (options.multiline) fs.multiline = options.multiline;
+      }
+
+      // Priority resolution: governance/anchor > user configure() > remote (activeConfig) > default
+      const storeSource = configStore.getSource?.(namespace, fieldName) ?? 'default';
+      if (storeSource === 'governance' || storeSource === 'anchor') {
+        const val = sectionsRef._values?.[namespace]?.[fieldName];
+        if (val != null) return val;
+      }
+    }
+
+    // User configure() → session localConfig
+    const session = this._sessionStore.getSession(this._sessionId);
+    if (session?.localConfig) {
+      const local = session.localConfig;
+      if (fieldName in local && local[fieldName] != null) return local[fieldName];
+    }
+
+    // Remote activeConfig
+    if (session?.activeConfig) {
+      const active = session.activeConfig;
+      if (fieldName in active && active[fieldName] != null) return active[fieldName];
+    }
+
+    // ConfigStore remote value
+    if (configStore) {
+      const storeVal = (configStore as unknown as { _values: Record<string, Record<string, unknown>> })._values?.[namespace]?.[fieldName];
+      if (storeVal != null) return storeVal;
+    }
+
+    return defaultValue;
   }
 
   /**
@@ -209,8 +360,199 @@ export class SyrinSDKInstance implements SyrinSDK {
     return { ...rest, apiKey: '****' };
   }
 
+  /**
+   * Return a structured reference of all remotely-configurable fields.
+   *
+   * For each field: current value, default, source (who set it), type, constraints.
+   *
+   * Sources: `'default'` | `'remote'` | `'user'` | `'governance'` | `'anchor'`
+   */
+  configReference(): Record<string, Record<string, {
+    current: unknown;
+    default: unknown;
+    source: string;
+    type: string;
+    constraints?: Record<string, unknown>;
+  }>> {
+    const session = this._sessionStore.getSession(this._sessionId);
+    const schemaRaw = this._core.buildSchema();
+    const sections = (schemaRaw as { global?: Record<string, { fields: Array<Record<string, unknown>> }> }).global;
+    const result: Record<string, Record<string, {
+      current: unknown;
+      default: unknown;
+      source: string;
+      type: string;
+      constraints?: Record<string, unknown>;
+    }>> = {};
+
+    const configStore = (this._core as unknown as Record<string, unknown>)['_configStore'] as import('./config/store.js').ConfigStore | undefined;
+
+    for (const [sectionName, sectionData] of Object.entries(sections ?? {})) {
+      const fieldsOut: Record<string, { current: unknown; default: unknown; source: string; type: string; constraints?: Record<string, unknown> }> = {};
+      for (const fieldDef of sectionData.fields ?? []) {
+        const fieldName = fieldDef.name as string;
+        let current: unknown = null;
+        let source = 'default';
+
+        // Check ConfigStore for governance/anchor — highest priority
+        // In v2 format, ConfigStore namespace is "global.<sectionName>"
+        const storeSource = configStore?.getSource(`global.${sectionName}`, fieldName) ?? 'default';
+
+        if (storeSource === 'governance' || storeSource === 'anchor') {
+          const storeVal = (configStore as unknown as { _values?: Record<string, Record<string, unknown>> })?._values?.[`global.${sectionName}`]?.[fieldName];
+          if (storeVal != null) { current = storeVal; source = storeSource; }
+        } else {
+          // User configure() → session localConfig wins over remote
+          if (session && session.localConfig != null) {
+            const local = session.localConfig;
+            if (fieldName in local && local[fieldName] != null) {
+              current = local[fieldName]; source = 'user';
+            }
+          }
+          // Remote backend update → session activeConfig
+          if (source === 'default' && session) {
+            const active = session.activeConfig as Record<string, unknown> | undefined;
+            if (active && fieldName in active && active[fieldName] != null) {
+              current = active[fieldName]; source = 'remote';
+            }
+          }
+          // ConfigStore remote value for framework-level fields (e.g. langgraph)
+          if (source === 'default' && storeSource === 'remote') {
+            const storeVal = (configStore as unknown as { _values?: Record<string, Record<string, unknown>> })?._values?.[`global.${sectionName}`]?.[fieldName];
+            if (storeVal != null) { current = storeVal; source = 'remote'; }
+          }
+        }
+
+        const entry: { current: unknown; default: unknown; source: string; type: string; constraints?: Record<string, unknown> } = {
+          current,
+          default: (fieldDef.default ?? null) as unknown,
+          source,
+          type: (fieldDef.type ?? 'str') as string,
+        };
+        if (fieldDef.constraints) entry.constraints = fieldDef.constraints as Record<string, unknown>;
+        fieldsOut[fieldName] = entry;
+      }
+      result[sectionName] = fieldsOut;
+    }
+    return result;
+  }
+
+  /**
+   * Print a human-readable table of all remotely-configurable fields.
+   * Shows current value, default, source badge, type, and constraints.
+   */
+  printConfigReference(): void {
+    const SOURCE_BADGE: Record<string, string> = {
+      default:    'default',
+      remote:     'remote ',
+      user:       'user   ',
+      governance: 'govern.',
+      anchor:     'anchor ',
+    };
+    const ref = this.configReference();
+    console.log('Syrin Remote Config Reference');
+    console.log('='.repeat(50));
+    for (const [section, fields] of Object.entries(ref)) {
+      console.log(`\n  ${section}`);
+      console.log(`  ${'─'.repeat(Math.max(4, section.length))}`);
+      for (const [fname, info] of Object.entries(fields)) {
+        const badge    = SOURCE_BADGE[info.source] ?? info.source;
+        const curStr   = info.current != null ? String(info.current) : '—';
+        const defStr   = info.default != null ? String(info.default) : '—';
+        const cInfo    = info.constraints;
+        let   cStr     = '';
+        if (cInfo) {
+          if ('ge' in cInfo || 'le' in cInfo) cStr = `   range ${cInfo.ge ?? ''}–${cInfo.le ?? ''}`;
+          else if ('enum' in cInfo) cStr = `   one of ${JSON.stringify(cInfo.enum)}`;
+          else if ('ge' in cInfo) cStr = `   min ${cInfo.ge}`;
+        }
+        console.log(
+          `    ${fname.padEnd(24)} ${String(info.type).padEnd(6)}  ` +
+          `current=${curStr.padEnd(16)} default=${defStr.padEnd(16)} ` +
+          `[${badge}]${cStr}`
+        );
+      }
+    }
+    console.log('');
+  }
+
+  /**
+   * Return the config-key defaults detected by the code scanner at init().
+   *
+   * Each entry has a `path` (e.g. `'llm.model'`) and `default` value.
+   * Returns an empty array when no patterns were detected.
+   *
+   * @example
+   * const report = sdk.scanReport();
+   * // [{ path: 'llm.model', default: 'gpt-4o-mini' }, ...]
+   */
+  scanReport(): import('./utils/code-scanner.js').ScannedDefault[] {
+    return [...this._scanReport];
+  }
+
   async flush(): Promise<void> {
     await this._emitter.flush();
+  }
+
+  /**
+   * Emit a custom log entry that appears on the Syrin dashboard timeline.
+   *
+   * Use this to surface any application-level event alongside LLM calls —
+   * e.g. retrieval steps, business logic decisions, cost warnings, or debug
+   * checkpoints — giving you a complete picture of what the agent was doing.
+   *
+   * @param message - The log message to display on the dashboard.
+   * @param options.level - Severity: `'debug'` | `'info'` (default) | `'warning'` | `'error'`
+   * @param options.metadata - Optional key/value pairs for additional context.
+   * @param options.sessionId - Target session. Defaults to the instance's session.
+   *
+   * @example
+   * sdk.log('Retrieved 42 documents from vector store', {
+   *   metadata: { collection: 'kb', query: q }
+   * });
+   * sdk.log('Cost budget at 80%', { level: 'warning', metadata: { spent: 0.80 } });
+   */
+  log(
+    message: string,
+    options: {
+      level?: 'debug' | 'info' | 'warning' | 'error';
+      metadata?: Record<string, unknown>;
+      sessionId?: string;
+    } = {},
+  ): void {
+    const { level = 'info', metadata = {}, sessionId } = options;
+    const sid = sessionId ?? this._sessionId;
+    const event = {
+      event_id:     `evt_${Math.random().toString(36).slice(2)}`,
+      event_type:   'CUSTOM_LOG' as const,
+      timestamp:    new Date().toISOString(),
+      session_id:   sid,
+      agent_id:     this._config.agentId ?? '',
+      message,
+      level,
+      metadata,
+      // Required SyrinEventBase fields (not applicable for custom logs)
+      duration_ms:    0,
+      model:          '',
+      provider:       '',
+      input_tokens:   0,
+      output_tokens:  0,
+      cost_usd:       0,
+      stream:         false,
+      config_applied: false,
+    };
+    try {
+      this._emitter.emit(event as import('./types.js').SyrinEvent, sid);
+    } catch { /* non-fatal */ }
+  }
+
+  /**
+   * Get the agent's configuration schema.
+   * Returns what can be configured (sections and fields), suitable for dashboard display.
+   * @returns The full schema with all sections and their fields.
+   */
+  getSchema(): Record<string, unknown> {
+    return this._core.buildSchema();
   }
 
   /**
@@ -224,7 +566,10 @@ export class SyrinSDKInstance implements SyrinSDK {
 
   async shutdown(): Promise<void> {
     _setLifecycleEmitter(null);
+    clearAutoRefreshTimer();
     uninstallModuleHook();
+    if (this._pollTimer) clearInterval(this._pollTimer);
+    if (this._configSync) this._configSync.stopPolling();
     await this._heartbeat.stop();
     await this._emitter.stop();
     this._core.uninstallAll();
@@ -254,32 +599,33 @@ let _primaryInstance: SyrinSDKInstance | null = null;
  * });
  */
 export interface SyrinInitOptions {
+  // --- Core ---
+
   /**
    * Syrin API key. Falls back to the `SYRIN_API_KEY` environment variable.
    * Required — init() throws if neither is set.
    */
   apiKey?: string;
   /**
-   * The name of your AI application or service as it appears in the Syrin dashboard.
+   * The name of your AI application or agent as it appears in the Syrin dashboard.
    * E.g. `'customer-support-bot'`, `'research-pipeline'`.
    *
    * For multi-agent apps this is the **service** name — individual agent runs are
    * scoped with `withAgent('researcher', ...)`. Max 128 chars. Alphanumeric + `-_.@:`.
-   * Falls back to `SYRIN_NAME` env var.
+   * Falls back to `SYRIN_AGENT_ID` env var.
    */
+  agentId?: string;
+  /** @deprecated Use `agentId` instead. */
   name?: string;
-  /**
-   * Override the session ID for this instance.
-   * Max 128 chars. Alphanumeric, hyphens, underscores, dots, colons, @.
-   * Auto-generated if not provided.
-   */
-  sessionId?: string;
   /**
    * Syrin backend URL. Defaults to `https://api.syrin.ai`.
    * Must use HTTPS except for `http://localhost` and `http://127.0.0.1`.
    * Falls back to `SYRIN_URL` env var.
    */
   url?: string;
+
+  // --- Observability ---
+
   /**
    * OTel span exporter. One of `'none'` (default), `'console'`, `'otlp'`.
    * Falls back to `SYRIN_OTEL_EXPORTER` env var.
@@ -297,10 +643,15 @@ export interface SyrinInitOptions {
   debug?: boolean;
   /**
    * Include prompt messages and completion text in telemetry events.
-   * **On by default.** Set to `false` to redact content for privacy-sensitive deployments.
+   * **Disabled by default (PII-safe).** Set to `true` to transmit prompts,
+   * completions, and system messages to the Syrin backend.
+   * Review your data-handling policy (GDPR, HIPAA, etc.) before enabling.
    * Falls back to `SYRIN_CAPTURE_CONTENT` env var.
    */
   captureContent?: boolean;
+
+  // --- Performance ---
+
   /**
    * Run the SDK without sending any network requests.
    * Events are queued locally and discarded on shutdown. Default: `false`.
@@ -321,15 +672,58 @@ export interface SyrinInitOptions {
    * sent to the backend for validation. Default: `false`.
    */
   toolValidation?: boolean;
+
+  // --- Session ---
+
+  /**
+   * Override the session ID for this instance.
+   * Max 128 chars. Alphanumeric, hyphens, underscores, dots, colons, @.
+   * Auto-generated if not provided.
+   */
+  sessionId?: string;
   /**
    * Auto-delete sessions older than this many ms (undefined = disabled).
    */
   sessionTtlMs?: number;
+
+  // --- Governance ---
+
+  /**
+   * Governance policy controlling which backend actions the SDK will execute.
+   * Destructive actions (`stop`, `injectMessage`) default to disabled.
+   *
+   * @example
+   * governance: { allowStop: true, allowInjectMessage: false }
+   */
+  governance?: import('./core/governance.js').GovernancePolicy;
+  /**
+   * When set, only config keys in this list may be updated by the backend.
+   * All other `config_updates` keys are silently discarded.
+   *
+   * @example
+   * configUpdateAllowlist: ['llm.temperature', 'llm.max_tokens']
+   */
+  configUpdateAllowlist?: string[];
+  /**
+   * When `true`, all `config_updates` received from the backend are silently ignored.
+   * Default: `false`.
+   */
+  disableRemoteConfig?: boolean;
+
+  // --- Advanced ---
+
   /**
    * Public URL of this agent server — stored by the dashboard to enable
    * the "Run" button for remote agent invocations.
    */
   serverUrl?: string;
+  /**
+   * Explicit framework/orchestration library name reported to the dashboard
+   * (e.g. `'langchain'`, `'langgraph'`, `'mastra'`, `'vercel-ai'`, `'pydantic-ai'`).
+   * When set, this takes priority over auto-detection. Useful when the SDK
+   * cannot auto-detect the framework (e.g. pure-ESM imports with tsx).
+   */
+  agentFramework?: string;
   /**
    * Additional adapters to install after the built-in ones.
    * Each adapter is registered in order; explicit adapters take precedence
@@ -364,6 +758,80 @@ export interface SyrinInitOptions {
    * schemaDefaults: { 'llm.model': 'gpt-4o-mini', 'llm.temperature': 0.7 }
    */
   schemaDefaults?: Record<string, unknown>;
+  /**
+   * Directory containing the `.syrin/syrin.config.json` file for persisted config.
+   * Defaults to `process.cwd()`. Set per-process for isolated config directories
+   * (e.g., multi-agent deployments where each agent has its own config).
+   *
+   * @example
+   * configDir: '/data/agents/customer-support'
+   */
+  configDir?: string;
+  /**
+   * File or directory paths to scan for `cfg()` / `config()` / `activeConfig()`
+   * usage patterns. When provided, the SDK scans these paths (instead of only
+   * the immediate caller file) to pre-populate the dashboard with real runtime
+   * defaults. Directories are searched recursively for `.ts`/`.js` files.
+   *
+   * @example
+   * scanPaths: ['./src', './agents']
+   */
+  scanPaths?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Built-in global fields — pre-registered by init() so the dashboard is
+// immediately useful without any cfg() calls from the user.
+// ---------------------------------------------------------------------------
+
+type _BuiltinField = {
+  type: 'number' | 'string' | 'boolean';
+  label: string;
+  description: string;
+  ge?: number;
+  le?: number;
+  multiline?: boolean;
+};
+
+const _BUILTIN_GLOBAL_FIELDS: Record<string, Record<string, _BuiltinField>> = {
+  'global.llm': {
+    model:             { type: 'string',  label: 'LLM Model',          description: 'Which model to use for LLM calls' },
+    temperature:       { type: 'number',  label: 'Temperature',        description: 'Sampling randomness (0=deterministic, 2=wild)', ge: 0.0, le: 2.0 },
+    max_tokens:        { type: 'number',  label: 'Max Tokens',         description: 'Maximum output tokens per call', ge: 1 },
+    top_p:             { type: 'number',  label: 'Top P',              description: 'Nucleus sampling probability', ge: 0.0, le: 1.0 },
+    frequency_penalty: { type: 'number',  label: 'Frequency Penalty',  description: 'Penalise repeated tokens', ge: -2.0, le: 2.0 },
+    presence_penalty:  { type: 'number',  label: 'Presence Penalty',   description: 'Penalise tokens already seen', ge: -2.0, le: 2.0 },
+    seed:              { type: 'number',  label: 'Seed',               description: 'Deterministic sampling seed' },
+  },
+  'global.prompt': {
+    system_prompt:     { type: 'string',  label: 'System Prompt',      description: 'System message prepended to every LLM call', multiline: true },
+  },
+};
+
+function _registerBuiltinFields(configStore: import('./config/store.js').ConfigStore): void {
+  const sectionsRef = (configStore as unknown as { _sections: Record<string, Record<string, import('./config/store.js').FieldSchema>>; _values: Record<string, Record<string, unknown>> });
+  for (const [namespace, fields] of Object.entries(_BUILTIN_GLOBAL_FIELDS)) {
+    if (!sectionsRef._sections[namespace]) {
+      sectionsRef._sections[namespace] = {};
+      sectionsRef._values[namespace] = {};
+    }
+    for (const [fieldName, def] of Object.entries(fields)) {
+      if (!sectionsRef._sections[namespace][fieldName]) {
+        const schema: import('./config/store.js').FieldSchema = {
+          name: fieldName,
+          type: def.type,
+          default: null,
+          label: def.label,
+          description: def.description,
+          ...(def.ge !== undefined ? { ge: def.ge } : {}),
+          ...(def.le !== undefined ? { le: def.le } : {}),
+          ...(def.multiline ? { multiline: def.multiline } : {}),
+        };
+        sectionsRef._sections[namespace][fieldName] = schema;
+        sectionsRef._values[namespace][fieldName] = null;
+      }
+    }
+  }
 }
 
 /**
@@ -397,7 +865,9 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   const existing = _instances.get(name);
   if (existing) {
     console.warn(
-      `[Syrin] Instance "${name}" already initialized. Call shutdown("${name}") first to reinitialize.`
+      `[Syrin] Instance "${name}" is already initialized. ` +
+      `Call shutdown("${name}") first to reinitialize, ` +
+      `or call getInstance("${name}") to reuse the existing instance.`
     );
     // Tear down existing instance and reinitialize
     try { await existing.shutdown(); } catch { /* non-fatal */ }
@@ -411,7 +881,8 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   const configInput: Partial<SyrinSDKConfig> & { apiKey?: string } = {
     ...(options as Partial<SyrinSDKConfig>),
   };
-  if (options.name !== undefined) configInput.agentId = options.name;
+  if (options.agentId !== undefined) configInput.agentId = options.agentId;
+  else if (options.name !== undefined) configInput.agentId = options.name;  // legacy
   if (options.url !== undefined) configInput.backendUrl = options.url;
 
   const config = createConfig(configInput);
@@ -438,8 +909,12 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
 
   // Wire ConfigStore into core so framework adapters can read config
   const { ConfigStore } = await import('./config/store.js');
-  const configStore = new ConfigStore();
+  const configStore = new ConfigStore(config.configHistoryMaxlen ?? 50, config.configAuditMaxlen ?? 1000);
   core.setConfigStore(configStore);
+  _registerBuiltinFields(configStore);
+
+  // Wire ConfigStore into emitter so ingest config_updates propagate to framework adapters
+  emitter.setConfigStore(configStore);
 
   // Wire global TunableRegistry into core
   const { globalRegistry } = await import('./tunable/tunable.js');
@@ -448,16 +923,46 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // Scan the user's source file(s) for cfg()/activeConfig() patterns and pre-populate
   // schema defaults — so the dashboard shows real values before the first LLM call.
   // This is best-effort: failures are silently swallowed.
+  let _scanReport: import('./utils/code-scanner.js').ScannedDefault[] = [];
   try {
-    const { scanCallerDefaults } = await import('./utils/code-scanner.js');
-    const scanned = scanCallerDefaults(_initStack);
+    const { scanCallerDefaults, scanPaths: _scanPathsFn } = await import('./utils/code-scanner.js');
+    const scanned = options.scanPaths && options.scanPaths.length > 0
+      ? _scanPathsFn(options.scanPaths)
+      : scanCallerDefaults(_initStack);
     if (scanned.length > 0) {
       core.setCodeScannedDefaults(scanned);
+      _scanReport = scanned;
       if (config.debug) {
         console.log(`[Syrin] Code-scan detected ${scanned.length} config defaults:`, scanned.map(d => d.path).join(', '));
       }
     }
   } catch { /* non-fatal */ }
+
+  // Wire explicit agentFramework override — takes priority over auto-detection in register()
+  if (options.agentFramework) {
+    core.setAgentFramework(options.agentFramework);
+
+    // When the user explicitly declares their framework, install the corresponding
+    // Tier-2 adapter immediately — even if the library was loaded via ESM (which
+    // won't appear in require.cache or trigger Module._load hooks).
+    const _frameworkAdapterMap: Record<string, { path: string; exportName: string }> = {
+      'langchain':  { path: './adapters/langchain/index.js',  exportName: 'LangChainAdapter' },
+      'langgraph':  { path: './adapters/langgraph/index.js',  exportName: 'LangGraphAdapter' },
+      'mastra':     { path: './adapters/mastra/index.js',     exportName: 'MastraAdapter'    },
+      'vercel-ai':  { path: './adapters/vercel-ai/index.js',  exportName: 'VercelAIAdapter'  },
+      'pydantic_ai':{ path: '', exportName: '' }, // Python-only, skip in TS
+    };
+    const adapterEntry = _frameworkAdapterMap[options.agentFramework];
+    if (adapterEntry?.exportName && !core.isAdapterInstalled(options.agentFramework)) {
+      try {
+        const adapterMod = await import(adapterEntry.path) as Record<string, new () => SyrinSDKAdapter>;
+        const AdapterClass = adapterMod[adapterEntry.exportName];
+        if (typeof AdapterClass === 'function') {
+          await core.registerAdapter(new AdapterClass());
+        }
+      } catch { /* optional dep not installed — skip */ }
+    }
+  }
 
   // Register user-provided adapters first — they always take precedence over auto-detection
   if (options.adapters) {
@@ -475,8 +980,12 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // Load persisted config from previous run (.syrin/syrin.config.json).
   // Parity with Python SDK — overrides survive restarts without waiting for polling.
   try {
-    const persisted = loadPersistedConfig();
+    const persisted = loadPersistedConfig(options.configDir);
     if (Object.keys(persisted).length > 0) {
+      // Apply to CallInterceptor so LLM calls are intercepted with persisted overrides
+      getCallInterceptor().setConfig(persisted as Partial<CompleteControlConfig>);
+
+      // Also apply to sessionStore for backwards compatibility
       const store = sessionStore as unknown as { applyConfigUpdate(sid: string, overrides: Record<string, unknown>): void };
       const sid = resolveSessionId(config.sessionId);
       if (typeof store.applyConfigUpdate === 'function') {
@@ -503,32 +1012,28 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   });
   heartbeat.start();
 
-  const instance = new SyrinSDKInstance(config, sessionStore, emitter, otelBridge, core, heartbeat);
+  const instance = new SyrinSDKInstance(config, sessionStore, emitter, otelBridge, core, heartbeat, options.configDir);
+  instance._scanReport = _scanReport;
+
+  // Create and initialize ConfigSync — fetches remote config and propagates to all three stores
+  const configSync = new ConfigSync({
+    agentId:      config.agentId,
+    backendUrl:   config.backendUrl,
+    apiKey:       config.apiKey,
+    offline:      config.offline,
+    configStore,
+    sessionStore,
+    sessionId,
+  });
+
+  // Fetch and apply config overrides on startup
+  await configSync.initialize();
 
   // Start config polling if requested (check both options and resolved config)
-  const pollIntervalMs = options.configPollIntervalMs ?? config.configPollIntervalMs ?? 0;
-  if (pollIntervalMs > 0) {
-    const pollTimer = setInterval(async () => {
-      try {
-        const resp = await fetch(
-          `${config.backendUrl}/agents/${config.agentId}/overrides`,
-          { headers: { Authorization: `Bearer ${config.apiKey}` } }
-        );
-        if (resp.ok) {
-          const data = await resp.json() as { ok: boolean; overrides: Record<string, unknown> };
-          if (data.ok && data.overrides) {
-            // Apply overrides to all active sessions
-            for (const sid of sessionStore.getSessionIds()) {
-              sessionStore.applyConfigUpdate(sid, data.overrides);
-            }
-          }
-        }
-      } catch {
-        // Non-fatal — polling is best-effort
-      }
-    }, pollIntervalMs);
-
-    instance._pollTimer = pollTimer;
+  const pollIntervalMs = options.configPollIntervalMs ?? config.configPollIntervalMs ?? 30_000;
+  if (pollIntervalMs > 0 && !config.offline && config.agentId) {
+    configSync.startPolling(pollIntervalMs);
+    instance._configSync = configSync;
   }
 
   // Register in named registry
@@ -590,8 +1095,8 @@ export function mountConfigEndpoint(instanceName = 'default') {
 
     const overrides = body as Record<string, unknown>;
 
-    // Apply to all active sessions
-    const store = inst['_sessionStore'] as SessionStore;
+    // Apply to all active sessions — engine.beforeCall() reads effectiveConfig from here
+    const store = inst['_sessionStore'];
     const ids = typeof (store as SessionStore & { getSessionIds?(): string[] }).getSessionIds === 'function'
       ? (store as SessionStore & { getSessionIds(): string[] }).getSessionIds()
       : [];
@@ -603,8 +1108,19 @@ export function mountConfigEndpoint(instanceName = 'default') {
     // Cast is safe: overrides came from trusted backend JSON
     inst.configure(overrides as ConfigUpdate);
 
-    // Persist to disk
-    savePersistedConfig(overrides);
+    // Update ConfigStore — framework adapters (LangChain _buildConfig, etc.) read from here
+    // Without this, LangChain wrap() would inject stale startup values into configurable
+    const coreRef = inst['_core'];
+    const configStore = coreRef.getConfigStore?.();
+    if (configStore) {
+      try {
+        configStore.applyUpdates(overrides, 'remote');
+      } catch { /* non-fatal */ }
+    }
+
+    // Persist to disk using the instance's configDir
+    const configDir = (inst as unknown as { _configDir?: string })._configDir;
+    savePersistedConfig(overrides, configDir);
 
     res.json({ ok: true, applied: Object.keys(overrides).length });
   };
@@ -632,11 +1148,17 @@ export async function shutdown(name = 'default'): Promise<void> {
 }
 
 /**
- * Return the currently active session ID.
- * Prefers the session ID from AsyncLocalStorage (set by withSession()),
+ * Return the active session ID for the current async context, or a fallback.
+ * Useful for correlating LLM calls with your own logging or tracing.
+ *
+ * Prefers the session ID from AsyncLocalStorage (set by `withSession()`),
  * falls back to the default instance's session ID, or generates a new one.
  *
  * @returns The active session ID string.
+ *
+ * @example
+ * const sessionId = getSessionId();
+ * logger.info('LLM call started', { sessionId });
  */
 export function getSessionId(): string {
   if (_primaryInstance) {
@@ -663,7 +1185,7 @@ export async function withSession<T>(sessionId: string, fn: () => Promise<T>): P
   const inst = _primaryInstance;
   const agentId = inst?.config.agentId;
   const startTime = Date.now();
-  const emitter = inst ? inst['_emitter'] as Emitter : null;
+  const emitter = inst ? inst['_emitter'] : null;
 
   if (emitter) {
     const startedEvent: SyrinEvent = {
@@ -824,4 +1346,89 @@ export function clearStaleSessions(olderThanMs = 3_600_000): number {
  */
 export function configSnapshot(): Record<string, unknown> | null {
   return _primaryInstance?.configSnapshot() ?? null;
+}
+
+/**
+ * Return a structured reference of all remotely-configurable fields on the default SDK instance.
+ *
+ * For each field: current value, default, source (who set it), type, constraints.
+ * Returns null if the SDK is not initialized.
+ *
+ * Sources: `'default'` | `'remote'` | `'user'` | `'governance'` | `'anchor'`
+ */
+export function configReference(): ReturnType<SyrinSDKInstance['configReference']> | null {
+  return _primaryInstance?.configReference() ?? null;
+}
+
+/**
+ * Declare a remotely configurable value at module level.
+ * Uses the primary (default) SDK instance if initialized; returns defaultValue otherwise.
+ *
+ * @example
+ * import { cfg } from '@syrin/sdk';
+ * const model = cfg('llm.model', 'gpt-4o', { label: 'LLM Model' });
+ * const temp  = cfg('llm.temperature', 0.7, { ge: 0.0, le: 2.0 });
+ */
+export function cfg(key: string, defaultValue: string, options?: CfgOptions): string;
+export function cfg(key: string, defaultValue: number, options?: CfgOptions): number;
+export function cfg(key: string, defaultValue: boolean, options?: CfgOptions): boolean;
+export function cfg(key: string, defaultValue?: unknown, options?: CfgOptions): unknown;
+export function cfg(
+  key: string,
+  defaultValue: unknown = null,
+  options: CfgOptions = {},
+): unknown {
+  if (!_primaryInstance) return defaultValue;
+  return _primaryInstance.cfg(key, defaultValue, options);
+}
+
+/**
+ * Emit a custom log entry that appears on the Syrin dashboard timeline.
+ * Targets the **default** SDK instance. For named instances call `sdk.log()` directly.
+ *
+ * @param message - The log message to display on the dashboard.
+ * @param options.level - Severity: `'debug'` | `'info'` (default) | `'warning'` | `'error'`
+ * @param options.metadata - Optional key/value pairs for additional context.
+ *
+ * @example
+ * log('Retrieved 42 documents', { metadata: { collection: 'kb' } });
+ * log('Cost budget at 80%', { level: 'warning' });
+ */
+export function log(
+  message: string,
+  options: {
+    level?: 'debug' | 'info' | 'warning' | 'error';
+    metadata?: Record<string, unknown>;
+  } = {},
+): void {
+  _primaryInstance?.log(message, options);
+}
+
+/**
+ * Print a human-readable table of all remotely-configurable fields on the default SDK instance.
+ * Shows current value, default, source badge, type, and constraints.
+ * Prints a warning if the SDK is not initialized.
+ */
+export function printConfigReference(): void {
+  if (!_primaryInstance) {
+    console.log('[Syrin] SDK not initialized. Call init() first.');
+    return;
+  }
+  _primaryInstance.printConfigReference();
+}
+
+/**
+ * Return the config-key defaults detected by the code scanner at init().
+ *
+ * Each entry has a `path` (e.g. `'llm.model'`) and `default` value.
+ * Returns an empty array before `init()` is called or when no patterns were detected.
+ *
+ * @example
+ * await init({ apiKey: '...', scanPaths: ['./src'] });
+ * for (const item of scanReport()) {
+ *   console.log(item.path, '→', item.default);
+ * }
+ */
+export function scanReport(): import('./utils/code-scanner.js').ScannedDefault[] {
+  return _primaryInstance?.scanReport() ?? [];
 }

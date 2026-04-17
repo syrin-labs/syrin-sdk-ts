@@ -86,18 +86,18 @@ describe('_detectFramework()', () => {
     vi.clearAllMocks();
   });
 
-  // 1. Returns 'openai' when only OpenAI adapter is registered
-  it('returns "openai" when only the OpenAI adapter is registered', async () => {
+  // 1. Returns undefined when only OpenAI adapter is registered (Tier-1 only, no orchestration framework)
+  it('returns undefined when only the OpenAI adapter is registered', async () => {
     const core = makeCore();
     await registerNoOp(new OpenAIAdapter({} as never), core);
-    expect(detectFramework(core)).toBe('openai');
+    expect(detectFramework(core)).toBeUndefined();
   });
 
-  // 2. Returns 'anthropic' when only Anthropic adapter is registered
-  it('returns "anthropic" when only the Anthropic adapter is registered', async () => {
+  // 2. Returns undefined when only Anthropic adapter is registered (Tier-1 only, no orchestration framework)
+  it('returns undefined when only the Anthropic adapter is registered', async () => {
     const core = makeCore();
     await registerNoOp(new AnthropicAdapter(), core);
-    expect(detectFramework(core)).toBe('anthropic');
+    expect(detectFramework(core)).toBeUndefined();
   });
 
   // 3. Returns Tier-1 framework over LLM provider
@@ -121,8 +121,8 @@ describe('_detectFramework()', () => {
     expect(detectFramework(core)).toBeUndefined();
   });
 
-  // 5. agent_framework in registration POST body
-  it('includes agent_framework in /register POST body', async () => {
+  // 5. agent_framework in registration POST body — undefined when Tier-1 only
+  it('agent_framework is undefined in /register POST body when only Tier-1 adapter registered', async () => {
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue({}) });
     vi.stubGlobal('fetch', fetchSpy);
 
@@ -134,6 +134,14 @@ describe('_detectFramework()', () => {
 
     const [, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(options.body as string) as { agent_framework?: string };
-    expect(body.agent_framework).toBe('openai');
+    expect(body.agent_framework).toBeUndefined();
+  });
+
+  // 6. Explicit setAgentFramework() overrides auto-detection
+  it('setAgentFramework() overrides auto-detected framework', async () => {
+    const core = makeCore();
+    await registerNoOp(new OpenAIAdapter({} as never), core);
+    core.setAgentFramework('custom-framework');
+    expect((core as unknown as { _agentFramework?: string })._agentFramework).toBe('custom-framework');
   });
 });

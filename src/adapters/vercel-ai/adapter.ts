@@ -11,30 +11,8 @@ export class VercelAIAdapter extends SyrinSDKBaseFrameworkAdapter {
   readonly name = 'vercel-ai';
 
   override configSchema(): Record<string, SchemaField[]> {
-    return {
-      llm: [
-        { name: 'model',             type: 'str',   default: null },
-        { name: 'temperature',       type: 'float', default: null, constraints: { ge: 0.0, le: 2.0 } },
-        { name: 'max_tokens',        type: 'int',   default: null, constraints: { ge: 1 } },
-        { name: 'top_p',             type: 'float', default: null, constraints: { ge: 0.0, le: 1.0 } },
-        { name: 'frequency_penalty', type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
-        { name: 'presence_penalty',  type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
-        { name: 'seed',              type: 'int',   default: null },
-      ],
-      prompt: [
-        { name: 'system_prompt', type: 'str', default: null, multiline: true },
-      ],
-      vercel: [
-        /** Max agentic tool-call rounds per generateText() call */
-        { name: 'max_steps',             type: 'int',  default: 5,     constraints: { ge: 1, le: 50  } },
-        /** Retry failed calls this many times with exponential back-off */
-        { name: 'max_retries',           type: 'int',  default: 2,     constraints: { ge: 0, le: 10  } },
-        /** Abort after this many milliseconds (0 = no timeout) */
-        { name: 'abort_after_ms',        type: 'int',  default: 0,     constraints: { ge: 0          } },
-        /** Apply structured output via the Vercel AI schema helpers */
-        { name: 'structured_output',     type: 'bool', default: false },
-      ],
-    };
+    // Adapters are telemetry-only — config schema is declared by users via sdk.cfg()
+    return {};
   }
 
   protected async _doInstall(_core: ISyrinCore): Promise<void> {

@@ -19,13 +19,28 @@ import type { ISyrinCore } from '../adapters/types.js';
 import type { SyrinSDKConfig } from '../types.js';
 
 // Top-level package name → adapter module path (relative to this file) + export name
+// Multiple package names can map to the same adapter export — e.g. modern LangChain
+// is split into @langchain/core, @langchain/openai, etc. and none of them is the bare
+// 'langchain' package. Mastra's public package is '@mastra/core', not 'mastra'.
 const WATCHED_LIBRARIES: ReadonlyMap<string, { path: string; exportName: string }> = new Map([
+  // OpenAI
   ['openai', { path: '../adapters/openai/index.js', exportName: 'OpenAIAdapter' }],
+  // Anthropic
   ['@anthropic-ai/sdk', { path: '../adapters/anthropic/index.js', exportName: 'AnthropicAdapter' }],
+  // LangChain — modern split-package installs: none requires the bare 'langchain' package
   ['langchain', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
+  ['@langchain/core', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
+  ['@langchain/openai', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
+  ['@langchain/anthropic', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
+  ['@langchain/community', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
+  // LangGraph
   ['@langchain/langgraph', { path: '../adapters/langgraph/index.js', exportName: 'LangGraphAdapter' }],
-  ['mastra', { path: '../adapters/mastra/index.js', exportName: 'MastraAdapter' }],
+  // Mastra — public package is @mastra/core, not 'mastra'
+  ['@mastra/core', { path: '../adapters/mastra/index.js', exportName: 'MastraAdapter' }],
+  // Vercel AI SDK
   ['ai', { path: '../adapters/vercel-ai/index.js', exportName: 'VercelAIAdapter' }],
+  ['@ai-sdk/openai', { path: '../adapters/vercel-ai/index.js', exportName: 'VercelAIAdapter' }],
+  ['@ai-sdk/anthropic', { path: '../adapters/vercel-ai/index.js', exportName: 'VercelAIAdapter' }],
 ]);
 
 // Tracks which adapter export names we have already auto-installed in this process.

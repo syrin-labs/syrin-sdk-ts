@@ -46,6 +46,22 @@ const ALLOWED_CONFIG_KEYS = new Set([
   'system_prompt', 'disabled_tools', 'enabled_tools',
 ]);
 
+// Map from dot-notation backend field paths to flat session keys.
+// Backend stores overrides as "llm.temperature", "prompt.system_prompt", etc.
+const DOT_KEY_TO_FLAT: Record<string, string> = {
+  'llm.temperature': 'temperature',
+  'llm.max_tokens': 'max_tokens',
+  'llm.model': 'model',
+  'prompt.system_prompt': 'system_prompt',
+  'llm.system_prompt': 'system_prompt',
+  'llm.disabled_tools': 'disabled_tools',
+  'llm.enabled_tools': 'enabled_tools',
+};
+
+function normalizeConfigKey(key: string): string {
+  return DOT_KEY_TO_FLAT[key] ?? key;
+}
+
 function _validateConfigValue(key: string, value: unknown): boolean {
   if (value === null || value === undefined) return true;
   switch (key) {
@@ -113,13 +129,14 @@ export class SessionStore {
   applyConfigUpdate(sessionId: string, updates: Record<string, unknown>): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
-    for (const [key, value] of Object.entries(updates)) {
+    for (const [rawKey, value] of Object.entries(updates)) {
+      const key = normalizeConfigKey(rawKey);
       if (!ALLOWED_CONFIG_KEYS.has(key)) {
-        console.warn(`[Syrin] Ignoring unknown remote config key: "${key}"`);
+        console.warn(`[Syrin] Ignoring unknown remote config key: "${rawKey}"`);
         continue;
       }
       if (!_validateConfigValue(key, value)) {
-        console.warn(`[Syrin] Remote config key "${key}" has unexpected type (${typeof value}) — dropping`);
+        console.warn(`[Syrin] Remote config key "${rawKey}" has unexpected type (${typeof value}) — dropping`);
         continue;
       }
       if (value === null || value === undefined) {
@@ -131,12 +148,42 @@ export class SessionStore {
   }
 
   /**
+   * Get or create a session synchronously (no mutex — use only when the session
+   * is known to have been created, or when a race on creation is acceptable).
+   * Used by configure() so local overrides work immediately after init().
+   */
+  getOrCreateSync(sessionId: string, agentId?: string): SessionState {
+    const existing = this.sessions.get(sessionId);
+    if (existing) {
+      if (agentId && !existing.agentId) existing.agentId = agentId;
+      return existing;
+    }
+    const newSession: SessionState = {
+      sessionId,
+      agentId,
+      activeConfig: {},
+      localConfig: {},
+      cumulativeCostUsd: 0,
+      callCount: 0,
+      callIndex: 0,
+      startedAt: nowIso(),
+      toolValidationResults: {},
+      pendingGovernance: [],
+      injectedMessages: [],
+      lastCheckpointId: undefined,
+      lastConversationHash: undefined,
+    };
+    this.sessions.set(sessionId, newSession);
+    return newSession;
+  }
+
+  /**
    * Merge local config overrides (wins over remote config).
    * Pass null/undefined for a key to clear it.
+   * Creates the session synchronously if it does not exist yet.
    */
   setLocalConfig(sessionId: string, overrides: Record<string, unknown>): void {
-    const session = this.sessions.get(sessionId);
-    if (!session) return;
+    const session = this.getOrCreateSync(sessionId);
     for (const [key, value] of Object.entries(overrides)) {
       if (value === null || value === undefined) {
         delete session.localConfig[key];

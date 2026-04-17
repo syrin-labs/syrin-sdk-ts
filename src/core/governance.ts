@@ -26,12 +26,14 @@
 export class GovernanceStopError extends Error {
   readonly reason: string;
   readonly incidentId: string | undefined;
+  readonly driftScore: number | undefined;
 
-  constructor(reason = 'Stopped by Syrin governance', incidentId?: string) {
+  constructor(reason = 'Stopped by Syrin governance', incidentId?: string, driftScore?: number) {
     super(reason);
     this.name = 'GovernanceStopError';
     this.reason = reason;
     this.incidentId = incidentId;
+    this.driftScore = driftScore;
     // Maintain proper prototype chain
     Object.setPrototypeOf(this, new.target.prototype);
   }
@@ -75,3 +77,22 @@ export class GovernanceResponse {
 export const ALERT_INFO = 'info';
 export const ALERT_WARNING = 'warning';
 export const ALERT_CRITICAL = 'critical';
+
+/**
+ * Per-SDK-instance governance opt-in policy.
+ *
+ * All destructive/disruptive action types default to **disabled**.
+ * Pass via `init({ governance: { allowStop: true, ... } })`.
+ */
+export interface GovernancePolicy {
+  /** If false (default), STOP actions from the backend are logged and skipped. */
+  allowStop?: boolean;
+  /** If false (default), inject_message actions are logged and skipped. */
+  allowInjectMessage?: boolean;
+  /** If true (default), remote config updates from the backend are applied. */
+  allowConfigUpdates?: boolean;
+  /** If true (default), checkpoint actions from the backend are executed. */
+  allowCheckpoint?: boolean;
+  /** If true (default), restore actions from the backend are executed. */
+  allowRestore?: boolean;
+}

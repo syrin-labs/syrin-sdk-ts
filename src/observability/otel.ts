@@ -12,6 +12,7 @@
 import type { Span, Tracer } from '@opentelemetry/api';
 import type { NodeTracerProvider, SpanProcessor } from '@opentelemetry/sdk-trace-node';
 import type { SyrinSDKConfig, CallInfo } from '@/types.js';
+import { SDK_VERSION } from '@/config/config.js';
 
 // ---------------------------------------------------------------------------
 // BaggageSpanProcessor
@@ -202,7 +203,7 @@ export class OTelBridge {
       resource = new otelResources.Resource({
         [(otelResources as unknown as Record<string, string | undefined>)['SEMRESATTRS_SERVICE_NAME'] ?? (otelResources as unknown as Record<string, string | undefined>)['ATTR_SERVICE_NAME'] ?? 'service.name']: serviceName,
         'syrin.sdk.language': 'typescript',
-        'syrin.sdk.version': '0.1.0',
+        'syrin.sdk.version': SDK_VERSION,
       }) as typeof resource;
     }
 

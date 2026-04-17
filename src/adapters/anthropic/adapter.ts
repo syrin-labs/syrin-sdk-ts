@@ -11,18 +11,8 @@ export class AnthropicAdapter implements SyrinSDKAdapter {
   constructor(private readonly _anthropicModule?: AnthropicModule | null) {}
 
   configSchema(): Record<string, SchemaField[]> {
-    return {
-      llm: [
-        { name: 'model',       type: 'str',   default: null },
-        { name: 'temperature', type: 'float', default: null, constraints: { ge: 0.0, le: 2.0 } },
-        { name: 'max_tokens',  type: 'int',   default: null, constraints: { ge: 1 } },
-        { name: 'top_p',       type: 'float', default: null, constraints: { ge: 0.0, le: 1.0 } },
-        { name: 'top_k',       type: 'int',   default: null, constraints: { ge: 0 } },
-      ],
-      prompt: [
-        { name: 'system_prompt', type: 'str', default: null, multiline: true },
-      ],
-    };
+    // Adapters are telemetry-only — config schema is declared by users via sdk.cfg()
+    return {};
   }
 
   async install(core: ISyrinCore): Promise<void> {

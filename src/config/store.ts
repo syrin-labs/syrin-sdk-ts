@@ -22,6 +22,8 @@ export interface FieldSchema {
   le?: number;    // <= constraint
   enum?: unknown[];  // allowed values
   required?: boolean;
+  label?: string;      // human-readable label for dashboard
+  multiline?: boolean; // multiline text input in dashboard
 }
 
 // ---------------------------------------------------------------------------
@@ -65,28 +67,57 @@ const BUILTIN_SECTIONS: Record<string, Record<string, FieldSchema>> = {
     stream:            { name: 'stream',             type: 'boolean', default: null },
   },
   langgraph: {
-    recursion_limit:  { name: 'recursion_limit',  type: 'number',  default: 25, ge: 1 },
-    interrupt_before: { name: 'interrupt_before', type: 'array',   default: null },
-    interrupt_after:  { name: 'interrupt_after',  type: 'array',   default: null },
-    max_concurrency:  { name: 'max_concurrency',  type: 'number',  default: null, ge: 1 },
-    stream_mode:      { name: 'stream_mode',      type: 'string',  default: null },
-    thread_id:        { name: 'thread_id',        type: 'string',  default: null },
+    recursion_limit:   { name: 'recursion_limit',   type: 'number',  default: 25,   ge: 1 },
+    interrupt_before:  { name: 'interrupt_before',  type: 'array',   default: null },
+    interrupt_after:   { name: 'interrupt_after',   type: 'array',   default: null },
+    thread_id:         { name: 'thread_id',         type: 'string',  default: null },
+    max_concurrency:   { name: 'max_concurrency',   type: 'number',  default: null, ge: 1 },
+    stream_mode:       { name: 'stream_mode',       type: 'string',  default: null,
+                         enum: ['values', 'updates', 'debug', 'messages'] },
   },
   mastra: {
-    model:         { name: 'model',         type: 'string',  default: null },
-    temperature:   { name: 'temperature',   type: 'number',  default: null },
-    max_tokens:    { name: 'max_tokens',    type: 'number',  default: null },
-    system_prompt: { name: 'system_prompt', type: 'string',  default: null },
-    max_steps:     { name: 'max_steps',     type: 'number',  default: null, ge: 1 },
-    toolChoice:    { name: 'toolChoice',    type: 'string',  default: null },
+    model:             { name: 'model',             type: 'string',  default: null },
+    temperature:       { name: 'temperature',       type: 'number',  default: null, ge: 0.0, le: 2.0 },
+    max_tokens:        { name: 'max_tokens',        type: 'number',  default: null, ge: 1 },
+    system_prompt:     { name: 'system_prompt',     type: 'string',  default: null },
+    max_steps:         { name: 'max_steps',         type: 'number',  default: null, ge: 1 },
+    max_retries:       { name: 'max_retries',       type: 'number',  default: null, ge: 0 },
+    record_steps:      { name: 'record_steps',      type: 'boolean', default: null },
   },
   vercel_ai: {
-    model:         { name: 'model',         type: 'string',  default: null },
-    temperature:   { name: 'temperature',   type: 'number',  default: null },
-    max_tokens:    { name: 'max_tokens',    type: 'number',  default: null },
-    system_prompt: { name: 'system_prompt', type: 'string',  default: null },
-    max_steps:     { name: 'max_steps',     type: 'number',  default: null, ge: 1 },
-    tool_choice:   { name: 'tool_choice',   type: 'string',  default: null },
+    model:             { name: 'model',             type: 'string',  default: null },
+    temperature:       { name: 'temperature',       type: 'number',  default: null, ge: 0.0, le: 2.0 },
+    max_tokens:        { name: 'max_tokens',        type: 'number',  default: null, ge: 1 },
+    max_steps:         { name: 'max_steps',         type: 'number',  default: null, ge: 1 },
+    abort_after_ms:    { name: 'abort_after_ms',    type: 'number',  default: null, ge: 0 },
+    structured_output: { name: 'structured_output', type: 'boolean', default: null },
+    tool_choice:       { name: 'tool_choice',       type: 'string',  default: null,
+                         enum: ['auto', 'none', 'required'] },
+  },
+  crewai: {
+    max_iter:              { name: 'max_iter',              type: 'number',  default: 15,    ge: 1 },
+    max_rpm:               { name: 'max_rpm',               type: 'number',  default: null,  ge: 1 },
+    verbose:               { name: 'verbose',               type: 'boolean', default: false },
+    cache:                 { name: 'cache',                 type: 'boolean', default: true },
+    memory:                { name: 'memory',                type: 'boolean', default: false },
+    max_execution_time:    { name: 'max_execution_time',    type: 'number',  default: null,  ge: 1 },
+  },
+  agno: {
+    temperature:           { name: 'temperature',           type: 'number',  default: null, ge: 0.0, le: 2.0 },
+    max_tokens:            { name: 'max_tokens',            type: 'number',  default: null, ge: 1 },
+    instructions:          { name: 'instructions',          type: 'string',  default: null },
+    tool_call_limit:       { name: 'tool_call_limit',       type: 'number',  default: null, ge: 1 },
+    markdown:              { name: 'markdown',              type: 'boolean', default: false },
+    show_tool_calls:       { name: 'show_tool_calls',       type: 'boolean', default: false },
+  },
+  ag2: {
+    temperature:                   { name: 'temperature',                   type: 'number',  default: null, ge: 0.0, le: 2.0 },
+    max_tokens:                    { name: 'max_tokens',                    type: 'number',  default: null, ge: 1 },
+    system_message:                { name: 'system_message',                type: 'string',  default: null },
+    max_consecutive_auto_reply:    { name: 'max_consecutive_auto_reply',    type: 'number',  default: null, ge: 0 },
+    human_input_mode:              { name: 'human_input_mode',              type: 'string',  default: 'TERMINATE',
+                                     enum: ['ALWAYS', 'NEVER', 'TERMINATE'] },
+    code_execution_config:         { name: 'code_execution_config',         type: 'boolean', default: false },
   },
 };
 
@@ -94,8 +125,8 @@ const BUILTIN_SECTIONS: Record<string, Record<string, FieldSchema>> = {
 // Constants
 // ---------------------------------------------------------------------------
 
-const HISTORY_LIMIT = 50;
-const AUDIT_LIMIT = 1000;
+const DEFAULT_HISTORY_LIMIT = 50;
+const DEFAULT_AUDIT_LIMIT = 1000;
 
 // ---------------------------------------------------------------------------
 // ConfigStore
@@ -115,11 +146,18 @@ export class ConfigStore {
   // Feature 3 — Version History
   private _history: ConfigVersion[] = [];
   private _nextVersionId = 1;
+  private _historyLimit: number;
 
   // Feature 4 — Audit Log
   private _auditLog: AuditEntry[] = [];
+  private _auditLimit: number;
 
-  constructor() {
+  // Source tracking — records which source last set each namespace.field
+  private _fieldSources: Record<string, Record<string, string>> = {};
+
+  constructor(historyMaxlen?: number, auditMaxlen?: number) {
+    this._historyLimit = historyMaxlen ?? DEFAULT_HISTORY_LIMIT;
+    this._auditLimit = auditMaxlen ?? DEFAULT_AUDIT_LIMIT;
     // Deep-copy BUILTIN_SECTIONS into _sections
     this._sections = {};
     this._values = {};
@@ -195,6 +233,14 @@ export class ConfigStore {
 
   isAnchored(key: string): boolean {
     return this._anchors.has(key);
+  }
+
+  /**
+   * Get the source that last set namespace.field.
+   * Returns 'default' if no source has been recorded.
+   */
+  getSource(namespace: string, field: string): string {
+    return this._fieldSources[namespace]?.[field] ?? 'default';
   }
 
   // ---------------------------------------------------------------------------
@@ -339,6 +385,8 @@ export class ConfigStore {
         if (!(namespace in this._values)) this._values[namespace] = {};
         const oldValue = this._values[namespace][field];
         this._values[namespace][field] = value;
+        if (!this._fieldSources[namespace]) this._fieldSources[namespace] = {};
+        this._fieldSources[namespace][field] = source;
         changedKeys.push(path);
         auditEntries.push({
           timestamp: nowIso(),
@@ -356,6 +404,8 @@ export class ConfigStore {
         const oldValue = this._values[namespace][field];
         const newValue = schema.default;
         this._values[namespace][field] = newValue;
+        if (!this._fieldSources[namespace]) this._fieldSources[namespace] = {};
+        this._fieldSources[namespace][field] = source;
         changedKeys.push(path);
         auditEntries.push({
           timestamp: nowIso(),
@@ -376,6 +426,8 @@ export class ConfigStore {
 
       const oldValue = this._values[namespace][field];
       this._values[namespace][field] = value;
+      if (!this._fieldSources[namespace]) this._fieldSources[namespace] = {};
+      this._fieldSources[namespace][field] = source;
       changedKeys.push(path);
       auditEntries.push({
         timestamp: nowIso(),
@@ -397,18 +449,18 @@ export class ConfigStore {
         changedKeys: Object.freeze([...changedKeys]),
       };
       this._history.push(version);
-      // Ring buffer: keep only the last HISTORY_LIMIT entries
-      if (this._history.length > HISTORY_LIMIT) {
-        this._history.splice(0, this._history.length - HISTORY_LIMIT);
+      // Ring buffer: keep only the last _historyLimit entries
+      if (this._history.length > this._historyLimit) {
+        this._history.splice(0, this._history.length - this._historyLimit);
       }
     }
 
     // Feature 4 — append audit entries
     if (auditEntries.length > 0) {
       this._auditLog.push(...auditEntries);
-      // Ring buffer: keep only the last AUDIT_LIMIT entries
-      if (this._auditLog.length > AUDIT_LIMIT) {
-        this._auditLog.splice(0, this._auditLog.length - AUDIT_LIMIT);
+      // Ring buffer: keep only the last _auditLimit entries
+      if (this._auditLog.length > this._auditLimit) {
+        this._auditLog.splice(0, this._auditLog.length - this._auditLimit);
       }
     }
 

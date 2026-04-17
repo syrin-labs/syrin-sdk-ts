@@ -17,6 +17,7 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import type { RunContext, SyrinEvent, SyrinEventBase } from '@/types.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
+import { TraceSpan } from './trace-span.js';
 
 export type { RunContext };
 
@@ -102,7 +103,7 @@ function _buildLifecycleEvent(
  */
 export async function withAgent<T>(
   agentId: string,
-  fn: (ctx: RunContext) => Promise<T>,
+  fn: (span: TraceSpan) => Promise<T>,
   options?: { runId?: string; workflowId?: string; swarmId?: string; traceId?: string }
 ): Promise<T> {
   const parent = agentStorage.getStore();
@@ -119,9 +120,15 @@ export async function withAgent<T>(
   const sessionId = ctx.runId; // use runId as proxy session key for lifecycle events
   _emitLifecycle(_buildLifecycleEvent('AGENT_RUN_STARTED', ctx, 0), sessionId);
 
+  const span = new TraceSpan(
+    ctx,
+    (event, sid) => { _emitLifecycle(event as unknown as SyrinEvent, sid); },
+    _getSessionId,
+  );
+
   const t0 = performance.now();
   try {
-    return await agentStorage.run(ctx, () => fn(ctx));
+    return await agentStorage.run(ctx, () => fn(span));
   } finally {
     const durationMs = Math.round(performance.now() - t0);
     _emitLifecycle(_buildLifecycleEvent('AGENT_RUN_ENDED', ctx, durationMs), sessionId);

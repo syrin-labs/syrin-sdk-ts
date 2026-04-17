@@ -10,6 +10,7 @@ import { setupServer } from 'msw/node';
 import type { SyrinSDKConfig, SyrinEvent, IngestPayload } from '@/types';
 import { Emitter } from '@/observability/emitter';
 import { SessionStore } from '@/core/session';
+import { ConfigStore } from '@/config/store';
 import { generateId, nowIso } from '@/utils/helpers';
 
 // Mock server
@@ -255,5 +256,168 @@ describe('Emitter: batching and flushing', () => {
     await emitter.flush();
     expect(fetchSpy).not.toHaveBeenCalled();
     fetchSpy.mockRestore();
+  });
+
+  // -------------------------------------------------------------------------
+  // Multi-session batching
+  // -------------------------------------------------------------------------
+
+  it('sends separate POST per session when events from two sessions are queued', async () => {
+    const capturedPayloads: { session_id: string; event_ids: string[] }[] = [];
+
+    server.use(
+      http.post('http://localhost:4399/ingest', async ({ request }) => {
+        const body = (await request.json()) as { session_id: string; events: { event_id: string }[] };
+        capturedPayloads.push({
+          session_id: body.session_id,
+          event_ids: body.events.map((e) => e.event_id),
+        });
+        return HttpResponse.json({ ok: true });
+      })
+    );
+
+    const sessA = 'sess-multi-a';
+    const sessB = 'sess-multi-b';
+    await sessionStore.getOrCreate(sessA);
+    await sessionStore.getOrCreate(sessB);
+
+    const evtA = makeEvent({ event_id: 'evt_a1' });
+    const evtB = makeEvent({ event_id: 'evt_b1' });
+
+    emitter.emit(evtA, sessA);
+    emitter.emit(evtB, sessB);
+
+    await emitter.flush();
+
+    // Must be two separate POSTs — one per session
+    expect(capturedPayloads).toHaveLength(2);
+
+    const postA = capturedPayloads.find((p) => p.session_id === sessA);
+    const postB = capturedPayloads.find((p) => p.session_id === sessB);
+
+    expect(postA).toBeDefined();
+    expect(postA!.event_ids).toContain('evt_a1');
+    expect(postA!.event_ids).not.toContain('evt_b1');
+
+    expect(postB).toBeDefined();
+    expect(postB!.event_ids).toContain('evt_b1');
+    expect(postB!.event_ids).not.toContain('evt_a1');
+  });
+
+  it('events from the same session are sent in a single POST', async () => {
+    const capturedPayloads: unknown[] = [];
+
+    server.use(
+      http.post('http://localhost:4399/ingest', async ({ request }) => {
+        capturedPayloads.push(await request.json());
+        return HttpResponse.json({ ok: true });
+      })
+    );
+
+    const sessC = 'sess-single';
+    await sessionStore.getOrCreate(sessC);
+
+    emitter.emit(makeEvent({ event_id: 'evt_c1' }), sessC);
+    emitter.emit(makeEvent({ event_id: 'evt_c2' }), sessC);
+
+    await emitter.flush();
+
+    // Only one POST for one session
+    expect(capturedPayloads).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Bug #2 — Emitter must propagate config_updates to ConfigStore
+// ---------------------------------------------------------------------------
+
+describe('Emitter — config_updates propagation to ConfigStore', () => {
+  let config: SyrinSDKConfig;
+  let sessionStore: SessionStore;
+  let configStore: ConfigStore;
+  let emitter: Emitter;
+
+  beforeEach(() => {
+    config = makeConfig();
+    sessionStore = new SessionStore();
+    configStore  = new ConfigStore();
+    // Pass configStore as third argument — the NEW wired-up constructor signature
+    emitter = new Emitter(config, sessionStore, configStore);
+  });
+
+  afterEach(async () => {
+    await emitter.stop();
+    vi.restoreAllMocks();
+  });
+
+  it('dot-notation config_updates from ingest response update ConfigStore sections', async () => {
+    server.use(
+      http.post('http://localhost:4399/ingest', () =>
+        HttpResponse.json({
+          ok: true,
+          config_updates: { 'llm.temperature': 0.42, 'llm.model': 'gpt-4o-mini' },
+        }),
+      ),
+    );
+
+    const sessionId = 'cs-update-session';
+    await sessionStore.getOrCreate(sessionId);
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    const llm = configStore.getSection('llm');
+    expect(llm['temperature']).toBe(0.42);
+    expect(llm['model']).toBe('gpt-4o-mini');
+  });
+
+  it('flat config_updates also update ConfigStore via DOT_KEY mapping', async () => {
+    // The backend may return flat keys like "temperature" (old behaviour) — these should
+    // still reach SessionStore but ConfigStore only applies dot-notation keys.
+    server.use(
+      http.post('http://localhost:4399/ingest', () =>
+        HttpResponse.json({
+          ok: true,
+          config_updates: { 'llm.temperature': 0.99 },
+        }),
+      ),
+    );
+
+    const sessionId = 'cs-flat-session';
+    await sessionStore.getOrCreate(sessionId);
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    expect(configStore.getSection('llm')['temperature']).toBe(0.99);
+  });
+
+  it('ConfigStore is unchanged when ingest response has no config_updates', async () => {
+    server.use(
+      http.post('http://localhost:4399/ingest', () =>
+        HttpResponse.json({ ok: true }),
+      ),
+    );
+
+    const sessionId = 'cs-no-update-session';
+    await sessionStore.getOrCreate(sessionId);
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    // Defaults should still be null
+    expect(configStore.getSection('llm')['temperature']).toBeNull();
+  });
+
+  it('ConfigStore is not updated when configStore is not injected (backward compat)', async () => {
+    // Emitter without configStore — should still work as before
+    const plainEmitter = new Emitter(config, sessionStore);
+    server.use(
+      http.post('http://localhost:4399/ingest', () =>
+        HttpResponse.json({ ok: true, config_updates: { 'llm.temperature': 0.5 } }),
+      ),
+    );
+    const sessionId = 'cs-no-store-session';
+    await sessionStore.getOrCreate(sessionId);
+    plainEmitter.emit(makeEvent(), sessionId);
+    await expect(plainEmitter.flush()).resolves.toBeUndefined();
+    await plainEmitter.stop();
   });
 });

@@ -121,16 +121,9 @@ class DuplicateLlmAdapter extends SyrinSDKBaseFrameworkAdapter {
   protected _doInstall(_core: ISyrinCore): void {}
   protected _doUninstall(): void {}
 
+  // Adapters are telemetry-only — returns {} per v2 design
   override configSchema(): Record<string, SchemaField[]> {
-    return {
-      llm: [
-        // Same field names as OpenAI/Anthropic but different defaults
-        { name: 'model', type: 'str', default: 'claude-3-opus' },
-        { name: 'temperature', type: 'float', default: 0.5 },
-        // Extra field not in OpenAI schema
-        { name: 'top_k', type: 'int', default: null },
-      ],
-    };
+    return {};
   }
 }
 
@@ -139,45 +132,66 @@ class DuplicateLlmAdapter extends SyrinSDKBaseFrameworkAdapter {
 // ---------------------------------------------------------------------------
 
 describe('SyrinSDKCore.buildSchema()', () => {
-  it('returns empty sections when no adapters are registered', () => {
+  // v2 schema: { version: 2, agent_id, global: {...}, agents: {...} }
+  it('returns empty global when no cfg() calls and no adapters', () => {
     const { core } = makeCore();
     const schema = core.buildSchema();
 
-    expect(schema).toMatchObject({ agent_id: 'test-agent' });
-    const sections = (schema as { sections: Record<string, unknown> }).sections;
-    expect(Object.keys(sections)).toHaveLength(0);
+    expect(schema).toMatchObject({ version: 2, agent_id: 'test-agent' });
+    const global = (schema as { global: Record<string, unknown> }).global;
+    // BUILTIN_SECTIONS are not included in v2 (they are flat, not compound namespaces)
+    expect(global).toBeDefined();
   });
 
   // -------------------------------------------------------------------------
-  // 2. buildSchema with OpenAI adapter returns llm section with 3 fields
+  // 2. buildSchema with OpenAI adapter: adapters return {} so global is empty
+  //    unless cfg() calls populate it
   // -------------------------------------------------------------------------
 
-  it('returns llm section with 3 fields after registering OpenAI adapter', async () => {
+  it('global is empty after registering OpenAI adapter (adapters are telemetry-only)', async () => {
     const { core } = makeCore();
 
-    // Manually register adapter without actually patching (use null module trick)
     const openaiAdapter = new OpenAIAdapter({} as never);
-    // Override install to be a no-op for this unit test
     openaiAdapter.install = vi.fn().mockResolvedValue(undefined);
     openaiAdapter.isInstalled = vi.fn().mockReturnValue(true);
     await core.registerAdapter(openaiAdapter);
 
     const schema = core.buildSchema();
-    const sections = (schema as { sections: Record<string, { fields: SchemaField[] }> }).sections;
-
-    expect(sections['llm']).toBeDefined();
-
-    const fieldNames = sections['llm'].fields.map((f) => f.name);
-    expect(fieldNames).toContain('model');
-    expect(fieldNames).toContain('temperature');
-    expect(fieldNames).toContain('max_tokens');
+    const global = (schema as { global: Record<string, { fields: SchemaField[] }> }).global;
+    // Adapters no longer contribute schema fields — cfg() calls do
+    expect(global['llm']).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------
-  // 3. buildSchema with LangGraph adapter returns llm + langgraph sections
+  // 3. buildSchema with cfg() calls populates global sections
   // -------------------------------------------------------------------------
 
-  it('returns llm + langgraph sections after registering LangGraph adapter', async () => {
+  it('global is populated when cfg() registers compound namespaces in ConfigStore', () => {
+    const { core, configStore } = makeCore();
+
+    // Simulate what sdk.cfg('llm.temperature', 0.7) would do
+    const sections = (configStore as unknown as { _sections: Record<string, unknown>; _values: Record<string, unknown> })._sections;
+    const values = (configStore as unknown as { _sections: Record<string, unknown>; _values: Record<string, unknown> })._values;
+    sections['global.llm'] = {
+      temperature: { name: 'temperature', type: 'number', default: 0.7, ge: 0, le: 2 },
+      model: { name: 'model', type: 'string', default: 'gpt-4o' },
+    };
+    values['global.llm'] = { temperature: 0.7, model: 'gpt-4o' };
+
+    const schema = core.buildSchema();
+    const global = (schema as { global: Record<string, { fields: Array<Record<string, unknown>> }> }).global;
+
+    expect(global['llm']).toBeDefined();
+    const fieldNames = global['llm'].fields.map((f) => f.name);
+    expect(fieldNames).toContain('temperature');
+    expect(fieldNames).toContain('model');
+  });
+
+  // -------------------------------------------------------------------------
+  // 4. LangGraph adapter: no longer contributes schema fields via configSchema()
+  // -------------------------------------------------------------------------
+
+  it('LangGraph adapter registers as telemetry-only (no schema fields from adapter)', async () => {
     const { core } = makeCore();
 
     const lgAdapter = new LangGraphAdapter();
@@ -186,48 +200,10 @@ describe('SyrinSDKCore.buildSchema()', () => {
     await core.registerAdapter(lgAdapter);
 
     const schema = core.buildSchema();
-    const sections = (schema as { sections: Record<string, { fields: SchemaField[] }> }).sections;
-
-    expect(sections['llm']).toBeDefined();
-    expect(sections['langgraph']).toBeDefined();
-
-    const lgFieldNames = sections['langgraph'].fields.map((f) => f.name);
-    expect(lgFieldNames).toContain('recursion_limit');
-    expect(lgFieldNames).toContain('interrupt_before');
-    expect(lgFieldNames).toContain('interrupt_after');
-    expect(lgFieldNames).toContain('thread_id');
-  });
-
-  // -------------------------------------------------------------------------
-  // 4. buildSchema deduplicates fields when two adapters declare same section
-  // -------------------------------------------------------------------------
-
-  it('deduplicates fields — first adapter wins', async () => {
-    const { core } = makeCore();
-
-    // Register OpenAI first (model default = null)
-    const openaiAdapter = new OpenAIAdapter({} as never);
-    openaiAdapter.install = vi.fn().mockResolvedValue(undefined);
-    openaiAdapter.isInstalled = vi.fn().mockReturnValue(true);
-    await core.registerAdapter(openaiAdapter);
-
-    // Register duplicate adapter second (model default = 'claude-3-opus')
-    const dupAdapter = new DuplicateLlmAdapter();
-    dupAdapter.install = vi.fn().mockResolvedValue(undefined);
-    dupAdapter.isInstalled = vi.fn().mockReturnValue(true);
-    await core.registerAdapter(dupAdapter);
-
-    const schema = core.buildSchema();
-    const sections = (schema as { sections: Record<string, { fields: SchemaField[] }> }).sections;
-    const llmFields = sections['llm'].fields;
-
-    // 'model' from OpenAI (default=null) should win; 'top_k' from duplicate should be added
-    const modelField = llmFields.find((f) => f.name === 'model');
-    expect(modelField?.default).toBeNull(); // OpenAI's default wins
-
-    // 'top_k' from duplicate should be present since it's not in OpenAI schema
-    const topKField = llmFields.find((f) => f.name === 'top_k');
-    expect(topKField).toBeDefined();
+    expect(schema).toMatchObject({ version: 2 });
+    const global = (schema as { global: Record<string, unknown> }).global;
+    // No adapter-contributed fields in v2
+    expect(global['langgraph']).toBeUndefined();
   });
 });
 

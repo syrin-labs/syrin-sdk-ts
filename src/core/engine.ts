@@ -21,7 +21,7 @@ import { sessionStorage } from '@/core/session.js';
 import type { Emitter } from '@/observability/emitter.js';
 import type { OTelBridge } from '@/observability/otel.js';
 import type { CheckpointClient } from '@/core/checkpoint.js';
-import type { ConfigStore } from '@/config/store.js';
+import type { ConfigStore, FieldSchema as StoreFieldSchema } from '@/config/store.js';
 import type { TunableRegistry } from '@/tunable/tunable.js';
 import type {
   SyrinSDKAdapter,
@@ -50,10 +50,21 @@ import {
   stableHash,
 } from '@/utils/helpers.js';
 import { detectProvider } from '@/utils/provider.js';
-import { inferFieldType } from '@/utils/code-scanner.js';
 
 // Re-export for convenience
 export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types.js';
+
+/** Map ConfigStore TS type names → schema type strings for v2 schema output */
+function _tsTypeToSchemaType(type: string): string {
+  const map: Record<string, string> = {
+    number: 'float',
+    string: 'str',
+    boolean: 'bool',
+    array: 'str',
+    object: 'str',
+  };
+  return map[type] ?? 'str';
+}
 
 export class SyrinSDKCore implements ISyrinCore {
   private readonly _adapters = new Map<string, SyrinSDKAdapter>();
@@ -154,15 +165,26 @@ export class SyrinSDKCore implements ISyrinCore {
     if (
       !adapter ||
       typeof adapter !== 'object' ||
-      typeof (adapter as SyrinSDKAdapter).install !== 'function' ||
-      typeof (adapter as SyrinSDKAdapter).uninstall !== 'function' ||
-      typeof (adapter as SyrinSDKAdapter).isInstalled !== 'function' ||
-      typeof (adapter as SyrinSDKAdapter).name !== 'string' ||
-      typeof (adapter as SyrinSDKAdapter).configSchema !== 'function'
+      typeof (adapter).install !== 'function' ||
+      typeof (adapter).uninstall !== 'function' ||
+      typeof (adapter).isInstalled !== 'function' ||
+      typeof (adapter).name !== 'string' ||
+      typeof (adapter).configSchema !== 'function'
     ) {
       throw new Error(
         `[Syrin] registerAdapter() requires an object implementing SyrinSDKAdapter (with install, uninstall, isInstalled, name, configSchema). Got: ${typeof adapter}`
       );
+    }
+    // Skip install if this adapter instance reports itself as already installed.
+    // This prevents double-patching when auto-detection and explicit registration
+    // both run (e.g. OpenAI detected at init() then registerAdapter(new OpenAIAdapter()) called).
+    if (adapter.isInstalled()) {
+      // Re-register in the map so the reference is kept current, but don't re-install.
+      this._adapters.set(adapter.name, adapter);
+      if (this.config.debug) {
+        console.log(`[Syrin] Adapter "${adapter.name}" is already installed — skipping re-install.`);
+      }
+      return;
     }
     this._adapters.set(adapter.name, adapter);
     await adapter.install(this);
@@ -187,118 +209,109 @@ export class SyrinSDKCore implements ISyrinCore {
   // ── Schema registration ──────────────────────────────────────────────────
 
   /**
-   * Merge configSchema() from all installed adapters that expose it.
-   * First-writer wins: if two adapters declare the same section+field, the first one wins.
+   * Build a v2 schema from ConfigStore compound namespaces (global.section, agents.id.section)
+   * populated by cfg() calls, plus TunableRegistry sections.
+   *
+   * Returns: { version: 2, agent_id, global: { sectionName: { fields: [...] } }, agents: { ... } }
    */
   buildSchema(): Record<string, unknown> {
-    const sections: Record<string, Record<string, SchemaField>> = {};
+    const globalSections: Record<string, { fields: Record<string, unknown>[] }> = {};
+    const agentsCfgSections: Record<string, Record<string, { fields: Record<string, unknown>[] }>> = {};
 
-    // 1. Merge adapter schemas (first-writer wins per field)
-    for (const adapter of this._adapters.values()) {
-      const adapterSchema = adapter.configSchema();
-      for (const [sectionName, fields] of Object.entries(adapterSchema)) {
-        if (!sections[sectionName]) sections[sectionName] = {};
-        for (const field of fields) {
-          if (!sections[sectionName][field.name]) {
-            sections[sectionName][field.name] = field;
+    // 1. Read from ConfigStore compound namespaces (global.section, agents.id.section)
+    //    This is populated by cfg() calls — primary schema source
+    const configStore = this._configStore;
+    if (configStore) {
+      const schemas = (configStore as unknown as { _sections: Record<string, Record<string, StoreFieldSchema>> })._sections;
+      for (const [namespace, fieldMap] of Object.entries(schemas)) {
+        if (namespace.startsWith('global.')) {
+          const section = namespace.slice('global.'.length);
+          if (!globalSections[section]) {
+            globalSections[section] = { fields: [] };
+          }
+          for (const [fieldName, fs] of Object.entries(fieldMap)) {
+            const fieldOut: Record<string, unknown> = {
+              name: fieldName,
+              path: `global.${section}.${fieldName}`,
+              type: _tsTypeToSchemaType(fs.type),
+              default: fs.default ?? null,
+            };
+            if (fs.label) fieldOut['label'] = fs.label;
+            if (fs.description) fieldOut['description'] = fs.description;
+            if (fs.multiline) fieldOut['multiline'] = fs.multiline;
+            const constraints: Record<string, unknown> = {};
+            if (fs.ge !== undefined) constraints['ge'] = fs.ge;
+            if (fs.le !== undefined) constraints['le'] = fs.le;
+            if (fs.enum !== undefined) constraints['enum'] = fs.enum;
+            if (Object.keys(constraints).length > 0) fieldOut['constraints'] = constraints;
+            globalSections[section].fields.push(fieldOut);
+          }
+        } else if (namespace.startsWith('agents.')) {
+          const rest = namespace.slice('agents.'.length);
+          const dot = rest.lastIndexOf('.');
+          if (dot !== -1) {
+            const agentId = rest.slice(0, dot);
+            const section = rest.slice(dot + 1);
+            if (!agentsCfgSections[agentId]) agentsCfgSections[agentId] = {};
+            const sectionFields: Record<string, unknown>[] = [];
+            for (const [fieldName, fs] of Object.entries(fieldMap)) {
+              const fieldOut: Record<string, unknown> = {
+                name: fieldName,
+                path: `agents.${agentId}.${section}.${fieldName}`,
+                type: _tsTypeToSchemaType(fs.type),
+                default: fs.default ?? null,
+              };
+              if (fs.label) fieldOut['label'] = fs.label;
+              if (fs.description) fieldOut['description'] = fs.description;
+              if (fs.multiline) fieldOut['multiline'] = fs.multiline;
+              const constraints: Record<string, unknown> = {};
+              if (fs.ge !== undefined) constraints['ge'] = fs.ge;
+              if (fs.le !== undefined) constraints['le'] = fs.le;
+              if (fs.enum !== undefined) constraints['enum'] = fs.enum;
+              if (Object.keys(constraints).length > 0) fieldOut['constraints'] = constraints;
+              sectionFields.push(fieldOut);
+            }
+            agentsCfgSections[agentId][section] = { fields: sectionFields };
           }
         }
       }
     }
 
-    // 2. Merge auto-detected sections from first LLM call (e.g. tools section)
-    for (const [sectionName, fields] of Object.entries(this._autoDetectedSections)) {
-      if (!sections[sectionName]) sections[sectionName] = {};
-      for (const field of fields) {
-        if (!sections[sectionName][field.name]) {
-          sections[sectionName][field.name] = field;
-        }
-      }
-    }
-
-    // 3. Merge TunableRegistry sections (registered via tune()) — converts FieldSchema → SchemaField
+    // 2. Add TunableRegistry sections to global
     const tunableSchemas = this._tunableRegistry?.exportSchemas() ?? {};
-    const tunableTypeMap: Record<string, SchemaField['type']> = {
+    const tunableTypeMap: Record<string, string> = {
       boolean: 'bool', number: 'float', string: 'str', array: 'str', object: 'str',
     };
     for (const [ns, fieldMap] of Object.entries(tunableSchemas)) {
-      if (!sections[ns]) sections[ns] = {};
+      if (!globalSections[ns]) globalSections[ns] = { fields: [] };
       for (const [fieldName, fs] of Object.entries(fieldMap)) {
-        if (!sections[ns][fieldName]) {
-          const constraints: NonNullable<SchemaField['constraints']> = {};
-          if (fs.ge !== undefined) constraints.ge = fs.ge;
-          if (fs.le !== undefined) constraints.le = fs.le;
-          if (fs.enum !== undefined) constraints.enum = fs.enum;
-          sections[ns][fieldName] = {
-            name: fieldName,
-            type: tunableTypeMap[fs.type] ?? 'str',
-            default: fs.default ?? null,
-            ...(Object.keys(constraints).length > 0 ? { constraints } : {}),
-          };
-        }
-      }
-    }
-
-    // 4. Apply code-scanned defaults (from static analysis of user source at init() time).
-    //    Creates new sections/fields when the key is not in any adapter schema.
-    //    Lower priority: user's schemaDefaults override these.
-    const userDefaults = this.config.schemaDefaults ?? {};
-    for (const { path: fieldPath, default: defaultVal } of this._codeScannedDefaults) {
-      if (fieldPath in userDefaults) continue; // explicit user wins
-      const dot = fieldPath.indexOf('.');
-      if (dot === -1) continue;
-      const sec = fieldPath.slice(0, dot);
-      const fieldName = fieldPath.slice(dot + 1);
-
-      // Create section if missing (e.g. 'agent', 'tools' not in any adapter schema)
-      if (!sections[sec]) sections[sec] = {};
-
-      // Create field if missing — infer type from the default value
-      if (!sections[sec][fieldName]) {
-        sections[sec][fieldName] = {
+        if (globalSections[ns].fields.some((f) => (f)['name'] === fieldName)) continue;
+        const constraints: Record<string, unknown> = {};
+        if (fs.ge !== undefined) constraints['ge'] = fs.ge;
+        if (fs.le !== undefined) constraints['le'] = fs.le;
+        if (fs.enum !== undefined) constraints['enum'] = fs.enum;
+        const fieldOut: Record<string, unknown> = {
           name: fieldName,
-          type: inferFieldType(defaultVal),
-          default: null,
+          path: `global.${ns}.${fieldName}`,
+          type: tunableTypeMap[fs.type] ?? 'str',
+          default: fs.default ?? null,
         };
-      }
-
-      sections[sec][fieldName] = { ...sections[sec][fieldName], default: defaultVal };
-    }
-
-    // 5. Apply first-call auto-detected LLM defaults (lowest auto-priority)
-    //    Skipped when code-scan already set a value for the same key.
-    const codeScannedPaths = new Set(this._codeScannedDefaults.map(d => d.path));
-    for (const [path, value] of Object.entries(this._autoDetectedDefaults)) {
-      if (path in userDefaults) continue; // explicit user wins
-      if (codeScannedPaths.has(path)) continue; // code-scan wins
-      const dot = path.indexOf('.');
-      if (dot === -1) continue;
-      const sec = path.slice(0, dot);
-      const fieldName = path.slice(dot + 1);
-      if (sections[sec]?.[fieldName]) {
-        sections[sec][fieldName] = { ...sections[sec][fieldName], default: value };
+        if (Object.keys(constraints).length > 0) fieldOut['constraints'] = constraints;
+        globalSections[ns].fields.push(fieldOut);
       }
     }
 
-    // 5. Apply explicit schemaDefaults (highest priority)
-    for (const [path, value] of Object.entries(userDefaults)) {
-      const dot = path.indexOf('.');
-      if (dot === -1) continue;
-      const sec = path.slice(0, dot);
-      const fieldName = path.slice(dot + 1);
-      if (sections[sec]?.[fieldName]) {
-        sections[sec][fieldName] = { ...sections[sec][fieldName], default: value };
-      }
+    // 3. Build agents output — merge cfg() sections
+    const agentsOut: Record<string, unknown> = {};
+    for (const [agentId, sections] of Object.entries(agentsCfgSections)) {
+      agentsOut[agentId] = { sections };
     }
 
     return {
+      version: 2,
       agent_id: this.config.agentId,
-      sections: Object.fromEntries(
-        Object.entries(sections).map(([sec, fields]) => [
-          sec,
-          { fields: Object.values(fields) },
-        ])
-      ),
+      global: globalSections,
+      agents: agentsOut,
     };
   }
 
@@ -307,18 +320,26 @@ export class SyrinSDKCore implements ISyrinCore {
    * Applies any configDelta returned by the backend into the ConfigStore.
    * Non-fatal — network errors are silently swallowed.
    */
+  /** Explicit framework override — set by init() options.agentFramework */
+  private _agentFramework?: string;
+
+  setAgentFramework(framework: string): void {
+    this._agentFramework = framework;
+  }
+
   async register(): Promise<void> {
     const agentId = this.config.agentId;
     if (!agentId) return;
 
     const schema = this.buildSchema();
-    const payload = {
+    const detectedFramework = this._agentFramework ?? this._detectFramework();
+    const payload: Record<string, unknown> = {
       agent_id: agentId,
-      agent_framework: this._detectFramework(),
       sdk: { language: 'typescript', version: SDK_VERSION },
       schema,
-      server_url: this.config.serverUrl ?? null,
     };
+    if (detectedFramework != null) payload['agent_framework'] = detectedFramework;
+    if (this.config.serverUrl != null) payload['server_url'] = this.config.serverUrl;
 
     const url = `${this.config.backendUrl}/agents/${agentId}/register`;
 
@@ -353,16 +374,12 @@ export class SyrinSDKCore implements ISyrinCore {
   }
 
   private _detectFramework(): string | undefined {
-    // Tier 1: framework/orchestration adapters (preferred)
+    // Return the first Tier-2 (orchestration) adapter name, if any.
+    // LLM provider adapters (openai, anthropic) are NOT a "framework" —
+    // report undefined when only Tier-1 adapters are present.
     const llmProviders = new Set(['openai', 'anthropic']);
     for (const adapter of this._adapters.values()) {
       if (!llmProviders.has(adapter.name)) {
-        return adapter.name;
-      }
-    }
-    // Tier 2: fall back to LLM provider name (parity with Python SDK)
-    for (const adapter of this._adapters.values()) {
-      if (llmProviders.has(adapter.name)) {
         return adapter.name;
       }
     }
@@ -405,7 +422,7 @@ export class SyrinSDKCore implements ISyrinCore {
       const sysMsg = msgs.find((m) => m?.['role'] === 'system');
       if (sysMsg && typeof sysMsg['content'] === 'string' && sysMsg['content'].trim()) {
         autoDefaults['prompt.system_prompt'] = sysMsg['content'];
-      } else if (typeof raw['system'] === 'string' && (raw['system'] as string).trim()) {
+      } else if (typeof raw['system'] === 'string' && (raw['system']).trim()) {
         autoDefaults['prompt.system_prompt'] = raw['system'];
       }
     }
@@ -472,13 +489,36 @@ export class SyrinSDKCore implements ISyrinCore {
       governanceApplied = true;
     }
 
+    const policy = this.config.governance;
+
     for (const action of pendingActions) {
+      const reason = (action['reason'] as string) ?? '?';
+      const incident = (action['incident_id'] as string) ?? '?';
+
       if (action.type === 'stop') {
+        console.warn(`[Syrin] Governance STOP received — reason=${reason} incident=${incident}`);
+        if (policy && !(policy.allowStop ?? false)) {
+          console.warn('[Syrin] STOP skipped: allowStop=false in governance policy');
+          continue;
+        }
         throw new GovernanceStopError(
           (action['reason'] as string) ?? 'Stopped by Syrin governance',
-          action['incident_id'] as string | undefined
+          action['incident_id'] as string | undefined,
+          action['drift_score'] as number | undefined
         );
+      } else if (action.type === 'inject_message') {
+        console.warn(`[Syrin] Governance inject_message received — reason=${reason} incident=${incident}`);
+        if (policy && !(policy.allowInjectMessage ?? false)) {
+          console.warn('[Syrin] inject_message skipped: allowInjectMessage=false in governance policy');
+          continue;
+        }
+        // handled via injectedMsgs below
       } else if (action.type === 'restore') {
+        console.warn(`[Syrin] Governance RESTORE received — checkpoint=${action['checkpoint_id'] ?? '?'} reason=${reason}`);
+        if (policy && !(policy.allowRestore ?? true)) {
+          console.warn('[Syrin] restore skipped: allowRestore=false in governance policy');
+          continue;
+        }
         const checkpointId = action['checkpoint_id'] as string | undefined;
         if (checkpointId) {
           const cp = await this.checkpointClient.getById(checkpointId);
@@ -487,6 +527,11 @@ export class SyrinSDKCore implements ISyrinCore {
           }
         }
       } else if (action.type === 'checkpoint') {
+        console.warn(`[Syrin] Governance CHECKPOINT received — label=${action['label'] ?? '?'} reason=${reason}`);
+        if (policy && !(policy.allowCheckpoint ?? true)) {
+          console.warn('[Syrin] checkpoint skipped: allowCheckpoint=false in governance policy');
+          continue;
+        }
         const currentMsgs = Array.isArray(modifiedRaw['messages'])
           ? (modifiedRaw['messages'] as Array<Record<string, unknown>>)
           : [];
@@ -500,8 +545,9 @@ export class SyrinSDKCore implements ISyrinCore {
       }
     }
 
-    // Prepend injected messages
-    if (injectedMsgs.length > 0) {
+    // Prepend injected messages — respecting governance policy
+    const allowInject = !(policy && !(policy.allowInjectMessage ?? false));
+    if (injectedMsgs.length > 0 && allowInject) {
       const existing: Record<string, unknown>[] = Array.isArray(modifiedRaw['messages'])
         ? [...(modifiedRaw['messages'] as Record<string, unknown>[])]
         : [];

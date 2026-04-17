@@ -129,4 +129,52 @@ describe('mountConfigEndpoint()', () => {
 
     expect(res.statusCode).toBe(400);
   });
+
+  // Bug #3 — handler must also update ConfigStore so LangChain _buildConfig() picks up changes
+  it('updates ConfigStore sections when overrides are pushed', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue({}) });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const { init, mountConfigEndpoint, getInstance } = await import('@/index');
+    await init({
+      apiKey:      'syrin_test',
+      agentId:     'mce-agent',
+      backendUrl:  'http://localhost:4000',
+      offline:     true,
+      otelExporter: 'none',
+    });
+
+    const handler = mountConfigEndpoint();
+    const req = makeReq({ 'llm.temperature': 0.77, 'llm.model': 'gpt-4o' });
+    const res = makeRes();
+    await handler(req as never, res as never);
+
+    expect((res.body as { ok: boolean }).ok).toBe(true);
+
+    // ConfigStore should reflect the pushed values so framework adapters (LangChain) see them
+    const inst = getInstance();
+    // Access configStore via the core (internal, cast for test)
+    const core = (inst as unknown as Record<string, unknown>)['_core'] as {
+      getConfigStore(): { getSection(ns: string): Record<string, unknown> } | null;
+    };
+    const llm = core.getConfigStore()?.getSection('llm');
+    expect(llm?.['temperature']).toBe(0.77);
+    expect(llm?.['model']).toBe('gpt-4o');
+  });
+
+  it('ConfigStore update is skipped gracefully when SDK has no core (defensive)', async () => {
+    const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue({}) });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const { init, mountConfigEndpoint } = await import('@/index');
+    await init({ apiKey: 'syrin_test', backendUrl: 'http://localhost:4000', offline: true, otelExporter: 'none' });
+
+    const handler = mountConfigEndpoint();
+    // Use known-good keys so we're testing the configStore path, not validation
+    const req = makeReq({ 'llm.temperature': 0.3 });
+    const res = makeRes();
+    // Must not throw even in edge cases
+    await expect(handler(req as never, res as never)).resolves.toBeUndefined();
+    expect((res.body as { ok: boolean }).ok).toBe(true);
+  });
 });

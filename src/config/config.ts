@@ -11,10 +11,17 @@ const DEFAULTS: Omit<SyrinSDKConfig, 'apiKey'> = {
   otelExporter: 'none',
   otelEndpoint: 'http://localhost:4318',
   debug: false,
-  captureContent: true,
+  captureContent: false,
   offline: false,
   batchSize: 100,
   idleFlushMs: 10_000,
+  httpTimeoutMs: 10_000,
+  heartbeatTimeoutMs: 5_000,
+  pollTimeoutMs: 10_000,
+  heartbeatIntervalMs: 30_000,
+  maxQueueSize: 1000,
+  configHistoryMaxlen: 50,
+  configAuditMaxlen: 1000,
   toolValidation: false,
   sessionTtlMs: undefined,
   configPollIntervalMs: 0,
@@ -49,6 +56,9 @@ export function fromEnv(): Partial<SyrinSDKConfig> {
   }
   if (process.env['SYRIN_AGENT_ID']) {
     env.agentId = process.env['SYRIN_AGENT_ID'];
+  } else if (process.env['SYRIN_NAME']) {
+    // Legacy alias — prefer SYRIN_AGENT_ID
+    env.agentId = process.env['SYRIN_NAME'];
   }
   if (process.env['SYRIN_SESSION_ID']) {
     env.sessionId = process.env['SYRIN_SESSION_ID'];
@@ -95,6 +105,34 @@ export function fromEnv(): Partial<SyrinSDKConfig> {
     const parsed = parseInt(process.env['SYRIN_CONFIG_POLL_INTERVAL_MS'], 10);
     if (!isNaN(parsed)) env.configPollIntervalMs = parsed;
   }
+  if (process.env['SYRIN_HTTP_TIMEOUT_MS']) {
+    const parsed = parseInt(process.env['SYRIN_HTTP_TIMEOUT_MS'], 10);
+    if (!isNaN(parsed)) env.httpTimeoutMs = parsed;
+  }
+  if (process.env['SYRIN_HEARTBEAT_TIMEOUT_MS']) {
+    const parsed = parseInt(process.env['SYRIN_HEARTBEAT_TIMEOUT_MS'], 10);
+    if (!isNaN(parsed)) env.heartbeatTimeoutMs = parsed;
+  }
+  if (process.env['SYRIN_POLL_TIMEOUT_MS']) {
+    const parsed = parseInt(process.env['SYRIN_POLL_TIMEOUT_MS'], 10);
+    if (!isNaN(parsed)) env.pollTimeoutMs = parsed;
+  }
+  if (process.env['SYRIN_HEARTBEAT_INTERVAL_MS']) {
+    const parsed = parseInt(process.env['SYRIN_HEARTBEAT_INTERVAL_MS'], 10);
+    if (!isNaN(parsed)) env.heartbeatIntervalMs = parsed;
+  }
+  if (process.env['SYRIN_MAX_QUEUE_SIZE']) {
+    const parsed = parseInt(process.env['SYRIN_MAX_QUEUE_SIZE'], 10);
+    if (!isNaN(parsed)) env.maxQueueSize = parsed;
+  }
+  if (process.env['SYRIN_CONFIG_HISTORY_MAXLEN']) {
+    const parsed = parseInt(process.env['SYRIN_CONFIG_HISTORY_MAXLEN'], 10);
+    if (!isNaN(parsed)) env.configHistoryMaxlen = parsed;
+  }
+  if (process.env['SYRIN_CONFIG_AUDIT_MAXLEN']) {
+    const parsed = parseInt(process.env['SYRIN_CONFIG_AUDIT_MAXLEN'], 10);
+    if (!isNaN(parsed)) env.configAuditMaxlen = parsed;
+  }
 
   return env;
 }
@@ -130,6 +168,14 @@ export function createConfig(
   if (merged.otelExporter && !validExporters.includes(merged.otelExporter)) {
     throw new Error(
       `[Syrin] Invalid otelExporter: "${merged.otelExporter}". Must be one of: ${validExporters.join(', ')}`
+    );
+  }
+
+  // Warn when captureContent=true (PII risk)
+  if (merged.captureContent) {
+    console.warn(
+      '[Syrin WARNING] captureContent=true: prompts and completions will be transmitted ' +
+      'to the Syrin backend. This may include PII. Ensure your DPA covers this data.'
     );
   }
 

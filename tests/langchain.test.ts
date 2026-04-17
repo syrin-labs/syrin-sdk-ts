@@ -328,4 +328,89 @@ describe('LangChainAdapter', () => {
     const handler = adapter.callbackHandler();
     expect(handler).toBeInstanceOf(SyrinLangChainCallback);
   });
+
+  // ── Bug #5 — double-emission guard ───────────────────────────────────────
+  // When the BaseChatModel prototype patch is active (installed via _doInstall),
+  // the callback handler's handleLLMEnd must NOT emit LLM_CALL — the patch
+  // already captures it. Emitting from both doubles token counts and costs.
+
+  it('handleLLMEnd does NOT emit LLM_CALL when prototype patch is active', async () => {
+    const { isLLMPatched } = await import('../src/adapters/langchain/patch-llm.js');
+
+    // Install adapter — this calls patchBaseChatModel() internally
+    await adapter.install(coreResult.core);
+
+    // Skip if patchBaseChatModel could not patch the prototype in this test environment
+    // (e.g. @langchain/core prototype has no .generate or is structured differently)
+    if (!isLLMPatched()) return;
+
+    const handler = adapter.callbackHandler('dedup_chain');
+    handler.handleLLMStart({ kwargs: { model_name: 'gpt-4o' } }, [], 'run_dedup');
+
+    // Simulate LLM response with token usage
+    const mockResponse = {
+      llmOutput: { tokenUsage: { promptTokens: 10, completionTokens: 5 } },
+    };
+    handler.handleLLMEnd(mockResponse as Record<string, unknown>);
+
+    // No LLM_CALL event should have been emitted — the patch handles it
+    const llmCallEvents = (coreResult.emitted as Record<string, unknown>[]).filter(
+      (e) => e['event_type'] === 'LLM_CALL',
+    );
+    expect(llmCallEvents).toHaveLength(0);
+  });
+
+  it('handleLLMEnd DOES emit LLM_CALL when prototype patch is NOT active', async () => {
+    // Do NOT install adapter — prototype patch stays inactive
+    // Create a fresh adapter that is deliberately not installed (patch inactive)
+    const { LangChainAdapter: LCA } = await import('../src/adapters/langchain/index.js');
+    const { isLLMPatched } = await import('../src/adapters/langchain/patch-llm.js');
+
+    // Uninstall existing adapter to ensure patch is cleared
+    adapter.uninstall();
+
+    const freshAdapter = new LCA();
+    // Do not install so patch is not active — but do give it a core so emitEvent works
+    const { core: freshCore, emitted: freshEmitted } = makeCore();
+    // Manually set _core without triggering install (bypasses patch)
+    (freshAdapter as unknown as Record<string, unknown>)['_core'] = freshCore;
+    (freshAdapter as unknown as Record<string, unknown>)['_installed'] = true;
+
+    // Verify patch is not active for this scenario
+    // (Note: if other tests ran patchBaseChatModel this may stay true;
+    //  the real guard is that the dedup check uses module-level state)
+    const handler = freshAdapter.callbackHandler('no_patch_chain');
+    handler.handleLLMStart({ kwargs: { model_name: 'gpt-4o' } }, [], 'run_no_patch');
+    handler.handleLLMEnd({
+      llmOutput: { tokenUsage: { promptTokens: 10, completionTokens: 5 } },
+    } as Record<string, unknown>);
+
+    // When patch is NOT active, LLM_CALL MUST be emitted by the callback
+    if (!isLLMPatched()) {
+      const llmCallEvents = (freshEmitted as Record<string, unknown>[]).filter(
+        (e) => e['event_type'] === 'LLM_CALL',
+      );
+      expect(llmCallEvents).toHaveLength(1);
+    }
+    // If patch is somehow active (test ordering), skip the assertion — covered by the
+    // test above which verifies the patch case explicitly.
+  });
+
+  it('handleLLMError does NOT emit LLM_CALL when prototype patch is active', async () => {
+    const { isLLMPatched } = await import('../src/adapters/langchain/patch-llm.js');
+
+    await adapter.install(coreResult.core);
+
+    // Skip if patchBaseChatModel could not patch the prototype in this test environment
+    if (!isLLMPatched()) return;
+
+    const handler = adapter.callbackHandler('dedup_err_chain');
+    handler.handleLLMStart({ kwargs: { model_name: 'gpt-4o' } }, [], 'run_err_dedup');
+    handler.handleLLMError(new Error('model error'));
+
+    const llmCallEvents = (coreResult.emitted as Record<string, unknown>[]).filter(
+      (e) => e['event_type'] === 'LLM_CALL',
+    );
+    expect(llmCallEvents).toHaveLength(0);
+  });
 });

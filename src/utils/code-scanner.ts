@@ -12,7 +12,7 @@
  *   activeConfig()['prompt.system_prompt'] ?? 'You are a helpful assistant.'
  */
 
-import { readFileSync, readdirSync } from 'fs';
+import { readFileSync, readdirSync, statSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import type { SchemaField } from '@/adapters/types.js';
@@ -50,21 +50,74 @@ export function scanCallerDefaults(stack: string): ScannedDefault[] {
     }
   };
 
-  // 1. Scan the direct caller file first
+  // Scan only the direct caller file (not siblings)
+  // In the examples directory, each agent file (agent-openai.ts, agent-vercel.ts, etc.)
+  // has its own cfg() calls. Scanning siblings would pick up configs from OTHER agents,
+  // leading to cross-contamination in multi-agent setups.
   add(_scanFile(callerFile));
 
-  // 2. Scan sibling source files in the same directory
-  try {
-    const dir = path.dirname(callerFile);
-    const exts = new Set(['.ts', '.js', '.mjs', '.cjs']);
-    for (const entry of readdirSync(dir)) {
-      if (!exts.has(path.extname(entry))) continue;
-      const sibling = path.join(dir, entry);
-      if (sibling === callerFile) continue;
-      add(_scanFile(sibling));
-    }
-  } catch { /* non-fatal — directory may not be readable */ }
+  return results;
+}
 
+/**
+ * Scan one or more files or directories for config usage patterns.
+ *
+ * Directories are scanned recursively for `.ts`, `.js`, `.mjs`, and `.cjs` files.
+ * The first occurrence of each key wins (duplicates from different files are dropped).
+ *
+ * @param paths - Array of file paths or directory paths to scan.
+ */
+export function scanPaths(paths: string[]): ScannedDefault[] {
+  const results: ScannedDefault[] = [];
+  const seen = new Set<string>();
+
+  const add = (items: ScannedDefault[]) => {
+    for (const item of items) {
+      if (!seen.has(item.path)) {
+        seen.add(item.path);
+        results.push(item);
+      }
+    }
+  };
+
+  for (const p of paths) {
+    try {
+      const stat = statSync(p);
+      if (stat.isFile()) {
+        add(_scanFile(p));
+      } else if (stat.isDirectory()) {
+        for (const f of _collectFiles(p)) {
+          add(_scanFile(f));
+        }
+      }
+    } catch {
+      // skip inaccessible paths
+    }
+  }
+
+  return results;
+}
+
+/** Recursively collect .ts/.js/.mjs/.cjs files under a directory. */
+function _collectFiles(dir: string): string[] {
+  const results: string[] = [];
+  const _EXTENSIONS = new Set(['.ts', '.js', '.mjs', '.cjs']);
+  const walk = (d: string) => {
+    let entries: string[];
+    try { entries = readdirSync(d); } catch { return; }
+    for (const entry of entries.sort()) {
+      const full = path.join(d, entry);
+      try {
+        const stat = statSync(full);
+        if (stat.isDirectory() && !entry.startsWith('.') && entry !== 'node_modules') {
+          walk(full);
+        } else if (stat.isFile() && _EXTENSIONS.has(path.extname(entry))) {
+          results.push(full);
+        }
+      } catch { /* skip */ }
+    }
+  };
+  walk(dir);
   return results;
 }
 

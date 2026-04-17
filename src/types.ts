@@ -16,6 +16,20 @@ export interface SyrinSDKConfig {
   batchSize: number;
   /** Flush the queue if non-empty and this many ms have elapsed since last flush. */
   idleFlushMs: number;
+  /** Timeout (ms) for /ingest and /health HTTP requests. */
+  httpTimeoutMs?: number;
+  /** Timeout (ms) for heartbeat POST requests. */
+  heartbeatTimeoutMs?: number;
+  /** Timeout (ms) for config-polling GET requests. */
+  pollTimeoutMs?: number;
+  /** Interval (ms) between heartbeat POSTs. */
+  heartbeatIntervalMs?: number;
+  /** Max in-memory events before oldest are dropped. */
+  maxQueueSize?: number;
+  /** Max config versions retained in history ring buffer. */
+  configHistoryMaxlen?: number;
+  /** Max audit log entries retained in ring buffer. */
+  configAuditMaxlen?: number;
   /** When true, include tool call args + schemas in events and validate against backend. */
   toolValidation: boolean;
   /** Auto-delete sessions older than this many ms (undefined = disabled). */
@@ -33,6 +47,17 @@ export interface SyrinSDKConfig {
    * Parity with Python SDK's schema_defaults option.
    */
   schemaDefaults?: Record<string, unknown>;
+  /** Governance opt-in policy. Defaults: allowStop=false, allowInjectMessage=false. */
+  governance?: import('./core/governance.js').GovernancePolicy;
+  /** When true, all backend config_updates are ignored. Default: false. */
+  disableRemoteConfig?: boolean;
+  /** When set, only these config keys may be updated remotely. Example: ['llm.temperature']. */
+  configUpdateAllowlist?: string[];
+  /**
+   * Directory containing the `.syrin/syrin.config.json` file for persisted config.
+   * Defaults to process.cwd(). Set per-process for isolated config directories.
+   */
+  configDir?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +343,34 @@ export interface ApprovalRejectedEvent extends SyrinEventBase {
 }
 
 /**
+ * Emitted by LangChain and LangGraph adapters when a chain/graph invocation completes.
+ * Carries the chain name, run ID, duration, and any error that occurred.
+ */
+export interface ChainExecutionEvent extends SyrinEventBase {
+  event_type: 'CHAIN_EXECUTION';
+  /** Human-readable name of the chain or graph being executed. */
+  chain_name?: string;
+  /** LangChain run identifier for correlating with LLM_CALL events. */
+  chain_run_id?: string | null;
+  /** LangGraph graph identifier. */
+  graph_id?: string;
+}
+
+/**
+ * Emitted when the user calls `sdk.log()` or the module-level `log()`.
+ * Appears on the dashboard timeline alongside LLM calls and tool calls.
+ */
+export interface CustomLogEvent extends SyrinEventBase {
+  event_type: 'CUSTOM_LOG';
+  /** The log message to display on the dashboard. */
+  message: string;
+  /** Severity level: 'debug' | 'info' | 'warning' | 'error' */
+  level: string;
+  /** Optional free-form key/value pairs for additional context. */
+  metadata?: Record<string, unknown>;
+}
+
+/**
  * Discriminated union of all Syrin event types.
  * Use the `event_type` field to narrow to a specific event shape.
  *
@@ -346,7 +399,9 @@ export type SyrinEvent =
   | ToolResultEvent
   | ApprovalRequestedEvent
   | ApprovalGrantedEvent
-  | ApprovalRejectedEvent;
+  | ApprovalRejectedEvent
+  | ChainExecutionEvent
+  | CustomLogEvent;
 
 // ---------------------------------------------------------------------------
 // Config update types (Task 3)

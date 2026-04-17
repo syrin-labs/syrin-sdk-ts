@@ -576,16 +576,26 @@ describe('Realistic workflow: remote config hot-swap mid-session', () => {
     }
   });
 
-  it('unknown config keys are silently dropped and do not affect the session', async () => {
+  it('dot-notation backend keys are normalised to flat session keys', async () => {
+    const { sessionStore } = makeEnv();
+    const sid = 'dot-notation-session';
+    await sessionStore.getOrCreate(sid, undefined);
+
+    // Backend returns dot-notation: 'llm.temperature' should map to 'temperature'
+    sessionStore.applyConfigUpdate(sid, { 'llm.temperature': 0.5, 'prompt.system_prompt': 'Be concise.' } as Record<string, unknown>);
+
+    expect(sessionStore.getEffectiveConfig(sid)['llm.temperature']).toBeUndefined(); // raw key not stored
+    expect(sessionStore.getEffectiveConfig(sid)['temperature']).toBe(0.5);          // normalised key applied
+    expect(sessionStore.getEffectiveConfig(sid)['system_prompt']).toBe('Be concise.'); // prompt section normalised
+  });
+
+  it('truly unknown config keys are silently dropped and do not affect the session', async () => {
     const { sessionStore } = makeEnv();
     const sid = 'unknown-key-session';
     await sessionStore.getOrCreate(sid, undefined);
 
-    // 'llm.temperature' is dot-notation — not in ALLOWED_CONFIG_KEYS
-    sessionStore.applyConfigUpdate(sid, { 'llm.temperature': 0.5 } as Record<string, unknown>);
+    sessionStore.applyConfigUpdate(sid, { 'completely_unknown_key': 42 } as Record<string, unknown>);
 
-    // Should have been silently dropped
-    expect(sessionStore.getEffectiveConfig(sid)['llm.temperature']).toBeUndefined();
-    expect(sessionStore.getEffectiveConfig(sid)['temperature']).toBeUndefined();
+    expect(sessionStore.getEffectiveConfig(sid)['completely_unknown_key']).toBeUndefined();
   });
 });
