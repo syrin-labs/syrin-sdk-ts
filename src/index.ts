@@ -28,7 +28,7 @@ import { getCallInterceptor } from '@/control/call-interceptor.js';
 import type { CompleteControlConfig } from '@/control/complete-control-schema.js';
 
 
-export type { SyrinSDKConfig, SyrinEvent, CustomLogEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ConfigUpdate, MessageParam } from '@/types.js';
+export type { SyrinSDKConfig, SyrinEvent, CustomLogEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ConfigUpdate, MessageParam, AgentConfig, AgentFieldDef } from '@/types.js';
 export { withAgent, withWorkflow, withSwarm, getRunContext, _setLifecycleEmitter } from '@/agent/context.js';
 export { TraceSpan } from '@/agent/trace-span.js';
 export type { TraceType } from '@/agent/trace-span.js';
@@ -74,6 +74,75 @@ export interface CfgOptions {
   le?: number;
   enum?: unknown[];
   multiline?: boolean;
+}
+
+/**
+ * Time window controlling how sessions are grouped.
+ *
+ * | Window     | Session expires / resets |
+ * |------------|--------------------------|
+ * | `"hour"`   | Every hour               |
+ * | `"day"`    | Every calendar day       |
+ * | `"week"`   | Every ISO week (Mon–Sun) |
+ * | `"month"`  | Every calendar month     |
+ * | `"forever"`| Never — persistent       |
+ */
+export type SessionWindow = 'hour' | 'day' | 'week' | 'month' | 'forever';
+
+/**
+ * Options for creating a grouped / user session via {@link withSession} or
+ * {@link makeSessionId}.
+ */
+export interface SessionOptions {
+  /**
+   * Stable end-user identifier (e.g. database ID, email).
+   * Groups all requests from this user within the given {@link window}.
+   */
+  userId?: string;
+  /**
+   * Custom group key — flow name, tenant ID, batch job name, etc.
+   * Can be combined with {@link userId}.
+   */
+  key?: string;
+  /**
+   * Time window that controls session grouping and expiry.
+   * Defaults to `"day"`.
+   */
+  window?: SessionWindow;
+  /**
+   * Extra key-value pairs attached to the `SESSION_STARTED` event payload
+   * (e.g. `{ plan: "pro", region: "us-east" }`).
+   */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * A registered agent handle returned by {@link SyrinSDKInstance.agent}.
+ *
+ * Combines registration and session management: call `.run(fn)` to enter the
+ * agent context and run `fn` inside it — no separate `withAgent()` import needed.
+ */
+export class AgentHandle {
+  constructor(private readonly _agentId: string) {}
+
+  /**
+   * Enter the agent context and run `fn` inside it.
+   *
+   * Equivalent to `withAgent(agentId, fn)` but scoped to this specific agent
+   * without needing to import `withAgent` separately.
+   *
+   * @example
+   * ```ts
+   * await researcher.run(async () => {
+   *   const temp = sdk.cfg("llm.temperature", 0.3) as number;
+   *   const reply = await callLLM(messages, temp);
+   * });
+   * ```
+   */
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    const { withAgent } = await import('./agent/context.js');
+    return withAgent(this._agentId, fn);
+  }
 }
 
 export class SyrinSDKInstance implements SyrinSDK {
@@ -132,6 +201,130 @@ export class SyrinSDKInstance implements SyrinSDK {
   async registerAdapter(adapter: SyrinSDKAdapter): Promise<this> {
     await this._core.registerAdapter(adapter);
     return this;
+  }
+
+  /**
+   * Register an agent with per-agent observability settings.
+   *
+   * Can be called at any point after `init()` — before or after the agent runs.
+   * Per-agent settings take priority over the SDK-level defaults for that agent only.
+   * Returns `this` so calls can be chained.
+   *
+   * @param config - AgentConfig with `agentId` and optional overrides.
+   *
+   * @example
+   * ```ts
+   * const sdk = await init({ apiKey: "syrin_..." });
+   *
+   * // Research agent — capture full prompts, all tool events
+   * sdk.registerAgent({ agentId: "researcher", captureContent: true });
+   *
+   * // Classifier — no PII, suppress tool noise
+   * sdk.registerAgent({ agentId: "classifier", captureContent: false, captureToolCalls: false });
+   *
+   * // Chaining
+   * sdk.registerAgent({ agentId: "writer" }).registerAgent({ agentId: "reviewer" });
+   * ```
+   */
+  registerAgent(config: import('./types.js').AgentConfig): this {
+    this._core.registerAgent(config);
+    return this;
+  }
+
+  /**
+   * Register an agent and return an {@link AgentHandle} for session management.
+   *
+   * Combines `registerAgent()` and `withAgent()` in one step. The returned handle's
+   * `.run(fn)` method enters the agent scope and runs your async function inside it —
+   * no separate registration call or `withAgent()` import needed.
+   *
+   * @param agentId - Unique agent identifier.
+   * @param options - Optional observability overrides and field declarations.
+   * @returns An {@link AgentHandle} with a `.run(fn)` method.
+   *
+   * @example
+   * ```ts
+   * const researcher = sdk.agent("researcher", {
+   *   description: "Gathers information",
+   *   captureContent: true,
+   *   captureToolCalls: true,
+   *   fields: {
+   *     "llm.temperature":      { default: 0.3, ge: 0, le: 2, label: "Temperature" },
+   *     "prompt.system_prompt": { default: "Research the topic.", multiline: true },
+   *   },
+   * });
+   *
+   * // Use it as a session handle anywhere:
+   * await researcher.run(async () => {
+   *   const temp = sdk.cfg("llm.temperature", 0.3) as number;
+   *   const reply = await callLLM(messages, temp);
+   * });
+   * ```
+   */
+  agent(
+    agentId: string,
+    options?: Omit<import('./types.js').AgentConfig, 'agentId'>
+  ): AgentHandle {
+    this._core.registerAgent({ agentId, ...options });
+    return new AgentHandle(agentId);
+  }
+
+  /**
+   * Apply a remote config override map pushed from the Syrin backend or dashboard.
+   *
+   * Updates all active sessions and the agent-level ConfigStore, then persists
+   * changes to disk so they survive restarts.
+   *
+   * @param overrides - Flat `{ key: value }` object, e.g.
+   *   `{ "llm.temperature": 0.2, "prompt.systemPrompt": "..." }`.
+   * @returns `{ applied: string[], rejected: string[] }` key lists.
+   *
+   * @example
+   * ```ts
+   * app.post('/syrin/config', async (req, res) => {
+   *   const { applied, rejected } = await sdk.applyRemoteConfig(req.body);
+   *   res.json({ ok: true, applied, rejected });
+   * });
+   * ```
+   */
+  async applyRemoteConfig(
+    overrides: Record<string, unknown>
+  ): Promise<{ applied: string[]; rejected: string[] }> {
+    const { save: saveConfig } = await import('./config/persist.js');
+    const rejected: string[] = [];
+
+    // Update all active sessions
+    const ids = typeof (this._sessionStore as SessionStore & { getSessionIds?(): string[] }).getSessionIds === 'function'
+      ? (this._sessionStore as SessionStore & { getSessionIds(): string[] }).getSessionIds()
+      : [];
+    for (const sid of ids) {
+      try { this._sessionStore.applyConfigUpdate(sid, overrides); } catch { /* ignore */ }
+    }
+    try { this._sessionStore.applyConfigUpdate(this._sessionId, overrides); } catch { /* ignore */ }
+
+    // Update agent-level ConfigStore
+    try {
+      const configStore = (this._core as Record<string, unknown>)['_configStore'] as
+        | { applyUpdates?: (o: Record<string, unknown>, source?: string) => void }
+        | undefined;
+      if (configStore?.applyUpdates) {
+        configStore.applyUpdates(overrides, 'remote');
+      }
+    } catch { /* ignore */ }
+
+    // Persist to disk
+    try { await saveConfig(overrides, this._configDir); } catch { /* ignore */ }
+
+    const applied = Object.keys(overrides).filter(k => !rejected.includes(k));
+    return { applied, rejected };
+  }
+
+  /**
+   * @deprecated Use `withSession({ userId, window: 'day' }, fn)` instead.
+   * @see {@link makeSessionId}
+   */
+  dailySessionId(userId: string): string {
+    return makeSessionId({ userId, window: 'day' });
   }
 
   /**
@@ -1069,6 +1262,191 @@ export async function refreshSchema(name = 'default'): Promise<void> {
 }
 
 /**
+ * Compute a stable session ID from grouping parameters — without opening a
+ * session scope.  Use this when you need the ID ahead of time (e.g. to pass
+ * it to a job queue or log it before the session starts).
+ *
+ * For opening a session scope directly, prefer {@link withSession} with an
+ * options object — it calls this internally.
+ *
+ * @example
+ * ```ts
+ * // User grouped by day (default window)
+ * makeSessionId({ userId: "alice" });
+ * // → "u:alice:2026-04-18"
+ *
+ * // User grouped by hour
+ * makeSessionId({ userId: "alice", window: "hour" });
+ * // → "u:alice:2026-04-18T14"
+ *
+ * // User + named flow + day
+ * makeSessionId({ userId: "alice", key: "checkout" });
+ * // → "u:alice:checkout:2026-04-18"
+ *
+ * // Non-user grouping
+ * makeSessionId({ key: "nightly-etl", window: "day" });
+ * // → "k:nightly-etl:2026-04-18"
+ *
+ * // Persistent user session
+ * makeSessionId({ userId: "alice", window: "forever" });
+ * // → "u:alice"
+ * ```
+ */
+export function makeSessionId(options: SessionOptions): string {
+  const { userId, key, window: win = 'day' } = options;
+
+  if (!userId && !key) {
+    // No grouping — callers who want auto-UUID should use withSession() directly
+    return generateId('ses');
+  }
+
+  const now = new Date();
+  let suffix = '';
+  if (win !== 'forever') {
+    const pad2 = (n: number) => String(n).padStart(2, '0');
+    const y = now.getUTCFullYear();
+    const m = pad2(now.getUTCMonth() + 1);
+    const d = pad2(now.getUTCDate());
+    const h = pad2(now.getUTCHours());
+
+    if (win === 'hour') {
+      suffix = `${y}-${m}-${d}T${h}`;
+    } else if (win === 'day') {
+      suffix = `${y}-${m}-${d}`;
+    } else if (win === 'week') {
+      // ISO week number
+      const jan4 = new Date(Date.UTC(y, 0, 4));
+      const dayOfYear = Math.floor((now.getTime() - Date.UTC(y, 0, 1)) / 86_400_000) + 1;
+      const weekNum = Math.ceil((dayOfYear + jan4.getUTCDay()) / 7);
+      suffix = `${y}-W${pad2(weekNum)}`;
+    } else if (win === 'month') {
+      suffix = `${y}-${m}`;
+    }
+  }
+
+  const parts: string[] = [];
+  if (userId) {
+    parts.push(`u:${userId}`);
+    if (key) parts.push(key);
+  } else {
+    // key-only grouping: prefix with "k:" to distinguish from user sessions
+    parts.push(`k:${key!}`);
+  }
+  if (suffix) parts.push(suffix);
+  return parts.join(':');
+}
+
+/**
+ * @deprecated Use `withSession({ userId, window: 'day' }, fn)` instead.
+ *
+ * @example Migration:
+ * ```ts
+ * // Before
+ * const sessionId = dailySessionId(userId);
+ * await withSession(sessionId, async () => { ... });
+ *
+ * // After
+ * await withSession({ userId, window: 'day' }, async () => { ... });
+ * ```
+ */
+export function dailySessionId(userId: string): string {
+  return makeSessionId({ userId, window: 'day' });
+}
+
+/**
+ * Wrap a function so every call emits `TOOL_CALL` + `TOOL_RESULT` events automatically.
+ *
+ * Captures: function name, arguments, return value, latency, and errors.
+ * The wrapped function is otherwise identical to the original.
+ *
+ * Supports both sync and async functions.
+ *
+ * @example
+ * ```ts
+ * import { instrumentTool } from "@syrin/sdk";
+ *
+ * const webSearch = instrumentTool(async (query: string) => {
+ *   return await search(query);
+ * }, { name: "web_search" });
+ *
+ * // Or with a named function:
+ * const fetchUrl = instrumentTool(async function fetchUrl(url: string) {
+ *   return await fetch(url).then(r => r.text());
+ * });
+ * ```
+ */
+export function instrumentTool<Args extends unknown[], R>(
+  fn: (...args: Args) => R | Promise<R>,
+  options?: { name?: string }
+): (...args: Args) => R | Promise<R> {
+  const toolName = options?.name ?? fn.name ?? 'unknown_tool';
+
+  return function (...args: Args): R | Promise<R> {
+    // Lazy import to avoid circular deps at module load time
+    const { ToolSpan, _emitToolEvents } = require('./agent/tool-context.js') as {
+      ToolSpan: new (name: string, id: string) => {
+        record(r: unknown): void;
+        setError(e: string): void;
+      };
+      _emitToolEvents: (span: unknown, args: Record<string, unknown>, exc: unknown) => void;
+    };
+    const { generateId } = require('./utils/helpers.js') as { generateId: (prefix: string) => string };
+
+    const span = new ToolSpan(toolName, generateId('tc_'));
+    const argsRecord: Record<string, unknown> = {};
+    args.forEach((a, i) => { argsRecord[`arg${i}`] = a; });
+
+    let result: R | Promise<R>;
+    try {
+      result = fn(...args);
+    } catch (exc) {
+      _emitToolEvents(span, argsRecord, exc);
+      throw exc;
+    }
+
+    if (result instanceof Promise) {
+      return result.then(
+        (r) => { span.record(r); _emitToolEvents(span, argsRecord, null); return r; },
+        (e) => { _emitToolEvents(span, argsRecord, e); throw e; }
+      ) as R;
+    }
+
+    span.record(result);
+    _emitToolEvents(span, argsRecord, null);
+    return result;
+  };
+}
+
+/**
+ * Register an agent with per-agent observability settings.
+ *
+ * Module-level shorthand for `sdk.registerAgent(config)`.
+ * Can be called at any point after `init()` — before or after the agent runs.
+ *
+ * @param config - AgentConfig with `agentId` and optional overrides.
+ * @param instanceName - Target a specific named SDK instance (default: `"default"`).
+ *
+ * @example
+ * ```ts
+ * await init({ apiKey: "syrin_..." });
+ *
+ * // Per-agent overrides — call any time after init()
+ * registerAgent({ agentId: "researcher", captureContent: true, captureToolCalls: true });
+ * registerAgent({ agentId: "classifier", captureContent: false, captureToolCalls: false });
+ *
+ * await withAgent("researcher", async () => {
+ *   await openai.chat.completions.create(...);
+ * });
+ * ```
+ */
+export function registerAgent(
+  config: import('./types.js').AgentConfig,
+  instanceName = 'default',
+): void {
+  _instances.get(instanceName)?.registerAgent(config);
+}
+
+/**
  * Returns a framework-agnostic request handler that receives config pushes
  * from the Syrin backend and applies them in-memory + persists to disk.
  *
@@ -1168,29 +1546,102 @@ export function getSessionId(): string {
 }
 
 /**
- * Run an async function in the scope of a named session.
- * Emits SESSION_STARTED / SESSION_ENDED events around the function call.
- * All LLM calls made within `fn` will be tagged with `sessionId`.
+ * Run an async function within a session scope.
  *
- * @param sessionId - The session identifier to scope.
- * @param fn - Async function to run within the session.
- * @returns The return value of `fn`.
+ * Three calling modes:
  *
- * @example
- * const result = await withSession('ses_user123', async () => {
- *   return await openai.chat.completions.create({ ... });
+ * **Independent session** — auto-generated UUID, one discrete agent run:
+ * ```ts
+ * await withSession(async () => {
+ *   await openai.chat.completions.create({ ... });
  * });
+ * ```
+ *
+ * **Explicit session ID** — backward compat, ID controlled by caller:
+ * ```ts
+ * await withSession('ses_user123', async () => { ... });
+ * ```
+ *
+ * **Grouped / user session** — stable ID from `userId` / `key` + `window`;
+ * multiple requests from the same user share one dashboard session:
+ * ```ts
+ * // Group Alice's requests by day (default window)
+ * await withSession({ userId: 'alice' }, async () => { ... });
+ * // → session_id = "u:alice:2026-04-18"
+ *
+ * await withSession({ userId: 'alice', window: 'hour' }, async () => { ... });
+ * // → session_id = "u:alice:2026-04-18T14"
+ *
+ * await withSession({ userId: 'alice', window: 'week' }, async () => { ... });
+ * // → session_id = "u:alice:2026-W16"
+ *
+ * await withSession({ userId: 'alice', window: 'month' }, async () => { ... });
+ * // → session_id = "u:alice:2026-04"
+ *
+ * await withSession({ userId: 'alice', window: 'forever' }, async () => { ... });
+ * // → session_id = "u:alice"
+ *
+ * // User + named flow — useful for multi-flow users
+ * await withSession({ userId: 'alice', key: 'checkout' }, async () => { ... });
+ * // → session_id = "u:alice:checkout:2026-04-18"
+ *
+ * // Non-user grouping — batch jobs, tenants, pipelines
+ * await withSession({ key: 'nightly-etl', window: 'day' }, async () => { ... });
+ * // → session_id = "k:nightly-etl:2026-04-18"
+ * ```
+ *
+ * Dashboard metrics unlocked by grouped sessions:
+ * - Sessions per user per day / week / month
+ * - Currently active users (sessions without SESSION_ENDED)
+ * - Power users (highest token / cost usage)
+ * - Real-time agent session counts per window
+ *
+ * @param sessionIdOrOptions - String ID, {@link SessionOptions} object, or the
+ *   async function itself (for auto-UUID mode).
+ * @param fn - Async function to execute within the session scope.
+ * @returns The return value of `fn`.
  */
-export async function withSession<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+export async function withSession<T>(
+  sessionIdOrOptions: string | SessionOptions | (() => Promise<T>),
+  fn?: () => Promise<T>,
+): Promise<T> {
+  // Mode 1: withSession(fn) — auto UUID
+  if (typeof sessionIdOrOptions === 'function') {
+    const autoId = generateId('ses');
+    return withSession(autoId, sessionIdOrOptions as () => Promise<T>);
+  }
+
+  // Mode 2: withSession(options, fn) — grouped session
+  let sessionId: string;
+  let extraMeta: Record<string, unknown> = {};
+  if (typeof sessionIdOrOptions === 'object') {
+    const opts = sessionIdOrOptions as SessionOptions;
+    if (!opts.userId && !opts.key) {
+      sessionId = generateId('ses');
+    } else {
+      sessionId = makeSessionId(opts);
+      if (opts.userId) extraMeta.user_id = opts.userId;
+      if (opts.key) extraMeta.group_key = opts.key;
+      if (opts.window) extraMeta.window = opts.window ?? 'day';
+      extraMeta.is_grouped = true;
+    }
+    if (opts.metadata) extraMeta = { ...extraMeta, ...opts.metadata };
+  } else {
+    // Mode 3: withSession(sessionId, fn) — explicit / backward compat
+    sessionId = sessionIdOrOptions as string;
+  }
+
+  if (!fn) throw new Error('withSession: fn is required');
+
   const inst = _primaryInstance;
   const agentId = inst?.config.agentId;
   const startTime = Date.now();
   const emitter = inst ? inst['_emitter'] : null;
 
   if (emitter) {
-    const startedEvent: SyrinEvent = {
+    const startedEvent = {
       event_id: generateId('evt_'),
-      event_type: 'SESSION_STARTED',
+      event_type: 'SESSION_STARTED' as const,
       timestamp: nowIso(),
       session_id: sessionId,
       agent_id: agentId,
@@ -1202,8 +1653,9 @@ export async function withSession<T>(sessionId: string, fn: () => Promise<T>): P
       cost_usd: 0,
       stream: false,
       config_applied: false,
+      ...extraMeta,
     };
-    emitter.emit(startedEvent, sessionId);
+    emitter.emit(startedEvent as SyrinEvent, sessionId);
   }
 
   try {
