@@ -29,7 +29,7 @@ import type { CompleteControlConfig } from '@/control/complete-control-schema.js
 
 
 export type { SyrinSDKConfig, SyrinEvent, CustomLogEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ConfigUpdate, MessageParam, AgentConfig, AgentFieldDef } from '@/types.js';
-export { withAgent, withWorkflow, withSwarm, getRunContext, _setLifecycleEmitter } from '@/agent/context.js';
+export { withAgent, withWorkflow, withSwarm, getRunContext } from '@/agent/context.js';
 export { TraceSpan } from '@/agent/trace-span.js';
 export type { TraceType } from '@/agent/trace-span.js';
 export { withTool, ToolSpan, withMemory, MemorySpan } from '@/agent/tool-context.js';
@@ -317,14 +317,6 @@ export class SyrinSDKInstance implements SyrinSDK {
 
     const applied = Object.keys(overrides).filter(k => !rejected.includes(k));
     return { applied, rejected };
-  }
-
-  /**
-   * @deprecated Use `withSession({ userId, window: 'day' }, fn)` instead.
-   * @see {@link makeSessionId}
-   */
-  dailySessionId(userId: string): string {
-    return makeSessionId({ userId, window: 'day' });
   }
 
   /**
@@ -1337,23 +1329,6 @@ export function makeSessionId(options: SessionOptions): string {
 }
 
 /**
- * @deprecated Use `withSession({ userId, window: 'day' }, fn)` instead.
- *
- * @example Migration:
- * ```ts
- * // Before
- * const sessionId = dailySessionId(userId);
- * await withSession(sessionId, async () => { ... });
- *
- * // After
- * await withSession({ userId, window: 'day' }, async () => { ... });
- * ```
- */
-export function dailySessionId(userId: string): string {
-  return makeSessionId({ userId, window: 'day' });
-}
-
-/**
  * Wrap a function so every call emits `TOOL_CALL` + `TOOL_RESULT` events automatically.
  *
  * Captures: function name, arguments, return value, latency, and errors.
@@ -1548,18 +1523,16 @@ export function getSessionId(): string {
 /**
  * Run an async function within a session scope.
  *
- * Three calling modes:
+ * All LLM calls made inside `fn` are tagged with the session ID and appear
+ * together in the Syrin dashboard as one logical session.
  *
- * **Independent session** — auto-generated UUID, one discrete agent run:
+ * Two calling modes:
+ *
+ * **Independent session** — auto-generated ID, one discrete agent run:
  * ```ts
  * await withSession(async () => {
  *   await openai.chat.completions.create({ ... });
  * });
- * ```
- *
- * **Explicit session ID** — backward compat, ID controlled by caller:
- * ```ts
- * await withSession('ses_user123', async () => { ... });
  * ```
  *
  * **Grouped / user session** — stable ID from `userId` / `key` + `window`;
@@ -1569,19 +1542,23 @@ export function getSessionId(): string {
  * await withSession({ userId: 'alice' }, async () => { ... });
  * // → session_id = "u:alice:2026-04-18"
  *
+ * // Group by hour — useful for high-frequency agents
  * await withSession({ userId: 'alice', window: 'hour' }, async () => { ... });
  * // → session_id = "u:alice:2026-04-18T14"
  *
+ * // ISO-week grouping
  * await withSession({ userId: 'alice', window: 'week' }, async () => { ... });
  * // → session_id = "u:alice:2026-W16"
  *
+ * // Monthly grouping
  * await withSession({ userId: 'alice', window: 'month' }, async () => { ... });
  * // → session_id = "u:alice:2026-04"
  *
+ * // Persistent user session (no time expiry)
  * await withSession({ userId: 'alice', window: 'forever' }, async () => { ... });
  * // → session_id = "u:alice"
  *
- * // User + named flow — useful for multi-flow users
+ * // Named flow — separate sessions for concurrent user flows
  * await withSession({ userId: 'alice', key: 'checkout' }, async () => { ... });
  * // → session_id = "u:alice:checkout:2026-04-18"
  *
@@ -1596,42 +1573,53 @@ export function getSessionId(): string {
  * - Power users (highest token / cost usage)
  * - Real-time agent session counts per window
  *
- * @param sessionIdOrOptions - String ID, {@link SessionOptions} object, or the
- *   async function itself (for auto-UUID mode).
- * @param fn - Async function to execute within the session scope.
+ * @param optionsOrFn - {@link SessionOptions} for grouped sessions, or the async
+ *   function itself for an independent auto-UUID session.
+ * @param fn - Async function to execute within the session scope (when
+ *   `optionsOrFn` is a {@link SessionOptions} object).
  * @returns The return value of `fn`.
  */
+export async function withSession<T>(fn: () => Promise<T>): Promise<T>;
+export async function withSession<T>(options: SessionOptions, fn: () => Promise<T>): Promise<T>;
 export async function withSession<T>(
-  sessionIdOrOptions: string | SessionOptions | (() => Promise<T>),
+  optionsOrFn: SessionOptions | (() => Promise<T>),
   fn?: () => Promise<T>,
 ): Promise<T> {
-  // Mode 1: withSession(fn) — auto UUID
-  if (typeof sessionIdOrOptions === 'function') {
+  // Mode 1: withSession(fn) — independent auto-UUID session
+  if (typeof optionsOrFn === 'function') {
     const autoId = generateId('ses');
-    return withSession(autoId, sessionIdOrOptions as () => Promise<T>);
+    return _runWithSession(autoId, {}, optionsOrFn as () => Promise<T>);
   }
 
   // Mode 2: withSession(options, fn) — grouped session
+  const opts = optionsOrFn;
   let sessionId: string;
   let extraMeta: Record<string, unknown> = {};
-  if (typeof sessionIdOrOptions === 'object') {
-    const opts = sessionIdOrOptions as SessionOptions;
-    if (!opts.userId && !opts.key) {
-      sessionId = generateId('ses');
-    } else {
-      sessionId = makeSessionId(opts);
-      if (opts.userId) extraMeta.user_id = opts.userId;
-      if (opts.key) extraMeta.group_key = opts.key;
-      if (opts.window) extraMeta.window = opts.window ?? 'day';
-      extraMeta.is_grouped = true;
-    }
-    if (opts.metadata) extraMeta = { ...extraMeta, ...opts.metadata };
+  if (!opts.userId && !opts.key) {
+    // Options provided but no grouping keys — still auto-UUID
+    sessionId = generateId('ses');
   } else {
-    // Mode 3: withSession(sessionId, fn) — explicit / backward compat
-    sessionId = sessionIdOrOptions as string;
+    sessionId = makeSessionId(opts);
+    if (opts.userId) extraMeta.user_id = opts.userId;
+    if (opts.key) extraMeta.group_key = opts.key;
+    if (opts.window) extraMeta.window = opts.window ?? 'day';
+    extraMeta.is_grouped = true;
   }
+  if (opts.metadata) extraMeta = { ...extraMeta, ...opts.metadata };
 
-  if (!fn) throw new Error('withSession: fn is required');
+  if (!fn) throw new Error('withSession: fn is required when passing options');
+  return _runWithSession(sessionId, extraMeta, fn);
+}
+
+/**
+ * Internal helper that opens a session scope and emits SESSION_STARTED /
+ * SESSION_ENDED lifecycle events.  Not part of the public API.
+ */
+async function _runWithSession<T>(
+  sessionId: string,
+  extraMeta: Record<string, unknown>,
+  fn: () => Promise<T>,
+): Promise<T> {
 
   const inst = _primaryInstance;
   const agentId = inst?.config.agentId;

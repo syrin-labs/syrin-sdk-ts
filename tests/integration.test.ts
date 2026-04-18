@@ -243,17 +243,18 @@ describe('Integration: init → call → event at mock backend', () => {
     const { default: OpenAI } = await import('openai');
     const client = new OpenAI({ apiKey: 'test' });
 
-    const sessionA = 'session_user_a';
-    const sessionB = 'session_user_b';
+    // Use keyword-only API — userId + forever window gives deterministic IDs
+    const sessionA = 'u:user_a';
+    const sessionB = 'u:user_b';
 
-    await withSession(sessionA, async () => {
+    await withSession({ userId: 'user_a', window: 'forever' }, async () => {
       await client.chat.completions.create({
         model: 'gpt-4o',
         messages: [{ role: 'user', content: 'Session A call' }],
       });
     });
 
-    await withSession(sessionB, async () => {
+    await withSession({ userId: 'user_b', window: 'forever' }, async () => {
       await client.chat.completions.create({
         model: 'gpt-4o',
         messages: [{ role: 'user', content: 'Session B call' }],

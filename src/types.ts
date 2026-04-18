@@ -61,6 +61,112 @@ export interface SyrinSDKConfig {
 }
 
 // ---------------------------------------------------------------------------
+// AgentConfig — per-agent observability settings
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-agent observability settings.
+ *
+ * Pass to `sdk.registerAgent()` (or the module-level `registerAgent()`) at any
+ * point after `init()`.  Per-agent settings override SDK-level defaults for that
+ * agent only.  `undefined` means "inherit the SDK-level value".
+ *
+ * @example
+ * ```ts
+ * const sdk = await init({ apiKey: "syrin_..." });
+ *
+ * // Research agent — capture full prompts
+ * sdk.registerAgent({
+ *   agentId: "researcher",
+ *   captureContent: true,
+ *   captureToolCalls: true,
+ *   description: "Web research agent",
+ *   sections: {
+ *     search: {
+ *       fields: [
+ *         { name: "maxResults", type: "int", default: 5 },
+ *       ],
+ *     },
+ *   },
+ * });
+ *
+ * // Classifier — no PII, suppress tool noise
+ * sdk.registerAgent({ agentId: "classifier", captureContent: false, captureToolCalls: false });
+ * ```
+ */
+/**
+ * Metadata for a single remotely-configurable agent config field.
+ * Used in the `fields` map of {@link AgentConfig}.
+ */
+export interface AgentFieldDef {
+  /** Default value — also determines the field type shown in the dashboard. */
+  default: unknown;
+  /** Human-readable label shown in the Syrin dashboard. */
+  label?: string;
+  /** Tooltip text for this field. */
+  description?: string;
+  /** Minimum allowed value (numeric fields). */
+  ge?: number;
+  /** Maximum allowed value (numeric fields). */
+  le?: number;
+  /** Allowed values — rendered as a dropdown. */
+  enum?: unknown[];
+  /** Render as a multiline text area (for system prompts). */
+  multiline?: boolean;
+}
+
+export interface AgentConfig {
+  /** Unique agent identifier — must match the id used in `withAgent("id", ...)`. */
+  agentId: string;
+  /** Optional description shown in the Syrin dashboard. */
+  description?: string;
+  /**
+   * Override SDK-level `captureContent` for this agent only.
+   * `undefined` (default) inherits the SDK-level setting.
+   */
+  captureContent?: boolean;
+  /**
+   * Override tool-event emission (`TOOL_CALL` / `TOOL_RESULT`) for this agent.
+   * `undefined` (default) emits events (SDK default: `true`).
+   * Set `false` to suppress tool events entirely for this agent.
+   */
+  captureToolCalls?: boolean;
+  /**
+   * Flat config field declarations — preferred over `sections` for new code.
+   *
+   * Keys use dot-notation: `"<section>.<fieldName>"`.
+   * Common sections: `"llm"`, `"prompt"`, `"loop"`, `"output"`.
+   *
+   * @example
+   * ```ts
+   * sdk.registerAgent({
+   *   agentId: "react-loop",
+   *   captureContent: true,
+   *   fields: {
+   *     "llm.temperature":        { default: 0.3, ge: 0, le: 2 },
+   *     "llm.maxTokens":          { default: 1024, ge: 128, le: 4096 },
+   *     "loop.maxIterations":     { default: 3, ge: 1, le: 10 },
+   *     "prompt.systemPrompt":    { default: "You are a research agent.", multiline: true },
+   *   },
+   * });
+   * ```
+   */
+  fields?: Record<string, AgentFieldDef>;
+  /**
+   * Config schema sections — lower-level alternative to `fields`.
+   * Ignored when `fields` is provided.
+   */
+  sections?: Record<string, {
+    fields: Array<{
+      name: string;
+      type?: 'str' | 'float' | 'int' | 'bool';
+      default?: unknown;
+      constraints?: { ge?: number; le?: number };
+    }>;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
 // Discriminated union for SyrinEvent
 // ---------------------------------------------------------------------------
 

@@ -18,7 +18,7 @@
  */
 
 import express, { Request, Response } from 'express';
-import { init, shutdown, GovernanceStopError, onAlert, withSession, withAgent } from '@syrin/sdk';
+import { init, shutdown, GovernanceStopError, onAlert, withSession, withAgent, makeSessionId } from '@syrin/sdk';
 
 const PORT = parseInt(process.env['PORT'] ?? '8080', 10);
 const app = express();
@@ -31,17 +31,25 @@ async function start(): Promise<void> {
     name: 'my-agent',
     url: process.env['SYRIN_URL'] ?? 'https://api.syrin.ai',
     serverUrl: process.env['SERVER_URL'] ?? `http://localhost:${PORT}/`,
-    captureContent: true,
+  });
+
+  // ── Register agents — per-agent observability settings ───────────────────
+  // Call registerAgent() any time after init(), before the agent runs.
+  sdk.registerAgent({
+    agentId: 'chat-agent',
+    description: 'Handles multi-turn user conversations',
+    captureContent: false,   // keep user prompts private by default
+    captureToolCalls: true,  // emit TOOL_CALL events for tool-use visibility
   });
 
   onAlert((alert) => console.warn('[ALERT]', JSON.stringify(alert)));
 
   // ── Declare all remotely configurable fields ──────────────────────────────
   // These appear in the Syrin dashboard. Dashboard users can change them live.
-  sdk.cfg('llm.model',             'gpt-4o-mini', { label: 'LLM Model' });
-  sdk.cfg('llm.temperature',        0.7,           { label: 'Temperature',  ge: 0.0, le: 2.0 });
-  sdk.cfg('llm.max_tokens',         1024,          { label: 'Max Tokens',   ge: 1 });
-  sdk.cfg('prompt.system_prompt',  'You are a helpful assistant.', {
+  sdk.cfg('llm.model',            'gpt-4o-mini', { label: 'LLM Model' });
+  sdk.cfg('llm.temperature',       0.7,           { label: 'Temperature', ge: 0.0, le: 2.0 });
+  sdk.cfg('llm.max_tokens',        1024,          { label: 'Max Tokens',  ge: 1 });
+  sdk.cfg('prompt.system_prompt', 'You are a helpful assistant.', {
     label: 'System Prompt',
     multiline: true,
   });
@@ -51,14 +59,18 @@ async function start(): Promise<void> {
   // ── LLM client (OpenAI example — swap for your library) ──────────────────
   let callLLM: (messages: Array<{ role: string; content: string }>) => Promise<string>;
   try {
-    const { default: OpenAI } = await import('openai') as { default: new (opts: { apiKey: string }) => { chat: { completions: { create(opts: unknown): Promise<{ choices: Array<{ message: { content: string } }> }> } } } };
+    const { default: OpenAI } = await import('openai') as {
+      default: new (opts: { apiKey: string }) => {
+        chat: { completions: { create(opts: unknown): Promise<{ choices: Array<{ message: { content: string } }> }> } };
+      };
+    };
     const client = new OpenAI({ apiKey: process.env['OPENAI_API_KEY'] ?? '' });
 
     callLLM = async (messages) => {
-      // Read cfg() values at call time — picks up live dashboard changes
-      const model  = sdk.cfg('llm.model',         'gpt-4o-mini') as string;
-      const temp   = sdk.cfg('llm.temperature',    0.7, { ge: 0, le: 2 }) as number;
-      const maxTok = sdk.cfg('llm.max_tokens',     1024, { ge: 1 }) as number;
+      // Read cfg() at call time — picks up live dashboard changes
+      const model  = sdk.cfg('llm.model',            'gpt-4o-mini') as string;
+      const temp   = sdk.cfg('llm.temperature',       0.7, { ge: 0, le: 2 }) as number;
+      const maxTok = sdk.cfg('llm.max_tokens',        1024, { ge: 1 }) as number;
       const sysPr  = sdk.cfg('prompt.system_prompt', 'You are a helpful assistant.') as string;
 
       const r = await client.chat.completions.create({
@@ -68,7 +80,7 @@ async function start(): Promise<void> {
       return r.choices[0].message.content;
     };
   } catch {
-    callLLM = async (_messages) => '[OpenAI not installed — add your LLM call here]';
+    callLLM = async () => '[OpenAI not installed — add your LLM call here]';
   }
 
   // ── Routes ────────────────────────────────────────────────────────────────
@@ -92,12 +104,14 @@ async function start(): Promise<void> {
       user_id?: string;
     };
 
-    const today     = new Date().toISOString().split('T')[0];
-    const sessionId = `${String(user_id)}_${today}`;
+    // Pre-compute session ID so we can include it in the response.
+    // makeSessionId() is deterministic — calling it again with the same
+    // arguments inside withSession() produces the same ID.
+    const sessionId = makeSessionId({ userId: String(user_id), window: 'day' });
 
     try {
       let reply = '';
-      await withSession(sessionId, async () => {
+      await withSession({ userId: String(user_id), window: 'day' }, async () => {
         await withAgent('chat-agent', async () => {
           reply = await callLLM(messages);
         });

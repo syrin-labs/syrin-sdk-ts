@@ -69,7 +69,7 @@ describe('mountConfigEndpoint()', () => {
     });
 
     // Create a session so there's something to update
-    await withSession('test-session', async () => {});
+    await withSession({ key: 'test-session', window: 'forever' }, async () => {});
 
     const handler = mountConfigEndpoint();
     const req = makeReq({ 'llm.temperature': 0.1 });

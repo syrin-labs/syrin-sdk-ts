@@ -175,6 +175,19 @@ function _emitEvents_impl(
   } as Parameters<typeof emitter.emit>[0], '');
 }
 
+/**
+ * Emit TOOL_CALL + TOOL_RESULT events for a completed tool span.
+ * Used by `instrumentTool()` in the public API.
+ * @internal
+ */
+export function _emitToolEvents(
+  span: ToolSpan,
+  args: Record<string, unknown>,
+  error: unknown,
+): void {
+  _emitWithGlobal(span, args, error ?? undefined);
+}
+
 function _emitWithGlobal(
   span: ToolSpan,
   args: Record<string, unknown> | undefined,

@@ -54,6 +54,14 @@ import { detectProvider } from '@/utils/provider.js';
 // Re-export for convenience
 export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types.js';
 
+function inferType(value: unknown): 'str' | 'float' | 'int' | 'bool' {
+  if (typeof value === 'boolean') return 'bool';
+  if (typeof value === 'number') {
+    return Number.isInteger(value) ? 'int' : 'float';
+  }
+  return 'str';
+}
+
 /** Map ConfigStore TS type names → schema type strings for v2 schema output */
 function _tsTypeToSchemaType(type: string): string {
   const map: Record<string, string> = {
@@ -88,6 +96,9 @@ export class SyrinSDKCore implements ISyrinCore {
   private _autoDetectedDefaults: Record<string, unknown> = {};
   private _autoDetectedSections: Record<string, SchemaField[]> = {};
   private _autoDetectDone = false;
+
+  /** Per-agent registry — populated via registerAgent(). */
+  private readonly _agentRegistry = new Map<string, import('../types.js').AgentConfig>();
 
   constructor(
     readonly config: SyrinSDKConfig,
@@ -204,6 +215,98 @@ export class SyrinSDKCore implements ISyrinCore {
 
   isAdapterInstalled(name: string): boolean {
     return this._adapters.get(name)?.isInstalled() ?? false;
+  }
+
+  // ── Agent registry ───────────────────────────────────────────────────────
+
+  /**
+   * Register per-agent observability settings.
+   *
+   * Stores the AgentConfig and, if the config defines `sections`, registers those
+   * in the ConfigStore under `agents.<agentId>.<section>`.
+   *
+   * Prefer the public `sdk.registerAgent()` API over calling this directly.
+   */
+  registerAgent(agentCfg: import('../types.js').AgentConfig): void {
+    // Convert flat fields dict to sections format when sections is absent
+    if (agentCfg.fields && !agentCfg.sections) {
+      const sections: NonNullable<typeof agentCfg.sections> = {};
+      for (const [dotKey, def] of Object.entries(agentCfg.fields)) {
+        const dot = dotKey.indexOf('.');
+        if (dot === -1) continue;
+        const section = dotKey.slice(0, dot);
+        const fieldName = dotKey.slice(dot + 1);
+        if (!sections[section]) sections[section] = { fields: [] };
+        const entry: Record<string, unknown> = {
+          name: fieldName,
+          default: def.default,
+          type: inferType(def.default),
+        };
+        if (def.ge !== undefined || def.le !== undefined) {
+          entry['constraints'] = { ge: def.ge, le: def.le };
+        }
+        if (def.label) entry['label'] = def.label;
+        if (def.enum) entry['enum'] = def.enum;
+        if (def.multiline) entry['multiline'] = true;
+        sections[section].fields.push(entry as { name: string; default?: unknown; type?: string });
+      }
+      (agentCfg as Record<string, unknown>)['sections'] = sections;
+    }
+
+    this._agentRegistry.set(agentCfg.agentId, agentCfg);
+
+    // Register config schema sections if provided
+    if (agentCfg.sections && this._configStore) {
+      const typeMap: Record<string, unknown> = {
+        str: String,
+        float: Number,
+        int: Number,
+        bool: Boolean,
+      };
+      for (const [secName, secDef] of Object.entries(agentCfg.sections)) {
+        const compoundNs = `agents.${agentCfg.agentId}.${secName}`;
+        const store = this._configStore as unknown as {
+          _sections: Record<string, unknown>;
+          registerSection: (ns: string, fields: Record<string, unknown>) => void;
+        };
+        if (store._sections?.[compoundNs]) continue;
+        const parsed: Record<string, unknown> = {};
+        for (const sf of secDef.fields ?? []) {
+          parsed[sf.name] = {
+            name: sf.name,
+            type: typeMap[sf.type ?? 'str'] ?? String,
+            default: sf.default,
+            ge: sf.constraints?.ge,
+            le: sf.constraints?.le,
+          };
+        }
+        store.registerSection?.(compoundNs, parsed);
+      }
+    }
+  }
+
+  /**
+   * Return effective captureContent for the given agent.
+   * Per-agent setting wins; falls back to SDK-level config.
+   */
+  resolveCaptureContent(agentId: string | null | undefined): boolean {
+    if (agentId) {
+      const cfg = this._agentRegistry.get(agentId);
+      if (cfg?.captureContent !== undefined) return cfg.captureContent;
+    }
+    return this.config.captureContent;
+  }
+
+  /**
+   * Return effective captureToolCalls for the given agent.
+   * Per-agent setting wins; SDK-level default is `true`.
+   */
+  resolveCaptureToolCalls(agentId: string | null | undefined): boolean {
+    if (agentId) {
+      const cfg = this._agentRegistry.get(agentId);
+      if (cfg?.captureToolCalls !== undefined) return cfg.captureToolCalls;
+    }
+    return true; // default: always emit tool events
   }
 
   // ── Schema registration ──────────────────────────────────────────────────
@@ -832,8 +935,8 @@ export class SyrinSDKCore implements ISyrinCore {
       response_char_count: responseText?.length,
       has_refusal: detectRefusal(responseText),
       last_checkpoint_id: updatedSession?.lastCheckpointId,
-      // Full content — only when capture_content=true (off by default for privacy)
-      ...(this.config.captureContent ? {
+      // Full content — resolved per-agent first, then SDK-level setting (off by default).
+      ...(this.resolveCaptureContent(agentId) ? {
         prompt_messages: modifiedMessages,
         ...(responseText != null ? { completion_text: responseText } : {}),
       } : {}),
@@ -849,23 +952,57 @@ export class SyrinSDKCore implements ISyrinCore {
       })(),
     };
 
+    const captureToolCalls = this.resolveCaptureToolCalls(agentId);
+
     // Emit TOOL_RESULT for each role='tool' message BEFORE the LLM_CALL event.
     // These represent tool outputs that were submitted as part of this request,
     // meaning they happened chronologically before the LLM produced its response.
-    for (const msg of ctx.modifiedMessages ?? []) {
-      if ((msg as unknown as Record<string, unknown>)['role'] === 'tool') {
-        const m = msg as unknown as Record<string, unknown>;
-        const toolResultEvent: SyrinEvent = {
+    if (captureToolCalls) {
+      for (const msg of ctx.modifiedMessages ?? []) {
+        if ((msg as unknown as Record<string, unknown>)['role'] === 'tool') {
+          const m = msg as unknown as Record<string, unknown>;
+          const toolResultEvent: SyrinEvent = {
+            event_id: generateId('evt_'),
+            event_type: 'TOOL_RESULT',
+            timestamp: nowIso(),
+            session_id: sessionId,
+            agent_id: agentId ?? undefined,
+            run_id: agentStorage.getStore()?.runId,
+            trace_id: agentStorage.getStore()?.traceId,
+            tool_call_id: (m['tool_call_id'] as string | undefined) ?? '',
+            tool_name:    (m['name']         as string | undefined) ?? '',
+            tool_result:  String(m['content'] ?? ''),
+            model,
+            provider,
+            duration_ms: 0,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0,
+            stream: false,
+            config_applied: false,
+          };
+          try { this._emitter.emit(toolResultEvent, sessionId); } catch { /* fail-open */ }
+        }
+      }
+    }
+
+    this._emitter.emit(event, sessionId);
+
+    // Emit TOOL_CALL for each tool call in the LLM response AFTER the LLM_CALL event.
+    // These represent function calls the model decided to make.
+    if (captureToolCalls) {
+      for (const tc of toolCalls ?? []) {
+        const toolCallEvent: SyrinEvent = {
           event_id: generateId('evt_'),
-          event_type: 'TOOL_RESULT',
+          event_type: 'TOOL_CALL',
           timestamp: nowIso(),
           session_id: sessionId,
           agent_id: agentId ?? undefined,
           run_id: agentStorage.getStore()?.runId,
           trace_id: agentStorage.getStore()?.traceId,
-          tool_call_id: (m['tool_call_id'] as string | undefined) ?? '',
-          tool_name:    (m['name']         as string | undefined) ?? '',
-          tool_result:  String(m['content'] ?? ''),
+          tool_name:      tc.name      ?? '',
+          tool_call_id:   tc.id        ?? '',
+          tool_arguments: tc.arguments ?? '',
           model,
           provider,
           duration_ms: 0,
@@ -875,36 +1012,8 @@ export class SyrinSDKCore implements ISyrinCore {
           stream: false,
           config_applied: false,
         };
-        try { this._emitter.emit(toolResultEvent, sessionId); } catch { /* fail-open */ }
+        try { this._emitter.emit(toolCallEvent, sessionId); } catch { /* fail-open */ }
       }
-    }
-
-    this._emitter.emit(event, sessionId);
-
-    // Emit TOOL_CALL for each tool call in the LLM response AFTER the LLM_CALL event.
-    // These represent function calls the model decided to make.
-    for (const tc of toolCalls ?? []) {
-      const toolCallEvent: SyrinEvent = {
-        event_id: generateId('evt_'),
-        event_type: 'TOOL_CALL',
-        timestamp: nowIso(),
-        session_id: sessionId,
-        agent_id: agentId ?? undefined,
-        run_id: agentStorage.getStore()?.runId,
-        trace_id: agentStorage.getStore()?.traceId,
-        tool_name:      tc.name      ?? '',
-        tool_call_id:   tc.id        ?? '',
-        tool_arguments: tc.arguments ?? '',
-        model,
-        provider,
-        duration_ms: 0,
-        input_tokens: 0,
-        output_tokens: 0,
-        cost_usd: 0,
-        stream: false,
-        config_applied: false,
-      };
-      try { this._emitter.emit(toolCallEvent, sessionId); } catch { /* fail-open */ }
     }
 
     if (this.config.toolValidation && toolCalls?.length) {
@@ -934,8 +1043,8 @@ export class SyrinSDKCore implements ISyrinCore {
       agentId,
       sessionId,
       configApplied,
-      messages: this.config.captureContent ? (modifiedMessages as unknown[]) : undefined,
-      responseText: this.config.captureContent ? responseText : undefined,
+      messages: this.resolveCaptureContent(agentId) ? (modifiedMessages as unknown[]) : undefined,
+      responseText: this.resolveCaptureContent(agentId) ? responseText : undefined,
       // Framework context
       framework: fwCtx?.framework,
       langgraphGraphId: fwCtx?.graphId,

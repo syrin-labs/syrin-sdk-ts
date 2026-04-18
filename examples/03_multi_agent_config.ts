@@ -1,27 +1,31 @@
 /**
  * 03 — Multi-Agent Remote Config
  * --------------------------------
- * When cfg() is called inside a withAgent("name", ...) context,
- * the field is registered under that agent's namespace in the dashboard.
+ * Use sdk.agent() to register each agent AND get a session handle in one step.
+ * Call .run(fn) on the handle to enter the agent context — no separate
+ * registerAgent() + withAgent() pair needed.
  *
- * Dashboard layout:
- *   Global Config
- *     llm.model             ← declared outside withAgent
- *     llm.temperature       ← declared outside withAgent
+ * Each agent has independent observability settings:
+ *   captureContent    → include prompts/completions in telemetry
+ *   captureToolCalls  → emit TOOL_CALL / TOOL_RESULT events
+ *
+ * Dashboard layout after this script:
  *   Agents
- *     query-enhancer
- *       llm.temperature     ← declared inside withAgent("query-enhancer")
+ *     query-enhancer         ← from fields map
+ *       llm.temperature
  *       prompt.system_prompt
- *     summarizer
- *       llm.temperature     ← declared inside withAgent("summarizer")
+ *     summarizer             ← from fields map
+ *       llm.temperature
  *       prompt.system_prompt
- *       output.format
+ *       output.output_format
+ *
+ * Config priority per agent: governance > configure() > remote push > default
  *
  * Run:
  *   SYRIN_API_KEY=syrin_... npx ts-node examples/03_multi_agent_config.ts
  */
 
-import { init, shutdown, withAgent } from '@syrin/sdk';
+import { init, shutdown } from '@syrin/sdk';
 
 async function main() {
   const sdk = await init({
@@ -30,65 +34,65 @@ async function main() {
     url: process.env['SYRIN_URL'] ?? 'https://api.syrin.ai',
   });
 
-  // --- Global config --------------------------------------------------------
-  const globalModel = sdk.cfg('llm.model', 'gpt-4o', {
-    label: 'LLM Model',
-    description: 'Default model for all pipeline stages',
-  });
-  const globalTemp = sdk.cfg('llm.temperature', 0.7, {
-    label: 'Temperature',
-    ge: 0.0,
-    le: 2.0,
-  });
+  // --- sdk.agent() — register AND get a session handle in one step ----------
+  // Keys use "section.fieldName" dot-notation.
+  // The returned handle's .run(fn) enters the agent scope automatically.
 
-  // --- Per-agent config -----------------------------------------------------
-  let enhancerTemp: unknown;
-  let enhancerPrompt: unknown;
-
-  await withAgent('query-enhancer', async () => {
-    enhancerTemp = sdk.cfg('llm.temperature', 0.3, {
-      label: 'Temperature',
-      description: 'Lower = more focused query plans',
-      ge: 0.0,
-      le: 2.0,
-    });
-    enhancerPrompt = sdk.cfg('prompt.system_prompt', 'You are an expert research planner.', {
-      label: 'System Prompt',
-      multiline: true,
-    });
-    // ... your LLM call here
-  });
-
-  let summarizerTemp: unknown;
-  let summarizerPrompt: unknown;
-  let summarizerFormat: unknown;
-
-  await withAgent('summarizer', async () => {
-    summarizerTemp = sdk.cfg('llm.temperature', 0.5, {
-      label: 'Temperature',
-      description: 'Moderate temp for readable summaries',
-      ge: 0.0,
-      le: 2.0,
-    });
-    summarizerPrompt = sdk.cfg('prompt.system_prompt',
-      'You synthesise research into clear marketing briefs.', {
-        label: 'System Prompt',
+  const queryEnhancer = sdk.agent('query-enhancer', {
+    description: "Reformulates and expands the user's query",
+    captureContent: true,
+    captureToolCalls: true,
+    fields: {
+      'llm.temperature':      { default: 0.3, ge: 0.0, le: 2.0, label: 'Temperature' },
+      'prompt.system_prompt': {
+        default: 'You are an expert research planner.',
         multiline: true,
-      });
-    summarizerFormat = sdk.cfg('output.format', 'markdown', {
-      label: 'Output Format',
-      enum: ['markdown', 'json', 'plaintext'],
-    });
+        label: 'System Prompt',
+      },
+    },
+  });
+
+  const summarizer = sdk.agent('summarizer', {
+    description: 'Synthesises research into clear briefs',
+    captureContent: false,
+    captureToolCalls: false,
+    fields: {
+      'llm.temperature':        { default: 0.5, ge: 0.0, le: 2.0, label: 'Temperature' },
+      'prompt.system_prompt':   {
+        default: 'You synthesise research into clear marketing briefs.',
+        multiline: true,
+        label: 'System Prompt',
+      },
+      'output.output_format':   {
+        default: 'markdown',
+        enum: ['markdown', 'json', 'plaintext'],
+        label: 'Output Format',
+      },
+    },
+  });
+
+  // --- Global defaults -------------------------------------------------------
+  sdk.cfg('llm.model', 'gpt-4o');
+  sdk.cfg('llm.temperature', 0.7);
+
+  // --- Run the pipeline ------------------------------------------------------
+  // .run(fn) enters the agent context — cfg() inside is scoped to that agent.
+
+  await queryEnhancer.run(async () => {
+    const temp   = sdk.cfg('llm.temperature', 0.3) as number;
+    const prompt = sdk.cfg('prompt.system_prompt', 'You are an expert research planner.');
+    console.log(`  query-enhancer: temp=${temp}, prompt=${String(prompt).slice(0, 40)}`);
     // ... your LLM call here
   });
 
-  console.log('Pipeline config:');
-  console.log(`  global model        = ${String(globalModel)}`);
-  console.log(`  global temperature  = ${String(globalTemp)}`);
-  console.log(`  enhancer temp       = ${String(enhancerTemp)}`);
-  console.log(`  enhancer prompt     = ${String(enhancerPrompt)}`);
-  console.log(`  summarizer temp     = ${String(summarizerTemp)}`);
-  console.log(`  summarizer format   = ${String(summarizerFormat)}`);
+  await summarizer.run(async () => {
+    const temp   = sdk.cfg('llm.temperature', 0.5) as number;
+    const format = sdk.cfg('output.output_format', 'markdown');
+    const prompt = sdk.cfg('prompt.system_prompt', 'You synthesise research into clear marketing briefs.');
+    console.log(`  summarizer: temp=${temp}, format=${String(format)}`);
+    console.log(`  prompt: ${String(prompt).slice(0, 40)}`);
+    // ... your LLM call here
+  });
 
   await shutdown();
 }
