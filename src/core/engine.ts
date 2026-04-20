@@ -649,15 +649,11 @@ export class SyrinCore implements ISyrinCore {
         prompt_messages: modifiedMessages,
         ...(responseText != null ? { completion_text: responseText } : {}),
       } : {}),
-      // Framework context — injected by Tier 2 adapters (LangGraph, LangChain, etc.)
+      // Framework context — injected by framework adapters via AsyncLocalStorage
       ...(() => {
         const fwCtx = getFrameworkContext();
         if (!fwCtx) return {};
-        return {
-          framework: fwCtx.framework,
-          ...(fwCtx.graphId ? { graph_id: fwCtx.graphId } : {}),
-          ...(fwCtx.nodeName ? { node_name: fwCtx.nodeName } : {}),
-        };
+        return {};
       })(),
     };
 
@@ -724,9 +720,6 @@ export class SyrinCore implements ISyrinCore {
       });
     }
 
-    // Read framework context for OTel attributes
-    const fwCtx = getFrameworkContext();
-
     this._otelBridge.recordSpan({
       model,
       provider,
@@ -747,10 +740,7 @@ export class SyrinCore implements ISyrinCore {
       configApplied,
       messages: this.config.captureContent ? (modifiedMessages as unknown[]) : undefined,
       responseText: this.config.captureContent ? responseText : undefined,
-      // Framework context
-      framework: fwCtx?.framework,
-      langgraphGraphId: fwCtx?.graphId,
-      langgraphNodeName: fwCtx?.nodeName,
+      // Framework context (reserved for future framework adapters)
       // Telemetry signal attributes
       callIndex: updatedSession?.callIndex ?? 0,
       contextUtilization: ctxSize ? parseFloat((totalTokens / ctxSize).toFixed(4)) : undefined,

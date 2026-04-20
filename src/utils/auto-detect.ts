@@ -7,8 +7,6 @@
  *  2. After init(): hook Module._load to catch modules loaded afterward.
  *
  * Note: Pure ESM-only packages (no CJS entry point) won't appear in require.cache.
- * This covers the vast majority of real-world usage since LangChain, LangGraph,
- * Mastra, and most AI frameworks still ship CJS compatibility entry points.
  *
  * A library being present in node_modules does NOT trigger instrumentation —
  * only libraries that are actually loaded/required in the current process.
@@ -22,22 +20,6 @@ import type { SyrinSDKConfig } from '../types.js';
 const WATCHED_LIBRARIES = new Map([
   // OpenAI
   ['openai', { path: '../adapters/openai/index.js', exportName: 'OpenAIAdapter' }],
-  // Anthropic
-  ['@anthropic-ai/sdk', { path: '../adapters/anthropic/index.js', exportName: 'AnthropicAdapter' }],
-  // LangChain — modern split-package installs
-  ['langchain', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
-  ['@langchain/core', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
-  ['@langchain/openai', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
-  ['@langchain/anthropic', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
-  ['@langchain/community', { path: '../adapters/langchain/index.js', exportName: 'LangChainAdapter' }],
-  // LangGraph
-  ['@langchain/langgraph', { path: '../adapters/langgraph/index.js', exportName: 'LangGraphAdapter' }],
-  // Mastra
-  ['@mastra/core', { path: '../adapters/mastra/index.js', exportName: 'MastraAdapter' }],
-  // Vercel AI SDK
-  ['ai', { path: '../adapters/vercel-ai/index.js', exportName: 'VercelAIAdapter' }],
-  ['@ai-sdk/openai', { path: '../adapters/vercel-ai/index.js', exportName: 'VercelAIAdapter' }],
-  ['@ai-sdk/anthropic', { path: '../adapters/vercel-ai/index.js', exportName: 'VercelAIAdapter' }],
 ]);
 
 // Tracks which adapter export names we have already auto-installed in this process.
@@ -48,11 +30,6 @@ function isAlreadyRegistered(core: ISyrinCore, adapterName: string): boolean {
   if (typeof (coreInternal['isAdapterInstalled'] as unknown) === 'function') {
     const exportToAdapterName: Record<string, string> = {
       OpenAIAdapter: 'openai',
-      AnthropicAdapter: 'anthropic',
-      LangChainAdapter: 'langchain',
-      LangGraphAdapter: 'langgraph',
-      MastraAdapter: 'mastra',
-      VercelAIAdapter: 'vercel-ai',
     };
     const stableName = exportToAdapterName[adapterName];
     if (stableName && (coreInternal['isAdapterInstalled'] as (n: string) => boolean)(stableName)) return true;

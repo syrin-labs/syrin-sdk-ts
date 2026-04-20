@@ -24,20 +24,6 @@ to existing agent logic.
 - **OpenAI** — patches `OpenAI.prototype.chat.completions.create` at the prototype
   level (sync, async, streaming). Captures full telemetry per call: model, provider,
   token counts, cost, finish reason, latency, and conversation hash.
-- **Anthropic** — patches `Anthropic.prototype.messages.create` (sync, async,
-  streaming). Normalises Anthropic response format to the shared event schema.
-- **LangChain** — callback-based instrumentation. Emits `CHAIN_EXECUTION` and
-  `LLM_CALL` events. Injects remote config via `RunnableConfig`. Deduplicates
-  LLM events when the Tier 1 prototype patch is active to prevent double-counting.
-- **LangGraph** — patches graph invocation and node execution. Emits
-  `GRAPH_EXECUTION` and `NODE_EXECUTION` events. Supports HITL checkpoints.
-  Injects `recursion_limit`, `thread_id`, and other graph config.
-- **Mastra** — patches `Agent.generate` and `Agent.stream`. Emits `AGENT_RUN`
-  events. Resolves agent instructions from async `getInstructions()`. Injects LLM
-  config into Mastra's `generateOptions`.
-- **Vercel AI SDK** — patches `generateText`, `streamText`, and `generateObject`.
-  Captures token usage from both legacy (`promptTokens`) and new Responses API
-  (`inputTokens`) field names.
 
 #### Auto-detection
 
@@ -45,8 +31,7 @@ to existing agent logic.
 - Libraries imported **before** `init()` are detected via `require.cache` scan.
 - Libraries imported **after** `init()` are detected via a `Module._load` hook
   installed at startup and removed on `shutdown()`.
-- Watched packages: `openai`, `@anthropic-ai/sdk`, `@langchain/core`,
-  `@langchain/langgraph`, `@mastra/core`, `ai`, `@ai-sdk/openai`.
+- Watched packages: `openai`.
 
 #### Two-Tier adapter architecture
 

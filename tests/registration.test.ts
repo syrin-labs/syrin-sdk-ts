@@ -3,21 +3,19 @@
  *
  * Covers:
  *  1. buildSchema with no adapters returns empty sections
- *  2. buildSchema with OpenAI adapter returns llm section with 3 fields
- *  3. buildSchema with LangGraph adapter returns llm + langgraph sections
- *  4. buildSchema deduplicates fields when two adapters declare same section
- *  5. register POSTs to correct URL with schema in body
- *  6. register applies configDelta to ConfigStore
- *  7. register with no agentId is a no-op (no fetch call)
- *  8. register when fetch throws does not propagate the error
- *  9. register is called during init()
+ *  2. buildSchema with OpenAI adapter: adapters are telemetry-only (no schema fields)
+ *  3. buildSchema populates global sections from cfg() calls
+ *  4. register POSTs to correct URL with schema in body
+ *  5. register applies configDelta to ConfigStore
+ *  6. register with no agentId is a no-op (no fetch call)
+ *  7. register when fetch throws does not propagate the error
+ *  8. register is called during init()
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SyrinSDKCore } from '@/core/engine';
 import { ConfigStore } from '@/config/store';
 import { OpenAIAdapter } from '@/adapters/openai/index';
-import { LangGraphAdapter } from '@/adapters/langgraph/index';
 import { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types';
 import type { ISyrinCore, SchemaField } from '@/adapters/types';
 import type { SyrinSDKConfig } from '@/types';
@@ -187,24 +185,6 @@ describe('SyrinSDKCore.buildSchema()', () => {
     expect(fieldNames).toContain('model');
   });
 
-  // -------------------------------------------------------------------------
-  // 4. LangGraph adapter: no longer contributes schema fields via configSchema()
-  // -------------------------------------------------------------------------
-
-  it('LangGraph adapter registers as telemetry-only (no schema fields from adapter)', async () => {
-    const { core } = makeCore();
-
-    const lgAdapter = new LangGraphAdapter();
-    lgAdapter.install = vi.fn().mockResolvedValue(undefined);
-    lgAdapter.isInstalled = vi.fn().mockReturnValue(true);
-    await core.registerAdapter(lgAdapter);
-
-    const schema = core.buildSchema();
-    expect(schema).toMatchObject({ version: 2 });
-    const global = (schema as { global: Record<string, unknown> }).global;
-    // No adapter-contributed fields in v2
-    expect(global['langgraph']).toBeUndefined();
-  });
 });
 
 // ---------------------------------------------------------------------------

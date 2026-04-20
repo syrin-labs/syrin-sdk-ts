@@ -1379,8 +1379,7 @@ function _registerBuiltinFields(configStore: import('./config/store.js').ConfigS
 /**
  * Initialize the Syrin SDK and return an instrumented instance.
  *
- * Automatically patches OpenAI (always), Anthropic, LangChain, LangGraph,
- * Mastra, and Vercel AI SDK providers when their libraries are installed.
+ * Automatically patches OpenAI when the library is installed.
  * Starts the event batcher, registers the agent schema with the backend,
  * and begins the heartbeat keep-alive.
  *
@@ -1395,7 +1394,7 @@ function _registerBuiltinFields(configStore: import('./config/store.js').ConfigS
  * @example
  * import { init } from '@syrin/sdk';
  * const sdk = await init({ apiKey: 'syrin_...', name: 'my-agent' });
- * // All subsequent OpenAI / Anthropic calls are now instrumented automatically
+ * // All subsequent OpenAI calls are now instrumented automatically
  */
 export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInstance> {
   // Capture the call stack NOW (synchronously) before any await — this is the only

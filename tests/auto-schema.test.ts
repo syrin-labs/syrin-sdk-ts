@@ -76,18 +76,3 @@ describe('OpenAI adapter integration', () => {
   });
 });
 
-describe('Anthropic adapter integration', () => {
-  // v2: adapters are telemetry-only, configSchema() returns {}
-  it('configSchema returns empty object (telemetry-only)', async () => {
-    const { AnthropicAdapter } = await import('@/adapters/anthropic/adapter');
-    const schema = new AnthropicAdapter().configSchema();
-    expect(schema).toEqual({});
-  });
-
-  it('no fields are returned by configSchema', async () => {
-    const { AnthropicAdapter } = await import('@/adapters/anthropic/adapter');
-    const schema = new AnthropicAdapter().configSchema();
-    const allNames = Object.values(schema).flatMap(f => f.map(x => x.name));
-    expect(allNames).toHaveLength(0);
-  });
-});

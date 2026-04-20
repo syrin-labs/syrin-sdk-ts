@@ -1,9 +1,9 @@
 /**
  * Syrin SDK — Framework Context
  *
- * Provides AsyncLocalStorage-based context propagation for framework adapters
- * (LangGraph, CrewAI, Agno, Mastra, etc.). Allows adapter code to attach
- * rich execution context that flows transparently through async call chains.
+ * Provides AsyncLocalStorage-based context propagation for framework adapters.
+ * Allows adapter code to attach execution context that flows transparently
+ * through async call chains.
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
@@ -13,22 +13,16 @@ import { AsyncLocalStorage } from 'async_hooks';
 // ---------------------------------------------------------------------------
 
 export interface FrameworkContext {
-  /** Name of the framework, e.g. "langgraph", "crewai", "agno", "mastra" */
-  framework: string;
   /** Active agent ID, if known */
   agentId: string | undefined;
   /** Syrin session ID */
   sessionId: string;
   /** Framework-level run / execution ID */
   runId: string;
-  /** Graph ID (e.g. LangGraph graph name) */
-  graphId?: string;
-  /** Node name within the graph */
-  nodeName?: string;
-  /** Task name (e.g. CrewAI task label) */
-  taskName?: string;
-  /** Arbitrary extra metadata — framework adapters may add any fields here */
-  extra: Record<string, unknown>;
+  /** Workflow ID, if the run is part of a workflow */
+  workflowId?: string;
+  /** Swarm ID, if the run is part of a swarm */
+  swarmId?: string;
 }
 
 // ---------------------------------------------------------------------------
