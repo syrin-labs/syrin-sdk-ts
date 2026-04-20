@@ -2,6 +2,9 @@
  * Syrin SDK — Core TypeScript types
  */
 
+// Alias for backward compat — worktree and new adapters use SyrinConfig
+export type { SyrinSDKConfig as SyrinConfig };
+
 export interface SyrinSDKConfig {
   apiKey: string;
   agentId?: string;
@@ -58,6 +61,24 @@ export interface SyrinSDKConfig {
    * Defaults to process.cwd(). Set per-process for isolated config directories.
    */
   configDir?: string;
+}
+
+/** A single input field declaration for a run endpoint. */
+export interface RunInputFieldDef {
+  /** Field identifier — becomes the JSON payload key. */
+  name: string;
+  /** Field type. Defaults to `'str'`. */
+  type?: 'str' | 'float' | 'int' | 'bool';
+  /** Whether the field is required. */
+  required?: boolean;
+  /** Human-readable label shown in the dashboard form. */
+  label?: string;
+  /** Tooltip / helper text shown next to the field. */
+  description?: string;
+  /** Example value shown as placeholder in the dashboard form. */
+  example?: string | number | boolean;
+  /** Default value pre-filled in the dashboard form. */
+  default?: unknown;
 }
 
 // ---------------------------------------------------------------------------
@@ -653,8 +674,8 @@ export interface SyrinSDK {
   ): Promise<{ checkpointId: string; label?: string; messages: Array<Record<string, unknown>> }>;
   /** Restore messages from a saved checkpoint. Returns `undefined` if not found. */
   restoreCheckpoint(checkpointId: string): Promise<Array<Record<string, unknown>> | undefined>;
-  /** Register a custom adapter after init(). Returns `this` for chaining. */
-  registerAdapter(adapter: import('./adapters/types.js').SyrinSDKAdapter): Promise<this>;
+  /** Introspect schema and register endpoint run form fields. Returns `this` for chaining. */
+  registerEndpoint(endpoint: string, schema: unknown): Promise<this>;
   /** Flush all pending events immediately. */
   flush(): Promise<void>;
   /** Flush, stop heartbeat, and clean up. */

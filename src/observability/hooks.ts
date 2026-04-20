@@ -12,11 +12,17 @@
  *   });
  */
 
+import type { SyrinEvent } from '@/types.js';
+
 type ConfigChangeHook = (sessionId: string, updates: Record<string, unknown>) => void;
 type AlertHook = (action: Record<string, unknown>) => void;
+export type EventListener = (event: SyrinEvent) => void;
 
 const _configChangeHooks: ConfigChangeHook[] = [];
 const _alertHooks: AlertHook[] = [];
+
+/** Map from event_type (or null for catch-all) to listeners. */
+const _eventListeners: Map<string | null, EventListener[]> = new Map();
 
 // ---------------------------------------------------------------------------
 // Registration
@@ -57,6 +63,44 @@ export function fireAlert(action: Record<string, unknown>): void {
 }
 
 // ---------------------------------------------------------------------------
+// Event listener registry (sdk.on())
+// ---------------------------------------------------------------------------
+
+/**
+ * Register a listener for a specific event type (or all events when `eventType` is null).
+ * Returns an unsubscribe function that removes the listener when called.
+ */
+export function registerEventListener(
+  eventType: string | null,
+  fn: EventListener,
+): () => void {
+  const list = _eventListeners.get(eventType) ?? [];
+  list.push(fn);
+  _eventListeners.set(eventType, list);
+  return () => {
+    const updated = (_eventListeners.get(eventType) ?? []).filter(f => f !== fn);
+    _eventListeners.set(eventType, updated);
+  };
+}
+
+/**
+ * Dispatch a SyrinEvent to all registered listeners.
+ * Called by the Emitter whenever an event is queued.
+ */
+export function dispatchEvent(event: SyrinEvent): void {
+  // Type-specific listeners
+  const typed = _eventListeners.get(event.event_type) ?? [];
+  for (const fn of typed) {
+    try { fn(event); } catch { /* swallow — listeners must not crash the SDK */ }
+  }
+  // Catch-all listeners (null key)
+  const all = _eventListeners.get(null) ?? [];
+  for (const fn of all) {
+    try { fn(event); } catch { /* swallow */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 
@@ -64,4 +108,5 @@ export function fireAlert(action: Record<string, unknown>): void {
 export function clearHooks(): void {
   _configChangeHooks.length = 0;
   _alertHooks.length = 0;
+  _eventListeners.clear();
 }

@@ -134,7 +134,7 @@ export class ConfigSync {
     if (!this._opts.agentId) return null;
 
     try {
-      const resp = await fetch(`${this._opts.backendUrl}/agents/${this._opts.agentId}/overrides`, {
+      const resp = await fetch(`${this._opts.backendUrl}/api/v1/agents/${this._opts.agentId}/overrides`, {
         headers: { Authorization: `Bearer ${this._opts.apiKey}` },
         signal: AbortSignal.timeout(5_000),
       });

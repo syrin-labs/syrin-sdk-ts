@@ -4,9 +4,9 @@
 
 import { withFrameworkContext } from '@/agent/framework-context.js';
 import { generateId } from '@/utils/helpers.js';
-import type { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types.js';
+import type { BaseFrameworkAdapter } from '@/adapters/types.js';
 
-export interface VercelAIAdapterLike extends SyrinSDKBaseFrameworkAdapter {
+export interface VercelAIAdapterLike extends BaseFrameworkAdapter {
   readonly agentId: string | undefined;
   readonly sessionId: string | undefined;
   readonly captureContent: boolean;
@@ -62,16 +62,15 @@ export function makeGenerateTextWrapper(
   adapter: VercelAIAdapterLike,
   origFn: (...args: unknown[]) => unknown,
 ): (...args: unknown[]) => Promise<unknown> {
-  return async function patchedGenerateText(
-    opts: unknown,
+  return (async function patchedGenerateText(
+    opts: Record<string, unknown>,
     ...rest: unknown[]
   ): Promise<unknown> {
-    const optsObj = (opts as Record<string, unknown>) ?? {};
-    const { modelId, provider } = extractModelInfo(optsObj['model']);
+    const { modelId, provider } = extractModelInfo(opts['model']);
 
     const llmCfg = adapter.getConfig('llm');
     const vercelCfg = adapter.getConfig('vercel');
-    const injectedOpts = _injectLlmConfig(optsObj, llmCfg, vercelCfg);
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, vercelCfg);
 
     const runId = generateId('vairun_');
     const start = Date.now();
@@ -137,23 +136,22 @@ export function makeGenerateTextWrapper(
         }
       },
     );
-  };
+  }) as unknown as (...args: unknown[]) => Promise<unknown>;
 }
 
 export function makeStreamTextWrapper(
   adapter: VercelAIAdapterLike,
   origFn: (...args: unknown[]) => unknown,
 ): (...args: unknown[]) => unknown {
-  return function patchedStreamText(
-    opts: unknown,
+  return (function patchedStreamText(
+    opts: Record<string, unknown>,
     ...rest: unknown[]
   ): unknown {
-    const optsObj = (opts as Record<string, unknown>) ?? {};
-    const { modelId, provider } = extractModelInfo(optsObj['model']);
+    const { modelId, provider } = extractModelInfo(opts['model']);
 
     const llmCfg = adapter.getConfig('llm');
     const vercelCfg = adapter.getConfig('vercel');
-    const injectedOpts = _injectLlmConfig(optsObj, llmCfg, vercelCfg);
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, vercelCfg);
 
     const start = Date.now();
 
@@ -211,23 +209,22 @@ export function makeStreamTextWrapper(
         };
       },
     );
-  };
+  }) as unknown as (...args: unknown[]) => unknown;
 }
 
 export function makeGenerateObjectWrapper(
   adapter: VercelAIAdapterLike,
   origFn: (...args: unknown[]) => unknown,
 ): (...args: unknown[]) => Promise<unknown> {
-  return async function patchedGenerateObject(
-    opts: unknown,
+  return (async function patchedGenerateObject(
+    opts: Record<string, unknown>,
     ...rest: unknown[]
   ): Promise<unknown> {
-    const optsObj = (opts as Record<string, unknown>) ?? {};
-    const { modelId, provider } = extractModelInfo(optsObj['model']);
+    const { modelId, provider } = extractModelInfo(opts['model']);
 
     const llmCfg = adapter.getConfig('llm');
     const vercelCfg = adapter.getConfig('vercel');
-    const injectedOpts = _injectLlmConfig(optsObj, llmCfg, vercelCfg);
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, vercelCfg);
 
     const runId = generateId('vairun_');
     const start = Date.now();
@@ -282,5 +279,5 @@ export function makeGenerateObjectWrapper(
         }
       },
     );
-  };
+  }) as unknown as (...args: unknown[]) => Promise<unknown>;
 }

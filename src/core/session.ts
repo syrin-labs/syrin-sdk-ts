@@ -78,6 +78,21 @@ function _validateConfigValue(key: string, value: unknown): boolean {
 export class SessionStore {
   private sessions: Map<string, SessionState> = new Map();
   private mutex = new AsyncMutex();
+  private _cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor() {
+    this._cleanupTimer = setInterval(() => {
+      this.clearStaleSessions();
+    }, 60 * 60 * 1000); // hourly
+    if (this._cleanupTimer?.unref) this._cleanupTimer.unref();
+  }
+
+  dispose(): void {
+    if (this._cleanupTimer) {
+      clearInterval(this._cleanupTimer);
+      this._cleanupTimer = null;
+    }
+  }
 
   /**
    * Get existing session or create a new one.

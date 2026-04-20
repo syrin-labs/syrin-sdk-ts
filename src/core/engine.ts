@@ -14,17 +14,15 @@
  * to plug any LLM SDK into this engine without re-implementing any of the above.
  */
 
-import type { SyrinSDKConfig, SyrinEvent } from '@/types.js';
+import type { SyrinConfig, SyrinEvent } from '@/types.js';
 import { SDK_VERSION } from '@/config/config.js';
 import type { SessionStore } from '@/core/session.js';
 import { sessionStorage } from '@/core/session.js';
 import type { Emitter } from '@/observability/emitter.js';
 import type { OTelBridge } from '@/observability/otel.js';
 import type { CheckpointClient } from '@/core/checkpoint.js';
-import type { ConfigStore, FieldSchema as StoreFieldSchema } from '@/config/store.js';
-import type { TunableRegistry } from '@/tunable/tunable.js';
 import type {
-  SyrinSDKAdapter,
+  SyrinAdapter,
   ISyrinCore,
   NormalizedCallParams,
   NormalizedCallResult,
@@ -54,147 +52,99 @@ import { detectProvider } from '@/utils/provider.js';
 // Re-export for convenience
 export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types.js';
 
-function inferType(value: unknown): 'str' | 'float' | 'int' | 'bool' {
-  if (typeof value === 'boolean') return 'bool';
-  if (typeof value === 'number') {
-    return Number.isInteger(value) ? 'int' : 'float';
-  }
-  return 'str';
-}
+export class SyrinCore implements ISyrinCore {
+  private readonly _adapters = new Map<string, SyrinAdapter>();
 
-/** Map ConfigStore TS type names → schema type strings for v2 schema output */
-function _tsTypeToSchemaType(type: string): string {
-  const map: Record<string, string> = {
-    number: 'float',
-    string: 'str',
-    boolean: 'bool',
-    array: 'str',
-    object: 'str',
-  };
-  return map[type] ?? 'str';
-}
+  /** ConfigStore wired in by init() — exposes remote config to adapters. */
+  _configStore: import('../config/store.js').ConfigStore | null = null;
 
-export class SyrinSDKCore implements ISyrinCore {
-  private readonly _adapters = new Map<string, SyrinSDKAdapter>();
+  /** TunableRegistry wired in by init(). */
+  private _tunableRegistry: import('../tunable/tunable.js').TunableRegistry | null = null;
 
-  /**
-   * Optional ConfigStore wired in by init() — exposes remote config to framework adapters.
-   * @internal Set by init() after construction; typed via getter.
-   */
-  private _configStore: ConfigStore | null = null;
-
-  /**
-   * Optional TunableRegistry wired in by init() — exposes @tunable params to the core.
-   * @internal Set by init() after construction; typed via getter.
-   */
-  private _tunableRegistry: TunableRegistry | null = null;
-
-  /** Code-scan state — populated at init() from static analysis of the user's source files. */
+  /** Code-scan defaults populated at init() time. */
   private _codeScannedDefaults: Array<{ path: string; default: unknown }> = [];
 
-  /** Auto-detection state — populated from the first LLM call's params. */
-  private _autoDetectedDefaults: Record<string, unknown> = {};
-  private _autoDetectedSections: Record<string, SchemaField[]> = {};
-  private _autoDetectDone = false;
-
-  /** Per-agent registry — populated via registerAgent(). */
+  /** Per-agent observability settings — populated via registerAgent(). */
   private readonly _agentRegistry = new Map<string, import('../types.js').AgentConfig>();
 
+  /** Endpoint input schemas — populated via registerEndpoint(). */
+  private readonly _endpointInputs = new Map<string, unknown>();
+
   constructor(
-    readonly config: SyrinSDKConfig,
+    readonly config: SyrinConfig,
     readonly sessionStore: SessionStore,
     private readonly _emitter: Emitter,
     private readonly _otelBridge: OTelBridge,
     readonly checkpointClient: CheckpointClient,
   ) {}
 
-  // ── Typed accessors ──────────────────────────────────────────────────────
+  // ── Config/tunable wiring ────────────────────────────────────────────────
 
-  /**
-   * Typed accessor for the ConfigStore wired in by init().
-   * @returns The ConfigStore instance, or null if not yet wired.
-   */
-  getConfigStore(): ConfigStore | null {
-    return this._configStore;
-  }
-
-  /**
-   * Wire a ConfigStore into the core. Called by init() after construction.
-   * @param store - The ConfigStore instance to wire.
-   */
-  setConfigStore(store: ConfigStore): void {
+  setConfigStore(store: import('../config/store.js').ConfigStore): void {
     this._configStore = store;
   }
 
-  /**
-   * Typed accessor for the TunableRegistry wired in by init().
-   * @returns The TunableRegistry instance, or null if not yet wired.
-   */
-  getTunableRegistry(): TunableRegistry | null {
-    return this._tunableRegistry;
+  getConfigStore(): import('../config/store.js').ConfigStore | null {
+    return this._configStore;
   }
 
-  /**
-   * Wire a TunableRegistry into the core. Called by init() after construction.
-   * @param registry - The TunableRegistry instance to wire.
-   */
-  setTunableRegistry(registry: TunableRegistry): void {
+  setTunableRegistry(registry: import('../tunable/tunable.js').TunableRegistry): void {
     this._tunableRegistry = registry;
   }
 
-  /**
-   * Store defaults detected by scanning the user's source files at init() time.
-   * Called by init() once, before the first LLM call.
-   */
+  getTunableRegistry(): import('../tunable/tunable.js').TunableRegistry | null {
+    return this._tunableRegistry;
+  }
+
   setCodeScannedDefaults(defaults: Array<{ path: string; default: unknown }>): void {
     this._codeScannedDefaults = defaults;
   }
 
-  /**
-   * Typed accessor for the Emitter instance.
-   * @returns The Emitter instance used for telemetry emission.
-   */
   getEmitter(): Emitter {
     return this._emitter;
   }
 
+  // ── Agent / endpoint registry ────────────────────────────────────────────
+
+  registerAgent(config: import('../types.js').AgentConfig): void {
+    this._agentRegistry.set(config.agentId, config);
+    if (config.sections && this._configStore) {
+      for (const [secName, secDef] of Object.entries(config.sections)) {
+        const ns = `agents.${config.agentId}.${secName}`;
+        try {
+          const fields: Record<string, { type: unknown; default?: unknown }> = {};
+          for (const f of (secDef as { fields?: Array<{ name: string; type?: string; default?: unknown }> }).fields ?? []) {
+            fields[f.name] = { type: f.type ?? 'str', default: f.default };
+          }
+          this._configStore.registerSection(ns, fields as Parameters<typeof this._configStore.registerSection>[1]);
+        } catch { /* ignore registration errors */ }
+      }
+    }
+  }
+
+  getAgentConfig(agentId: string): import('../types.js').AgentConfig | undefined {
+    return this._agentRegistry.get(agentId);
+  }
+
+  async registerEndpoint(endpoint: string, schema: unknown): Promise<void> {
+    this._endpointInputs.set(endpoint, schema);
+  }
+
   // ── Adapter registry ────────────────────────────────────────────────────
 
-  /**
-   * Register and install an adapter into the core.
-   * Validates that the adapter satisfies the SyrinSDKAdapter interface.
-   * Idempotent — re-registering the same adapter name replaces the old one.
-   *
-   * @param adapter - Object implementing SyrinSDKAdapter (must have install, uninstall, isInstalled, name, configSchema).
-   * @throws Error if the passed object does not implement SyrinSDKAdapter.
-   *
-   * @example
-   * await core.registerAdapter(new OpenAIAdapter());
-   */
-  async registerAdapter(adapter: SyrinSDKAdapter): Promise<void> {
-    // Task 8: validate that the object actually implements SyrinSDKAdapter
-    if (
-      !adapter ||
-      typeof adapter !== 'object' ||
-      typeof (adapter).install !== 'function' ||
-      typeof (adapter).uninstall !== 'function' ||
-      typeof (adapter).isInstalled !== 'function' ||
-      typeof (adapter).name !== 'string' ||
-      typeof (adapter).configSchema !== 'function'
-    ) {
-      throw new Error(
-        `[Syrin] registerAdapter() requires an object implementing SyrinSDKAdapter (with install, uninstall, isInstalled, name, configSchema). Got: ${typeof adapter}`
-      );
+  async registerAdapter(adapter: SyrinAdapter): Promise<void> {
+    if (!adapter || typeof adapter !== 'object' ||
+        typeof adapter.install !== 'function' ||
+        typeof adapter.uninstall !== 'function' ||
+        typeof adapter.isInstalled !== 'function' ||
+        typeof adapter.name !== 'string' ||
+        typeof adapter.configSchema !== 'function') {
+      throw new Error(`[Syrin] registerAdapter() requires an object implementing SyrinSDKAdapter. Got: ${typeof adapter}`);
     }
-    // Skip install if this adapter instance reports itself as already installed.
-    // This prevents double-patching when auto-detection and explicit registration
-    // both run (e.g. OpenAI detected at init() then registerAdapter(new OpenAIAdapter()) called).
-    if (adapter.isInstalled()) {
-      // Re-register in the map so the reference is kept current, but don't re-install.
+    // Idempotent: if same adapter name is already installed, skip install() call
+    const existing = this._adapters.get(adapter.name);
+    if (existing?.isInstalled()) {
       this._adapters.set(adapter.name, adapter);
-      if (this.config.debug) {
-        console.log(`[Syrin] Adapter "${adapter.name}" is already installed — skipping re-install.`);
-      }
       return;
     }
     this._adapters.set(adapter.name, adapter);
@@ -217,204 +167,81 @@ export class SyrinSDKCore implements ISyrinCore {
     return this._adapters.get(name)?.isInstalled() ?? false;
   }
 
-  // ── Agent registry ───────────────────────────────────────────────────────
-
-  /**
-   * Register per-agent observability settings.
-   *
-   * Stores the AgentConfig and, if the config defines `sections`, registers those
-   * in the ConfigStore under `agents.<agentId>.<section>`.
-   *
-   * Prefer the public `sdk.registerAgent()` API over calling this directly.
-   */
-  registerAgent(agentCfg: import('../types.js').AgentConfig): void {
-    // Convert flat fields dict to sections format when sections is absent
-    if (agentCfg.fields && !agentCfg.sections) {
-      const sections: NonNullable<typeof agentCfg.sections> = {};
-      for (const [dotKey, def] of Object.entries(agentCfg.fields)) {
-        const dot = dotKey.indexOf('.');
-        if (dot === -1) continue;
-        const section = dotKey.slice(0, dot);
-        const fieldName = dotKey.slice(dot + 1);
-        if (!sections[section]) sections[section] = { fields: [] };
-        const entry: Record<string, unknown> = {
-          name: fieldName,
-          default: def.default,
-          type: inferType(def.default),
-        };
-        if (def.ge !== undefined || def.le !== undefined) {
-          entry['constraints'] = { ge: def.ge, le: def.le };
-        }
-        if (def.label) entry['label'] = def.label;
-        if (def.enum) entry['enum'] = def.enum;
-        if (def.multiline) entry['multiline'] = true;
-        sections[section].fields.push(entry as { name: string; default?: unknown; type?: string });
-      }
-      (agentCfg as Record<string, unknown>)['sections'] = sections;
-    }
-
-    this._agentRegistry.set(agentCfg.agentId, agentCfg);
-
-    // Register config schema sections if provided
-    if (agentCfg.sections && this._configStore) {
-      const typeMap: Record<string, unknown> = {
-        str: String,
-        float: Number,
-        int: Number,
-        bool: Boolean,
-      };
-      for (const [secName, secDef] of Object.entries(agentCfg.sections)) {
-        const compoundNs = `agents.${agentCfg.agentId}.${secName}`;
-        const store = this._configStore as unknown as {
-          _sections: Record<string, unknown>;
-          registerSection: (ns: string, fields: Record<string, unknown>) => void;
-        };
-        if (store._sections?.[compoundNs]) continue;
-        const parsed: Record<string, unknown> = {};
-        for (const sf of secDef.fields ?? []) {
-          parsed[sf.name] = {
-            name: sf.name,
-            type: typeMap[sf.type ?? 'str'] ?? String,
-            default: sf.default,
-            ge: sf.constraints?.ge,
-            le: sf.constraints?.le,
-          };
-        }
-        store.registerSection?.(compoundNs, parsed);
-      }
-    }
-  }
-
-  /**
-   * Return effective captureContent for the given agent.
-   * Per-agent setting wins; falls back to SDK-level config.
-   */
-  resolveCaptureContent(agentId: string | null | undefined): boolean {
-    if (agentId) {
-      const cfg = this._agentRegistry.get(agentId);
-      if (cfg?.captureContent !== undefined) return cfg.captureContent;
-    }
-    return this.config.captureContent;
-  }
-
-  /**
-   * Return effective captureToolCalls for the given agent.
-   * Per-agent setting wins; SDK-level default is `true`.
-   */
-  resolveCaptureToolCalls(agentId: string | null | undefined): boolean {
-    if (agentId) {
-      const cfg = this._agentRegistry.get(agentId);
-      if (cfg?.captureToolCalls !== undefined) return cfg.captureToolCalls;
-    }
-    return true; // default: always emit tool events
-  }
-
   // ── Schema registration ──────────────────────────────────────────────────
 
   /**
-   * Build a v2 schema from ConfigStore compound namespaces (global.section, agents.id.section)
-   * populated by cfg() calls, plus TunableRegistry sections.
-   *
-   * Returns: { version: 2, agent_id, global: { sectionName: { fields: [...] } }, agents: { ... } }
+   * Merge configSchema() from all installed adapters that expose it.
+   * First-writer wins: if two adapters declare the same section+field, the first one wins.
    */
   buildSchema(): Record<string, unknown> {
-    const globalSections: Record<string, { fields: Record<string, unknown>[] }> = {};
-    const agentsCfgSections: Record<string, Record<string, { fields: Record<string, unknown>[] }>> = {};
+    // v2 format: { version: 2, agent_id, global: { [section]: { fields: [...] } }, agents: {} }
+    const globalSections: Record<string, Record<string, SchemaField>> = {};
 
-    // 1. Read from ConfigStore compound namespaces (global.section, agents.id.section)
-    //    This is populated by cfg() calls — primary schema source
-    const configStore = this._configStore;
-    if (configStore) {
-      const schemas = (configStore as unknown as { _sections: Record<string, Record<string, StoreFieldSchema>> })._sections;
-      for (const [namespace, fieldMap] of Object.entries(schemas)) {
-        if (namespace.startsWith('global.')) {
-          const section = namespace.slice('global.'.length);
-          if (!globalSections[section]) {
-            globalSections[section] = { fields: [] };
-          }
-          for (const [fieldName, fs] of Object.entries(fieldMap)) {
-            const fieldOut: Record<string, unknown> = {
-              name: fieldName,
-              path: `global.${section}.${fieldName}`,
-              type: _tsTypeToSchemaType(fs.type),
-              default: fs.default ?? null,
-            };
-            if (fs.label) fieldOut['label'] = fs.label;
-            if (fs.description) fieldOut['description'] = fs.description;
-            if (fs.multiline) fieldOut['multiline'] = fs.multiline;
-            const constraints: Record<string, unknown> = {};
-            if (fs.ge !== undefined) constraints['ge'] = fs.ge;
-            if (fs.le !== undefined) constraints['le'] = fs.le;
-            if (fs.enum !== undefined) constraints['enum'] = fs.enum;
-            if (Object.keys(constraints).length > 0) fieldOut['constraints'] = constraints;
-            globalSections[section].fields.push(fieldOut);
-          }
-        } else if (namespace.startsWith('agents.')) {
-          const rest = namespace.slice('agents.'.length);
-          const dot = rest.lastIndexOf('.');
-          if (dot !== -1) {
-            const agentId = rest.slice(0, dot);
-            const section = rest.slice(dot + 1);
-            if (!agentsCfgSections[agentId]) agentsCfgSections[agentId] = {};
-            const sectionFields: Record<string, unknown>[] = [];
-            for (const [fieldName, fs] of Object.entries(fieldMap)) {
-              const fieldOut: Record<string, unknown> = {
-                name: fieldName,
-                path: `agents.${agentId}.${section}.${fieldName}`,
-                type: _tsTypeToSchemaType(fs.type),
-                default: fs.default ?? null,
-              };
-              if (fs.label) fieldOut['label'] = fs.label;
-              if (fs.description) fieldOut['description'] = fs.description;
-              if (fs.multiline) fieldOut['multiline'] = fs.multiline;
-              const constraints: Record<string, unknown> = {};
-              if (fs.ge !== undefined) constraints['ge'] = fs.ge;
-              if (fs.le !== undefined) constraints['le'] = fs.le;
-              if (fs.enum !== undefined) constraints['enum'] = fs.enum;
-              if (Object.keys(constraints).length > 0) fieldOut['constraints'] = constraints;
-              sectionFields.push(fieldOut);
-            }
-            agentsCfgSections[agentId][section] = { fields: sectionFields };
+    // 1. Adapter schemas (adapters are telemetry-only so typically return {})
+    for (const adapter of this._adapters.values()) {
+      const adapterSchema = adapter.configSchema();
+      for (const [sectionName, fields] of Object.entries(adapterSchema)) {
+        if (!globalSections[sectionName]) globalSections[sectionName] = {};
+        for (const field of fields) {
+          if (!globalSections[sectionName][field.name]) {
+            globalSections[sectionName][field.name] = field;
           }
         }
       }
     }
 
-    // 2. Add TunableRegistry sections to global
-    const tunableSchemas = this._tunableRegistry?.exportSchemas() ?? {};
-    const tunableTypeMap: Record<string, string> = {
-      boolean: 'bool', number: 'float', string: 'str', array: 'str', object: 'str',
-    };
-    for (const [ns, fieldMap] of Object.entries(tunableSchemas)) {
-      if (!globalSections[ns]) globalSections[ns] = { fields: [] };
-      for (const [fieldName, fs] of Object.entries(fieldMap)) {
-        if (globalSections[ns].fields.some((f) => (f)['name'] === fieldName)) continue;
-        const constraints: Record<string, unknown> = {};
-        if (fs.ge !== undefined) constraints['ge'] = fs.ge;
-        if (fs.le !== undefined) constraints['le'] = fs.le;
-        if (fs.enum !== undefined) constraints['enum'] = fs.enum;
-        const fieldOut: Record<string, unknown> = {
-          name: fieldName,
-          path: `global.${ns}.${fieldName}`,
-          type: tunableTypeMap[fs.type] ?? 'str',
-          default: fs.default ?? null,
-        };
-        if (Object.keys(constraints).length > 0) fieldOut['constraints'] = constraints;
-        globalSections[ns].fields.push(fieldOut);
+    // 2. ConfigStore compound namespaces (from cfg() calls): 'global.llm' → 'llm' section
+    const configStore = this._configStore;
+    if (configStore) {
+      const storeSections = (configStore as unknown as { _sections: Record<string, Record<string, Record<string, unknown>>> })._sections ?? {};
+      for (const [ns, fields] of Object.entries(storeSections)) {
+        // Only handle 'global.*' namespaces for the global schema
+        if (!ns.startsWith('global.')) continue;
+        const sectionName = ns.slice('global.'.length);
+        if (!globalSections[sectionName]) globalSections[sectionName] = {};
+        for (const [fieldName, rawField] of Object.entries(fields)) {
+          if (!globalSections[sectionName][fieldName]) {
+            // Normalize: flat ge/le into nested constraints object
+            const field = rawField as Record<string, unknown>;
+            const constraints: Record<string, number> = {};
+            if (field['ge'] != null) constraints['ge'] = field['ge'] as number;
+            if (field['le'] != null) constraints['le'] = field['le'] as number;
+            if (field['gt'] != null) constraints['gt'] = field['gt'] as number;
+            if (field['lt'] != null) constraints['lt'] = field['lt'] as number;
+            const normalized: SchemaField = {
+              name: fieldName,
+              type: (field['type'] as SchemaField['type']) ?? 'str',
+              default: field['default'] ?? null,
+              ...(Object.keys(constraints).length ? { constraints } : {}),
+            };
+            globalSections[sectionName][fieldName] = normalized;
+          }
+        }
       }
     }
 
-    // 3. Build agents output — merge cfg() sections
-    const agentsOut: Record<string, unknown> = {};
-    for (const [agentId, sections] of Object.entries(agentsCfgSections)) {
-      agentsOut[agentId] = { sections };
+    // 3. Apply schemaDefaults
+    const defaults = this.config.schemaDefaults ?? {};
+    for (const [path, value] of Object.entries(defaults)) {
+      const dot = path.indexOf('.');
+      if (dot === -1) continue;
+      const sec = path.slice(0, dot);
+      const fieldName = path.slice(dot + 1);
+      if (globalSections[sec]?.[fieldName]) {
+        globalSections[sec][fieldName] = { ...globalSections[sec][fieldName], default: value };
+      }
     }
 
     return {
       version: 2,
       agent_id: this.config.agentId,
-      global: globalSections,
-      agents: agentsOut,
+      global: Object.fromEntries(
+        Object.entries(globalSections).map(([sec, fields]) => [
+          sec,
+          { fields: Object.values(fields) },
+        ])
+      ),
+      agents: {},
     };
   }
 
@@ -423,28 +250,20 @@ export class SyrinSDKCore implements ISyrinCore {
    * Applies any configDelta returned by the backend into the ConfigStore.
    * Non-fatal — network errors are silently swallowed.
    */
-  /** Explicit framework override — set by init() options.agentFramework */
-  private _agentFramework?: string;
-
-  setAgentFramework(framework: string): void {
-    this._agentFramework = framework;
-  }
-
   async register(): Promise<void> {
     const agentId = this.config.agentId;
     if (!agentId) return;
 
     const schema = this.buildSchema();
-    const detectedFramework = this._agentFramework ?? this._detectFramework();
-    const payload: Record<string, unknown> = {
+    const payload = {
       agent_id: agentId,
+      agent_framework: this._detectFramework(),
       sdk: { language: 'typescript', version: SDK_VERSION },
       schema,
+      server_url: this.config.serverUrl ?? null,
     };
-    if (detectedFramework != null) payload['agent_framework'] = detectedFramework;
-    if (this.config.serverUrl != null) payload['server_url'] = this.config.serverUrl;
 
-    const url = `${this.config.backendUrl}/agents/${agentId}/register`;
+    const url = `${this.config.backendUrl}/api/v1/agents/${agentId}/register`;
 
     try {
       const res = await fetch(url, {
@@ -459,7 +278,7 @@ export class SyrinSDKCore implements ISyrinCore {
       if (res.ok) {
         const body = await res.json() as { configDelta?: Record<string, unknown> };
         const delta = body.configDelta ?? {};
-        const configStore = this._configStore;
+        const configStore = (this as unknown as { _configStore?: { set(ns: string, key: string, value: unknown): void } })._configStore;
         if (configStore) {
           for (const [path, value] of Object.entries(delta)) {
             const dot = path.indexOf('.');
@@ -476,10 +295,16 @@ export class SyrinSDKCore implements ISyrinCore {
     }
   }
 
-  private _detectFramework(): string | undefined {
-    // Return the first Tier-2 (orchestration) adapter name, if any.
-    // LLM provider adapters (openai, anthropic) are NOT a "framework" —
-    // report undefined when only Tier-1 adapters are present.
+  /** Optional manual override — set via setAgentFramework(). */
+  private _agentFramework: string | undefined = undefined;
+
+  setAgentFramework(framework: string): void {
+    this._agentFramework = framework;
+  }
+
+  _detectFramework(): string | undefined {
+    if (this._agentFramework) return this._agentFramework;
+    // Return first orchestration/framework adapter — LLM providers (openai, anthropic) are NOT a framework
     const llmProviders = new Set(['openai', 'anthropic']);
     for (const adapter of this._adapters.values()) {
       if (!llmProviders.has(adapter.name)) {
@@ -492,72 +317,6 @@ export class SyrinSDKCore implements ISyrinCore {
   // ── Call lifecycle ───────────────────────────────────────────────────────
 
   /**
-   * Auto-detect schema defaults from the first intercepted LLM call.
-   * Extracts model, temperature, max_tokens, system_prompt, and tool names so
-   * users don't need to declare them manually in schemaDefaults.
-   * User-provided schemaDefaults always win over auto-detected values.
-   */
-  private _detectDefaultsFromCall(params: NormalizedCallParams): void {
-    const userDefaults = this.config.schemaDefaults ?? {};
-    const autoDefaults: Record<string, unknown> = {};
-    const autoSections: Record<string, SchemaField[]> = {};
-    const raw = params.raw;
-
-    // LLM parameter fields
-    const llmMappings: Array<[string, string]> = [
-      ['model',             'llm.model'],
-      ['temperature',       'llm.temperature'],
-      ['max_tokens',        'llm.max_tokens'],
-      ['top_p',            'llm.top_p'],
-      ['frequency_penalty','llm.frequency_penalty'],
-      ['presence_penalty', 'llm.presence_penalty'],
-      ['seed',             'llm.seed'],
-    ];
-    for (const [rawKey, schemaPath] of llmMappings) {
-      if (!(schemaPath in userDefaults) && raw[rawKey] != null) {
-        autoDefaults[schemaPath] = raw[rawKey];
-      }
-    }
-
-    // System prompt — first system message (OpenAI) or top-level system field (Anthropic)
-    if (!('prompt.system_prompt' in userDefaults)) {
-      const msgs = Array.isArray(raw['messages']) ? raw['messages'] as Record<string, unknown>[] : [];
-      const sysMsg = msgs.find((m) => m?.['role'] === 'system');
-      if (sysMsg && typeof sysMsg['content'] === 'string' && sysMsg['content'].trim()) {
-        autoDefaults['prompt.system_prompt'] = sysMsg['content'];
-      } else if (typeof raw['system'] === 'string' && (raw['system']).trim()) {
-        autoDefaults['prompt.system_prompt'] = raw['system'];
-      }
-    }
-
-    // Tools → register a 'tools' section with boolean toggles (enabled/disabled per tool)
-    const rawTools = raw['tools'] as Array<Record<string, unknown>> | undefined;
-    if (Array.isArray(rawTools) && rawTools.length > 0) {
-      const toolFields: SchemaField[] = [];
-      for (const tool of rawTools) {
-        const fn = tool?.['function'] as { name?: string } | undefined;
-        const toolName = fn?.name ?? (tool?.['name'] as string | undefined);
-        if (toolName) {
-          toolFields.push({ name: toolName, type: 'bool', default: true });
-        }
-      }
-      if (toolFields.length > 0) {
-        autoSections['tools'] = toolFields;
-      }
-    }
-
-    this._autoDetectedDefaults = autoDefaults;
-    this._autoDetectedSections = autoSections;
-
-    if (this.config.debug) {
-      const keys = [...Object.keys(autoDefaults), ...Object.values(autoSections).flat().map((f) => `tools.${f.name}`)];
-      if (keys.length > 0) {
-        console.log(`[Syrin] Auto-detected schema defaults: ${keys.join(', ')}`);
-      }
-    }
-  }
-
-  /**
    * Called by the adapter BEFORE invoking the underlying SDK.
    *
    * Executes pending governance actions (stop → throw GovernanceStopError,
@@ -567,14 +326,6 @@ export class SyrinSDKCore implements ISyrinCore {
    * @throws GovernanceStopError if the backend sent a stop action.
    */
   async beforeCall(params: NormalizedCallParams): Promise<BeforeCallResult> {
-    // Auto-detect schema defaults from the first LLM call — fires register() in background
-    // so the dashboard shows real defaults without requiring schemaDefaults in init().
-    if (!this._autoDetectDone) {
-      this._autoDetectDone = true;
-      this._detectDefaultsFromCall(params);
-      this.register().catch(() => { /* non-fatal */ });
-    }
-
     // 1. Resolve session + agent context
     const sessionId = sessionStorage.getStore() ?? this.config.sessionId ?? generateId('ses_');
     const runCtx = agentStorage.getStore();
@@ -592,36 +343,13 @@ export class SyrinSDKCore implements ISyrinCore {
       governanceApplied = true;
     }
 
-    const policy = this.config.governance;
-
     for (const action of pendingActions) {
-      const reason = (action['reason'] as string) ?? '?';
-      const incident = (action['incident_id'] as string) ?? '?';
-
       if (action.type === 'stop') {
-        console.warn(`[Syrin] Governance STOP received — reason=${reason} incident=${incident}`);
-        if (policy && !(policy.allowStop ?? false)) {
-          console.warn('[Syrin] STOP skipped: allowStop=false in governance policy');
-          continue;
-        }
         throw new GovernanceStopError(
           (action['reason'] as string) ?? 'Stopped by Syrin governance',
-          action['incident_id'] as string | undefined,
-          action['drift_score'] as number | undefined
+          action['incident_id'] as string | undefined
         );
-      } else if (action.type === 'inject_message') {
-        console.warn(`[Syrin] Governance inject_message received — reason=${reason} incident=${incident}`);
-        if (policy && !(policy.allowInjectMessage ?? false)) {
-          console.warn('[Syrin] inject_message skipped: allowInjectMessage=false in governance policy');
-          continue;
-        }
-        // handled via injectedMsgs below
       } else if (action.type === 'restore') {
-        console.warn(`[Syrin] Governance RESTORE received — checkpoint=${action['checkpoint_id'] ?? '?'} reason=${reason}`);
-        if (policy && !(policy.allowRestore ?? true)) {
-          console.warn('[Syrin] restore skipped: allowRestore=false in governance policy');
-          continue;
-        }
         const checkpointId = action['checkpoint_id'] as string | undefined;
         if (checkpointId) {
           const cp = await this.checkpointClient.getById(checkpointId);
@@ -630,11 +358,6 @@ export class SyrinSDKCore implements ISyrinCore {
           }
         }
       } else if (action.type === 'checkpoint') {
-        console.warn(`[Syrin] Governance CHECKPOINT received — label=${action['label'] ?? '?'} reason=${reason}`);
-        if (policy && !(policy.allowCheckpoint ?? true)) {
-          console.warn('[Syrin] checkpoint skipped: allowCheckpoint=false in governance policy');
-          continue;
-        }
         const currentMsgs = Array.isArray(modifiedRaw['messages'])
           ? (modifiedRaw['messages'] as Array<Record<string, unknown>>)
           : [];
@@ -648,9 +371,8 @@ export class SyrinSDKCore implements ISyrinCore {
       }
     }
 
-    // Prepend injected messages — respecting governance policy
-    const allowInject = !(policy && !(policy.allowInjectMessage ?? false));
-    if (injectedMsgs.length > 0 && allowInject) {
+    // Prepend injected messages
+    if (injectedMsgs.length > 0) {
       const existing: Record<string, unknown>[] = Array.isArray(modifiedRaw['messages'])
         ? [...(modifiedRaw['messages'] as Record<string, unknown>[])]
         : [];
@@ -819,53 +541,36 @@ export class SyrinSDKCore implements ISyrinCore {
       ..._runCtxFields(),
     };
 
-    try {
-      this._emitter.emit(errorEvent, sessionId);
-    } catch (emitErr) {
-      if (this.config.debug) console.warn('[Syrin] Error event emit failed (non-fatal):', emitErr);
-    }
-    try {
-      this._otelBridge.recordSpan({
-        model,
-        provider,
-        temperature: tempUnsupported ? undefined : params.temperature,
-        maxTokens: params.max_tokens,
-        inputTokens: 0,
-        outputTokens: 0,
-        finishReason: 'error',
-        durationMs,
-        costUsd: 0,
-        cumulativeCostUsd: ctx?.initialCumulativeCostUsd ?? 0,
-        agentId: ctx?.agentId,
-        sessionId,
-        configApplied,
-        error,
-      });
-    } catch (otelErr) {
-      if (this.config.debug) console.warn('[Syrin] OTel error span failed (non-fatal):', otelErr);
-    }
+    this._emitter.emit(errorEvent, sessionId);
+
+    this._otelBridge.recordSpan({
+      model,
+      provider,
+      temperature: tempUnsupported ? undefined : params.temperature,
+      maxTokens: params.max_tokens,
+      inputTokens: 0,
+      outputTokens: 0,
+      finishReason: 'error',
+      durationMs,
+      costUsd: 0,
+      cumulativeCostUsd: ctx?.initialCumulativeCostUsd ?? 0,
+      agentId: ctx?.agentId,
+      sessionId,
+      configApplied,
+      error,
+    });
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────
 
   private _recordAndEmit(ctx: BeforeCallResult, result: NormalizedCallResult): void {
-    try {
-      this._doRecordAndEmit(ctx, result);
-    } catch (err) {
-      if (this.config.debug) {
-        console.warn('[Syrin] Telemetry error (non-fatal — user call succeeded):', err);
-      }
-    }
-  }
-
-  private _doRecordAndEmit(ctx: BeforeCallResult, result: NormalizedCallResult): void {
     const {
       sessionId, agentId, configApplied, governanceApplied,
       modifiedMessages, modifiedRaw, tempUnsupported,
     } = ctx;
     const {
       model, inputTokens, outputTokens, finishReason, durationMs,
-      toolCalls, toolDefinitions, responseText, stream, ttftMs,
+      toolCalls, toolDefinitions, responseText, stream,
     } = result;
 
     const costUsd = estimateCost(model, inputTokens, outputTokens);
@@ -883,17 +588,22 @@ export class SyrinSDKCore implements ISyrinCore {
       JSON.stringify(modifiedMessages.map((m) => ({ role: m.role ?? '', content: String(m.content ?? '') })))
     );
 
-    // Compute mutationHash — tracks how the conversation input changed between calls
-    const session2 = this.sessionStore.getSession(sessionId);
-    const prevConvHash = session2?.lastConversationHash ?? null;
-    const mutationHash = _hashMutation(prevConvHash, conversationHash);
-    // Update session's lastConversationHash for the next call
-    if (session2) {
-      session2.lastConversationHash = conversationHash;
+    // mutation_hash — tracks how conversation changed between calls
+    const prevConvHash = updatedSession?.lastConversationHash ?? null;
+    const mutationHash = stableHash(`${prevConvHash ?? ''}|${conversationHash}`).slice(0, 16);
+    if (updatedSession) {
+      updatedSession.lastConversationHash = conversationHash;
     }
 
-    // Compute toolCallHash — hash of tool calls returned in the response
-    const toolCallHash = _hashToolCalls(toolCalls);
+    // tool_call_hash — order-independent hash of tool calls in the response
+    const toolCallHash = (() => {
+      const calls = result.toolCalls;
+      if (!calls?.length) return null;
+      const entries = calls
+        .map((tc) => ({ name: tc.name ?? '', args: tc.arguments ?? '' }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      return stableHash(JSON.stringify(entries)).slice(0, 16);
+    })();
 
     const event: SyrinEvent = {
       event_id: generateId('evt_'),
@@ -931,12 +641,11 @@ export class SyrinSDKCore implements ISyrinCore {
       conversation_hash: conversationHash,
       mutation_hash: mutationHash,
       tool_call_hash: toolCallHash,
-      ...(ttftMs != null ? { ttft_ms: ttftMs } : {}),
       response_char_count: responseText?.length,
       has_refusal: detectRefusal(responseText),
       last_checkpoint_id: updatedSession?.lastCheckpointId,
-      // Full content — resolved per-agent first, then SDK-level setting (off by default).
-      ...(this.resolveCaptureContent(agentId) ? {
+      // Full content — only when capture_content=true (off by default for privacy)
+      ...(this.config.captureContent ? {
         prompt_messages: modifiedMessages,
         ...(responseText != null ? { completion_text: responseText } : {}),
       } : {}),
@@ -952,16 +661,12 @@ export class SyrinSDKCore implements ISyrinCore {
       })(),
     };
 
-    const captureToolCalls = this.resolveCaptureToolCalls(agentId);
-
     // Emit TOOL_RESULT for each role='tool' message BEFORE the LLM_CALL event.
-    // These represent tool outputs that were submitted as part of this request,
-    // meaning they happened chronologically before the LLM produced its response.
-    if (captureToolCalls) {
-      for (const msg of ctx.modifiedMessages ?? []) {
-        if ((msg as unknown as Record<string, unknown>)['role'] === 'tool') {
-          const m = msg as unknown as Record<string, unknown>;
-          const toolResultEvent: SyrinEvent = {
+    for (const msg of ctx.modifiedMessages ?? []) {
+      if ((msg as unknown as Record<string, unknown>)['role'] === 'tool') {
+        const m = msg as unknown as Record<string, unknown>;
+        try {
+          this._emitter.emit({
             event_id: generateId('evt_'),
             event_type: 'TOOL_RESULT',
             timestamp: nowIso(),
@@ -969,9 +674,9 @@ export class SyrinSDKCore implements ISyrinCore {
             agent_id: agentId ?? undefined,
             run_id: agentStorage.getStore()?.runId,
             trace_id: agentStorage.getStore()?.traceId,
-            tool_call_id: (m['tool_call_id'] as string | undefined) ?? '',
-            tool_name:    (m['name']         as string | undefined) ?? '',
-            tool_result:  String(m['content'] ?? ''),
+            tool_call_id: m['tool_call_id'] ?? '',
+            tool_name: m['name'] ?? '',
+            tool_result: String(m['content'] ?? ''),
             model,
             provider,
             duration_ms: 0,
@@ -980,19 +685,17 @@ export class SyrinSDKCore implements ISyrinCore {
             cost_usd: 0,
             stream: false,
             config_applied: false,
-          };
-          try { this._emitter.emit(toolResultEvent, sessionId); } catch { /* fail-open */ }
-        }
+          } as SyrinEvent, sessionId);
+        } catch { /* fail-open */ }
       }
     }
 
     this._emitter.emit(event, sessionId);
 
     // Emit TOOL_CALL for each tool call in the LLM response AFTER the LLM_CALL event.
-    // These represent function calls the model decided to make.
-    if (captureToolCalls) {
-      for (const tc of toolCalls ?? []) {
-        const toolCallEvent: SyrinEvent = {
+    for (const tc of toolCalls ?? []) {
+      try {
+        this._emitter.emit({
           event_id: generateId('evt_'),
           event_type: 'TOOL_CALL',
           timestamp: nowIso(),
@@ -1000,8 +703,8 @@ export class SyrinSDKCore implements ISyrinCore {
           agent_id: agentId ?? undefined,
           run_id: agentStorage.getStore()?.runId,
           trace_id: agentStorage.getStore()?.traceId,
-          tool_name:      tc.name      ?? '',
-          tool_call_id:   tc.id        ?? '',
+          tool_name: tc.name ?? '',
+          tool_call_id: tc.id ?? '',
           tool_arguments: tc.arguments ?? '',
           model,
           provider,
@@ -1011,9 +714,8 @@ export class SyrinSDKCore implements ISyrinCore {
           cost_usd: 0,
           stream: false,
           config_applied: false,
-        };
-        try { this._emitter.emit(toolCallEvent, sessionId); } catch { /* fail-open */ }
-      }
+        } as SyrinEvent, sessionId);
+      } catch { /* fail-open */ }
     }
 
     if (this.config.toolValidation && toolCalls?.length) {
@@ -1043,8 +745,8 @@ export class SyrinSDKCore implements ISyrinCore {
       agentId,
       sessionId,
       configApplied,
-      messages: this.resolveCaptureContent(agentId) ? (modifiedMessages as unknown[]) : undefined,
-      responseText: this.resolveCaptureContent(agentId) ? responseText : undefined,
+      messages: this.config.captureContent ? (modifiedMessages as unknown[]) : undefined,
+      responseText: this.config.captureContent ? responseText : undefined,
       // Framework context
       framework: fwCtx?.framework,
       langgraphGraphId: fwCtx?.graphId,
@@ -1061,30 +763,8 @@ export class SyrinSDKCore implements ISyrinCore {
   }
 }
 
-/**
- * Compute mutationHash — hash of (prevConversationHash + currentConversationHash).
- * Tracks how the conversation input changed between calls.
- */
-function _hashMutation(prevHash: string | null | undefined, currentHash: string): string {
-  return stableHash(`${prevHash ?? ''}|${currentHash}`).slice(0, 16);
-}
-
-/**
- * Compute toolCallHash — order-independent hash of tool calls returned in a response.
- * Returns null when there are no tool calls.
- */
-function _hashToolCalls(
-  toolCalls: Array<{ id: string; name: string; arguments: string }> | undefined
-): string | null {
-  if (!toolCalls?.length) return null;
-  const entries = toolCalls
-    .map((tc) => ({ name: tc.name ?? '', args: tc.arguments ?? '' }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  return stableHash(JSON.stringify(entries)).slice(0, 16);
-}
-
 /** Read current run context fields — safe to call anywhere. */
-function _runCtxFields(): Pick<SyrinEvent, 'run_id' | 'workflow_id' | 'swarm_id' | 'parent_run_id' | 'trace_id' | 'call_depth'> {
+function _runCtxFields(): Pick<SyrinEvent, 'run_id' | 'workflow_id' | 'swarm_id' | 'parent_run_id'> {
   const ctx = agentStorage.getStore();
   if (!ctx) return {};
   return {
@@ -1092,7 +772,8 @@ function _runCtxFields(): Pick<SyrinEvent, 'run_id' | 'workflow_id' | 'swarm_id'
     workflow_id: ctx.workflowId,
     swarm_id: ctx.swarmId,
     parent_run_id: ctx.parentRunId,
-    trace_id: ctx.traceId,
-    call_depth: ctx.callDepth,
   };
 }
+
+// Alias for backward compat with tests and older imports
+export { SyrinCore as SyrinSDKCore };

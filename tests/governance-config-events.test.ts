@@ -81,7 +81,7 @@ describe('Feature 4: GOVERNANCE_TRIGGERED event', () => {
 
   it('emits GOVERNANCE_TRIGGERED for stop action', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -103,7 +103,7 @@ describe('Feature 4: GOVERNANCE_TRIGGERED event', () => {
 
   it('emits GOVERNANCE_TRIGGERED for inject_message action', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -125,7 +125,7 @@ describe('Feature 4: GOVERNANCE_TRIGGERED event', () => {
 
   it('emits GOVERNANCE_TRIGGERED for alert action', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -147,7 +147,7 @@ describe('Feature 4: GOVERNANCE_TRIGGERED event', () => {
 
   it('emits GOVERNANCE_TRIGGERED for unknown action type', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -169,7 +169,7 @@ describe('Feature 4: GOVERNANCE_TRIGGERED event', () => {
 
   it('event has correct session_id, action_type, incident_id, reason', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -197,7 +197,7 @@ describe('Feature 4: GOVERNANCE_TRIGGERED event', () => {
 
   it('multiple actions → multiple GOVERNANCE_TRIGGERED events', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -226,7 +226,7 @@ describe('Feature 4: GOVERNANCE_TRIGGERED event', () => {
     // This tests that the governance processing completes even if the emit itself would fail.
     // We verify no unhandled rejection occurs.
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -276,7 +276,7 @@ describe('Feature 5: CONFIG_APPLIED event', () => {
 
   it('emits CONFIG_APPLIED when config_updates received', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           config_updates: { temperature: 0.3, max_tokens: 2000 },
@@ -295,7 +295,7 @@ describe('Feature 5: CONFIG_APPLIED event', () => {
 
   it('config_keys array matches keys in update', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           config_updates: { temperature: 0.3, max_tokens: 2000 },
@@ -316,7 +316,7 @@ describe('Feature 5: CONFIG_APPLIED event', () => {
 
   it('CONFIG_APPLIED not emitted for empty updates object', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           config_updates: {},
@@ -335,7 +335,7 @@ describe('Feature 5: CONFIG_APPLIED event', () => {
 
   it('CONFIG_APPLIED not emitted when no config_updates in response', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({ ok: true })
       )
     );
@@ -351,7 +351,7 @@ describe('Feature 5: CONFIG_APPLIED event', () => {
 
   it('CONFIG_APPLIED session_id is correct', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           config_updates: { temperature: 0.5 },
@@ -370,7 +370,7 @@ describe('Feature 5: CONFIG_APPLIED event', () => {
 
   it('failure to emit CONFIG_APPLIED is non-fatal', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           config_updates: { temperature: 0.3 },

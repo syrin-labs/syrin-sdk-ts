@@ -15,7 +15,7 @@
 import { readFileSync, readdirSync, statSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
-import type { SchemaField } from '@/adapters/types.js';
+type FieldType = 'str' | 'int' | 'float' | 'bool';
 
 export interface ScannedDefault {
   /** Dot-notation path, e.g. 'llm.model' or 'agent.response_style' */
@@ -125,7 +125,7 @@ function _collectFiles(dir: string): string[] {
  * Infer a SchemaField type string from a scanned default value.
  * Used when auto-creating new schema sections from detected cfg() calls.
  */
-export function inferFieldType(value: unknown): SchemaField['type'] {
+export function inferFieldType(value: unknown): FieldType {
   if (typeof value === 'boolean') return 'bool';
   if (typeof value === 'string') return 'str';
   if (typeof value === 'number') return Number.isInteger(value) ? 'int' : 'float';

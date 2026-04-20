@@ -460,7 +460,7 @@ export class ConfigGuard {
 
     const results: SafeApplyResult[] = [];
     for (const [namespace, fields] of Object.entries(groups)) {
-      results.push(this.safeApply(namespace, fields));
+      results.push(this.safeApply(namespace, fields) as SafeApplyResult);
     }
     return results;
   }

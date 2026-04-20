@@ -5,7 +5,8 @@
  * Adapters import discoverParams() instead of hardcoding their own field lists.
  * Adding a param to PARAM_TYPE_MAP automatically makes it available in all adapters.
  */
-import type { SchemaField } from '@/adapters/types.js';
+
+import type { SchemaField } from '../adapters/types.js';
 
 /** Params that should never be exposed for remote configuration. */
 export const UNIVERSAL_BLOCKLIST = new Set([
@@ -24,20 +25,20 @@ export const UNIVERSAL_BLOCKLIST = new Set([
 
 /** Canonical type and constraint definitions for known-safe params. */
 export const PARAM_TYPE_MAP: Record<string, { type: SchemaField['type']; constraints?: SchemaField['constraints'] }> = {
-  model:                 { type: 'str' },
-  temperature:           { type: 'float', constraints: { ge: 0.0, le: 2.0 } },
-  max_tokens:            { type: 'int',   constraints: { ge: 1 } },
-  max_completion_tokens: { type: 'int',   constraints: { ge: 1 } },
-  top_p:                 { type: 'float', constraints: { ge: 0.0, le: 1.0 } },
-  top_k:                 { type: 'int',   constraints: { ge: 0 } },
-  frequency_penalty:     { type: 'float', constraints: { ge: -2.0, le: 2.0 } },
-  presence_penalty:      { type: 'float', constraints: { ge: -2.0, le: 2.0 } },
-  n:                     { type: 'int',   constraints: { ge: 1, le: 10 } },
-  seed:                  { type: 'int' },
-  logprobs:              { type: 'bool' },
-  top_logprobs:          { type: 'int',   constraints: { ge: 0, le: 20 } },
-  stop:                  { type: 'str' },
-  reasoning_effort:      { type: 'str',   constraints: { enum: ['low', 'medium', 'high'] } },
+  model: { type: 'str' },
+  temperature: { type: 'float', constraints: { ge: 0.0, le: 2.0 } },
+  max_tokens: { type: 'int', constraints: { ge: 1 } },
+  max_completion_tokens: { type: 'int', constraints: { ge: 1 } },
+  top_p: { type: 'float', constraints: { ge: 0.0, le: 1.0 } },
+  top_k: { type: 'int', constraints: { ge: 0 } },
+  frequency_penalty: { type: 'float', constraints: { ge: -2.0, le: 2.0 } },
+  presence_penalty: { type: 'float', constraints: { ge: -2.0, le: 2.0 } },
+  n: { type: 'int', constraints: { ge: 1, le: 10 } },
+  seed: { type: 'int' },
+  logprobs: { type: 'bool' },
+  top_logprobs: { type: 'int', constraints: { ge: 0, le: 20 } },
+  stop: { type: 'str' },
+  reasoning_effort: { type: 'str', constraints: { enum: ['low', 'medium', 'high'] } },
 };
 
 /**

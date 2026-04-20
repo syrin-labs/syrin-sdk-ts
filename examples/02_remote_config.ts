@@ -30,8 +30,8 @@ import { init, shutdown, cfg as moduleCfg } from '@syrin/sdk';
 async function main() {
   const sdk = await init({
     apiKey: process.env['SYRIN_API_KEY'] ?? '',
-    name: 'my-agent',
-    url: process.env['SYRIN_URL'] ?? 'https://api.syrin.ai',
+    agentId: 'my-agent',
+    backendUrl: process.env['SYRIN_BACKEND_URL'] ?? 'https://api.syrin.dev',
   });
 
   // --- Set your preferred defaults for built-in LLM fields ------------------

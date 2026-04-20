@@ -131,14 +131,14 @@ export class CheckpointClient {
 
     if (!this._config.offline) {
       try {
-        await fetch(`${this._config.backendUrl}/checkpoints`, {
+        await fetch(`${this._config.backendUrl}/api/v1/checkpoints`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${this._config.apiKey}`,
           },
           body: JSON.stringify(cp),
-          signal: AbortSignal.timeout(5_000),
+          signal: AbortSignal.timeout(this._config.httpTimeoutMs ?? 10_000),
         });
       } catch {
         // Backend unavailable — local cache is the source of truth for this session
@@ -164,10 +164,10 @@ export class CheckpointClient {
 
     try {
       const resp = await fetch(
-        `${this._config.backendUrl}/checkpoints/${encodeURIComponent(checkpointId)}`,
+        `${this._config.backendUrl}/api/v1/checkpoints/${encodeURIComponent(checkpointId)}`,
         {
           headers: { 'Authorization': `Bearer ${this._config.apiKey}` },
-          signal: AbortSignal.timeout(5_000),
+          signal: AbortSignal.timeout(this._config.httpTimeoutMs ?? 10_000),
         }
       );
       if (!resp.ok) return undefined;

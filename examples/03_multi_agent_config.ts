@@ -1,9 +1,8 @@
 /**
  * 03 — Multi-Agent Remote Config
  * --------------------------------
- * Use sdk.agent() to register each agent AND get a session handle in one step.
- * Call .run(fn) on the handle to enter the agent context — no separate
- * registerAgent() + withAgent() pair needed.
+ * Use sdk.agent() to get an AgentHandle per agent, then declare config with
+ * .field() chaining and enter scopes via .run() or .session().
  *
  * Each agent has independent observability settings:
  *   captureContent    → include prompts/completions in telemetry
@@ -11,10 +10,10 @@
  *
  * Dashboard layout after this script:
  *   Agents
- *     query-enhancer         ← from fields map
+ *     query-enhancer         ← from .field() declarations
  *       llm.temperature
  *       prompt.system_prompt
- *     summarizer             ← from fields map
+ *     summarizer             ← from .field() declarations
  *       llm.temperature
  *       prompt.system_prompt
  *       output.output_format
@@ -30,71 +29,87 @@ import { init, shutdown } from '@syrin/sdk';
 async function main() {
   const sdk = await init({
     apiKey: process.env['SYRIN_API_KEY'] ?? '',
-    name: 'marketing-pipeline',
-    url: process.env['SYRIN_URL'] ?? 'https://api.syrin.ai',
+    agentId: 'marketing-pipeline',
+    backendUrl: process.env['SYRIN_BACKEND_URL'] ?? 'https://api.syrin.dev',
   });
 
-  // --- sdk.agent() — register AND get a session handle in one step ----------
+  // --- sdk.agent() — get an AgentHandle, then chain .field() calls ----------
   // Keys use "section.fieldName" dot-notation.
-  // The returned handle's .run(fn) enters the agent scope automatically.
+  // .field() declares the field AND returns `this` for chaining.
 
   const queryEnhancer = sdk.agent('query-enhancer', {
     description: "Reformulates and expands the user's query",
     captureContent: true,
     captureToolCalls: true,
-    fields: {
-      'llm.temperature':      { default: 0.3, ge: 0.0, le: 2.0, label: 'Temperature' },
-      'prompt.system_prompt': {
-        default: 'You are an expert research planner.',
-        multiline: true,
-        label: 'System Prompt',
-      },
-    },
   });
+  queryEnhancer
+    .field('llm.temperature', 0.3, { ge: 0.0, le: 2.0, label: 'Temperature' })
+    .field('prompt.system_prompt', 'You are an expert research planner.', {
+      multiline: true,
+      label: 'System Prompt',
+    });
 
   const summarizer = sdk.agent('summarizer', {
     description: 'Synthesises research into clear briefs',
     captureContent: false,
     captureToolCalls: false,
-    fields: {
-      'llm.temperature':        { default: 0.5, ge: 0.0, le: 2.0, label: 'Temperature' },
-      'prompt.system_prompt':   {
-        default: 'You synthesise research into clear marketing briefs.',
-        multiline: true,
-        label: 'System Prompt',
-      },
-      'output.output_format':   {
-        default: 'markdown',
-        enum: ['markdown', 'json', 'plaintext'],
-        label: 'Output Format',
-      },
-    },
   });
+  summarizer
+    .field('llm.temperature', 0.5, { ge: 0.0, le: 2.0, label: 'Temperature' })
+    .field('prompt.system_prompt', 'You synthesise research into clear marketing briefs.', {
+      multiline: true,
+      label: 'System Prompt',
+    })
+    .field('output.output_format', 'markdown', {
+      enum: ['markdown', 'json', 'plaintext'],
+      label: 'Output Format',
+    });
 
-  // --- Global defaults -------------------------------------------------------
-  sdk.cfg('llm.model', 'gpt-4o');
-  sdk.cfg('llm.temperature', 0.7);
-
-  // --- Run the pipeline ------------------------------------------------------
-  // .run(fn) enters the agent context — cfg() inside is scoped to that agent.
-
+  // --- Pattern 1: .run(fn) — agent scope only (no user session) --------------
+  console.log('\n--- Pattern 1: .run() ---');
   await queryEnhancer.run(async () => {
-    const temp   = sdk.cfg('llm.temperature', 0.3) as number;
-    const prompt = sdk.cfg('prompt.system_prompt', 'You are an expert research planner.');
+    const temp   = queryEnhancer.cfg('llm.temperature', 0.3) as number;
+    const prompt = queryEnhancer.cfg('prompt.system_prompt', 'You are an expert research planner.');
     console.log(`  query-enhancer: temp=${temp}, prompt=${String(prompt).slice(0, 40)}`);
     // ... your LLM call here
   });
 
-  await summarizer.run(async () => {
-    const temp   = sdk.cfg('llm.temperature', 0.5) as number;
-    const format = sdk.cfg('output.output_format', 'markdown');
-    const prompt = sdk.cfg('prompt.system_prompt', 'You synthesise research into clear marketing briefs.');
-    console.log(`  summarizer: temp=${temp}, format=${String(format)}`);
-    console.log(`  prompt: ${String(prompt).slice(0, 40)}`);
-    // ... your LLM call here
+  // --- Pattern 2: .session(options, fn) — session + agent scope --------------
+  console.log('\n--- Pattern 2: .session() ---');
+  const ctx = await summarizer.session(
+    { userId: 'demo-user', window: 'day' },
+    async (ctx) => {
+      const temp   = summarizer.cfg('llm.temperature', 0.5) as number;
+      const format = summarizer.cfg('output.output_format', 'markdown');
+      const prompt = summarizer.cfg('prompt.system_prompt', 'You synthesise research into clear marketing briefs.');
+      console.log(`  summarizer: temp=${temp}, format=${String(format)}, session=${ctx.sessionId}`);
+      console.log(`  prompt: ${String(prompt).slice(0, 40)}`);
+      // ... your LLM call here
+      return ctx;
+    }
+  );
+  console.log(`  session resolved: ${ctx.sessionId}`);
+
+  // --- Pattern 3: sdk.workflow() wrapping multiple agents --------------------
+  console.log('\n--- Pattern 3: sdk.workflow() ---');
+  await sdk.workflow('research-pipeline', async (wfCtx) => {
+    console.log(`  workflow_id=${wfCtx.workflowId}`);
+
+    await queryEnhancer.run(async () => {
+      const temp = queryEnhancer.cfg('llm.temperature', 0.3) as number;
+      console.log(`  [workflow] query-enhancer: temp=${temp}`);
+      // ... your LLM call here
+    });
+
+    await summarizer.run(async () => {
+      const fmt = summarizer.cfg('output.output_format', 'markdown');
+      console.log(`  [workflow] summarizer: format=${String(fmt)}`);
+      // ... your LLM call here
+    });
   });
 
   await shutdown();
+  console.log('\nDone. Check the Syrin dashboard for per-agent config fields.');
 }
 
 main().catch(console.error);

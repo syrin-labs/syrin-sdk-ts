@@ -4,7 +4,7 @@
 
 import type { SyrinSDKConfig } from '@/types.js';
 
-const SDK_VERSION = '0.1.0';
+const SDK_VERSION = '1.0.0';
 
 const DEFAULTS: Omit<SyrinSDKConfig, 'apiKey'> = {
   backendUrl: 'https://api.syrin.ai',

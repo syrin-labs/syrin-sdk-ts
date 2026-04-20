@@ -240,7 +240,7 @@ describe('SyrinSDKCore.register()', () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
     const [url, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
 
-    expect(url).toBe('http://localhost:4399/agents/my-agent/register');
+    expect(url).toBe('http://localhost:4399/api/v1/agents/my-agent/register');
     expect(options.method).toBe('POST');
     expect((options.headers as Record<string, string>)['Content-Type']).toBe('application/json');
     expect((options.headers as Record<string, string>)['Authorization']).toBe('Bearer syrin_test');

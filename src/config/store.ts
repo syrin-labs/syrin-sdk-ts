@@ -371,8 +371,11 @@ export class ConfigStore {
       const namespace = path.substring(0, dotIdx);
       const field = path.substring(dotIdx + 1);
 
-      // Priority 1 — Anchors: silently skip (do not appear in rejected)
-      if (this._anchors.has(path)) continue;
+      // Priority 1 — Anchors: reject with reason (anchor value is preserved)
+      if (this._anchors.has(path)) {
+        rejected[path] = `Field is anchored and cannot be overridden`;
+        continue;
+      }
 
       // Priority 2 & 3 — Blocklist / Allowlist: silently skip
       if (!this._isAllowed(path)) continue;
@@ -380,21 +383,9 @@ export class ConfigStore {
       // Priority 4 — Unknown namespace → silently ignore
       if (!(namespace in this._sections)) continue;
 
-      // Unknown field in known namespace → apply without schema constraints
+      // Unknown field in known namespace → reject
       if (!(field in this._sections[namespace])) {
-        if (!(namespace in this._values)) this._values[namespace] = {};
-        const oldValue = this._values[namespace][field];
-        this._values[namespace][field] = value;
-        if (!this._fieldSources[namespace]) this._fieldSources[namespace] = {};
-        this._fieldSources[namespace][field] = source;
-        changedKeys.push(path);
-        auditEntries.push({
-          timestamp: nowIso(),
-          key: path,
-          oldValue,
-          newValue: value,
-          source,
-        });
+        rejected[path] = `Unknown field: ${field}`;
         continue;
       }
 

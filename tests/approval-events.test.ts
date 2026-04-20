@@ -65,14 +65,14 @@ function setupIngestWithGovernance(
   approvalPollResponse?: Record<string, unknown>,
 ) {
   server.use(
-    http.post('http://localhost:4399/ingest', () =>
+    http.post('http://localhost:4399/api/v1/ingest', () =>
       HttpResponse.json({ ok: true, governance })
     ),
   );
 
   if (approvalPollResponse) {
     server.use(
-      http.get('http://localhost:4399/approvals/:approvalId', () =>
+      http.get('http://localhost:4399/api/v1/approvals/:approvalId', () =>
         HttpResponse.json(approvalPollResponse)
       ),
     );
@@ -467,7 +467,7 @@ describe('APPROVAL_REJECTED events', () => {
 
   it('poll network failure emits nothing (APPROVAL_GRANTED/REJECTED not emitted)', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -479,7 +479,7 @@ describe('APPROVAL_REJECTED events', () => {
           },
         })
       ),
-      http.get('http://localhost:4399/approvals/:approvalId', () =>
+      http.get('http://localhost:4399/api/v1/approvals/:approvalId', () =>
         HttpResponse.error()
       ),
     );
@@ -497,7 +497,7 @@ describe('APPROVAL_REJECTED events', () => {
 
   it('poll non-200 response emits nothing (APPROVAL_GRANTED/REJECTED not emitted)', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -509,7 +509,7 @@ describe('APPROVAL_REJECTED events', () => {
           },
         })
       ),
-      http.get('http://localhost:4399/approvals/:approvalId', () =>
+      http.get('http://localhost:4399/api/v1/approvals/:approvalId', () =>
         new HttpResponse(null, { status: 404 })
       ),
     );
@@ -527,7 +527,7 @@ describe('APPROVAL_REJECTED events', () => {
 
   it('poll invalid JSON response emits nothing (APPROVAL_GRANTED/REJECTED not emitted)', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           governance: {
@@ -539,7 +539,7 @@ describe('APPROVAL_REJECTED events', () => {
           },
         })
       ),
-      http.get('http://localhost:4399/approvals/:approvalId', () =>
+      http.get('http://localhost:4399/api/v1/approvals/:approvalId', () =>
         new HttpResponse('not-json', { status: 200, headers: { 'Content-Type': 'text/plain' } })
       ),
     );

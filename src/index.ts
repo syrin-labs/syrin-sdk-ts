@@ -16,53 +16,103 @@ import { SyrinSDKCore } from '@/core/engine.js';
 import { Heartbeat } from '@/core/heartbeat.js';
 import { ConfigSync } from '@/core/config-sync.js';
 import { load as loadPersistedConfig, save as savePersistedConfig } from '@/config/persist.js';
-import { OpenAIAdapter } from '@/adapters/openai/index.js';
-import { clearHooks } from '@/observability/hooks.js';
-import { installForActiveLibraries, installModuleHook, uninstallModuleHook } from '@/utils/auto-detect.js';
+import { clearHooks, registerEventListener } from '@/observability/hooks.js';
+import type { EventListener } from '@/observability/hooks.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
 import type { SyrinSDKConfig, SyrinSDK, SyrinEvent, ConfigUpdate, MessageParam } from '@/types.js';
-import type { SyrinSDKAdapter } from '@/adapters/types.js';
 import { _setAutoRefreshCallback, clearAutoRefreshTimer } from '@/tunable/tunable.js';
 import { _setLifecycleEmitter, agentStorage } from '@/agent/context.js';
 import { getCallInterceptor } from '@/control/call-interceptor.js';
 import type { CompleteControlConfig } from '@/control/complete-control-schema.js';
 
 
-export type { SyrinSDKConfig, SyrinEvent, CustomLogEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ConfigUpdate, MessageParam, AgentConfig, AgentFieldDef } from '@/types.js';
+// ── Core types (needed for type annotations) ─────────────────────────────
+export type { SyrinSDKConfig, SyrinEvent, CustomLogEvent, RunContext, AgentConfig, AgentFieldDef, RunInputFieldDef, MessageParam, ConfigUpdate } from '@/types.js';
+
+// ── Session / agent / workflow / swarm scoping ───────────────────────────
 export { withAgent, withWorkflow, withSwarm, getRunContext } from '@/agent/context.js';
+export { withSkip } from '@/utils/skip.js';
+
+// ── Instrumentation ───────────────────────────────────────────────────────
 export { TraceSpan } from '@/agent/trace-span.js';
-export type { TraceType } from '@/agent/trace-span.js';
 export { withTool, ToolSpan, withMemory, MemorySpan } from '@/agent/tool-context.js';
+
+// ── Governance ────────────────────────────────────────────────────────────
 export { GovernanceStopError } from '@/core/governance.js';
 export type { GovernancePolicy } from '@/core/governance.js';
+
+// ── Hooks ─────────────────────────────────────────────────────────────────
+export { onConfigChange, onAlert } from '@/observability/hooks.js';
+
+// ── Checkpoint type ───────────────────────────────────────────────────────
 export type { Checkpoint } from '@/core/checkpoint.js';
+
+// ── Advanced / power-user (importable but not in the main surface) ────────
+// These are intentionally kept importable for custom integrations and
+// framework authors, but most developers will never need them.
 export { ConfigSync } from '@/core/config-sync.js';
 export type { ConfigSyncOptions } from '@/core/config-sync.js';
-export { onConfigChange, onAlert } from '@/observability/hooks.js';
 export { SyrinSDKCore } from '@/core/engine.js';
 export { SyrinLogger, getLogger, setLogger } from '@/observability/logger.js';
-export type { LogLevel, LogContext, LogEntry } from '@/observability/logger.js';
+export type { LogLevel } from '@/observability/logger.js';
 export { IdentityManager, getIdentityManager, setIdentityManager } from '@/core/identity.js';
-export type { IdentityContext, CallContext } from '@/core/identity.js';
 export { CallInterceptor, getCallInterceptor, setCallInterceptor } from '@/control/call-interceptor.js';
-export type { InterceptedCall, GovernanceViolation } from '@/control/call-interceptor.js';
 export { ToolGovernance, getToolGovernance, setToolGovernance } from '@/control/tool-governance.js';
-export type { ToolCall, ApprovalRequest } from '@/control/tool-governance.js';
-export type { CompleteControlConfig, ToolConfig, ParameterMatrix } from '@/control/complete-control-schema.js';
+export type { CompleteControlConfig } from '@/control/complete-control-schema.js';
 export { validateConfigValue, getConfigType, PARAMETER_CONSTRAINTS } from '@/control/complete-control-schema.js';
-export type { SyrinSDKAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore, SchemaField as AdapterSchemaField } from '@/adapters/types.js';
-export { OpenAIAdapter } from '@/adapters/openai/index.js';
 export { ConfigStore } from '@/config/store.js';
 export type { FieldSchema, ConfigVersion, AuditEntry } from '@/config/store.js';
-export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry, clearAutoRefreshTimer } from '@/tunable/tunable.js';
+export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry } from '@/tunable/tunable.js';
 export type { TuneOptions, TuneFieldDef } from '@/tunable/tunable.js';
-export { AnthropicAdapter } from '@/adapters/anthropic/index.js';
-export { LangChainAdapter } from '@/adapters/langchain/index.js';
-export { LangGraphAdapter } from '@/adapters/langgraph/index.js';
-export { MastraAdapter } from '@/adapters/mastra/index.js';
-export { VercelAIAdapter } from '@/adapters/vercel-ai/index.js';
-export { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types.js';
-export type { SyrinSDKFrameworkAdapter } from '@/adapters/types.js';
+// Internal types kept for framework authors
+export type { SessionState, SyrinSDK, CallInfo, GovernanceAction, GovernanceData, IngestPayload, IngestResponse } from '@/types.js';
+export type { TraceType } from '@/agent/trace-span.js';
+export type { LogContext, LogEntry } from '@/observability/logger.js';
+export type { IdentityContext, CallContext } from '@/core/identity.js';
+export type { InterceptedCall, GovernanceViolation } from '@/control/call-interceptor.js';
+export type { ToolCall, ApprovalRequest } from '@/control/tool-governance.js';
+export type { ToolConfig, ParameterMatrix } from '@/control/complete-control-schema.js';
+
+/**
+ * Snapshot of the active context inside an {@link SyrinSDKInstance.context} call.
+ */
+export interface SyrinContext {
+  /** The session ID resolved for this context (null if no session). */
+  sessionId: string | null;
+  /** The agent ID active in this context (null if not set). */
+  agentId: string | null;
+  /** The workflow ID active in this context (null if not set). */
+  workflowId: string | null;
+  /** The swarm ID active in this context (null if not set). */
+  swarmId: string | null;
+}
+
+/**
+ * Options for {@link SyrinSDKInstance.context} / {@link SyrinSDKInstance.traced}.
+ *
+ * All fields are optional.  `agent`/`workflow`/`swarm` are short-hand aliases
+ * for `agentId`/`workflowId`/`swarmId`.
+ */
+export interface ContextOptions {
+  /** Stable end-user identifier — passed to {@link withSession} for grouping. */
+  userId?: string;
+  /** Override the session ID directly (skip auto-generation). */
+  sessionId?: string;
+  /** Agent to scope LLM calls to. Alias: `agent`. */
+  agentId?: string;
+  /** Short alias for `agentId`. */
+  agent?: string;
+  /** Workflow ID to set on the run context. Alias: `workflow`. */
+  workflowId?: string;
+  /** Short alias for `workflowId`. */
+  workflow?: string;
+  /** Swarm ID to set on the run context. Alias: `swarm`. */
+  swarmId?: string;
+  /** Short alias for `swarmId`. */
+  swarm?: string;
+  /** Session time-window (passed through to {@link withSession}). */
+  window?: SessionWindow;
+}
 
 /**
  * Options for `cfg()` / `sdk.cfg()` — metadata about the remotely-configurable field.
@@ -86,8 +136,30 @@ export interface CfgOptions {
  * | `"week"`   | Every ISO week (Mon–Sun) |
  * | `"month"`  | Every calendar month     |
  * | `"forever"`| Never — persistent       |
+ *
+ * Aliases (normalized automatically):
+ * `"hourly"` → `"hour"`, `"daily"` → `"day"`, `"weekly"` → `"week"`,
+ * `"monthly"` → `"month"`, `"persistent"` → `"forever"`.
  */
-export type SessionWindow = 'hour' | 'day' | 'week' | 'month' | 'forever';
+export type SessionWindow =
+  | 'hour'   | 'hourly'
+  | 'day'    | 'daily'
+  | 'week'   | 'weekly'
+  | 'month'  | 'monthly'
+  | 'forever'| 'persistent';
+
+/** Normalize window aliases to their canonical forms. */
+const WINDOW_ALIASES: Record<string, string> = {
+  persistent: 'forever',
+  hourly:     'hour',
+  daily:      'day',
+  weekly:     'week',
+  monthly:    'month',
+};
+
+function normalizeWindow(win: SessionWindow): SessionWindow {
+  return (WINDOW_ALIASES[win] ?? win) as SessionWindow;
+}
 
 /**
  * Options for creating a grouped / user session via {@link withSession} or
@@ -123,7 +195,57 @@ export interface SessionOptions {
  * agent context and run `fn` inside it — no separate `withAgent()` import needed.
  */
 export class AgentHandle {
-  constructor(private readonly _agentId: string) {}
+  constructor(
+    private readonly _agentId: string,
+    private readonly _sdk?: SyrinSDKInstance,
+  ) {}
+
+  /** The agent ID this handle was registered with. */
+  get agentId(): string {
+    return this._agentId;
+  }
+
+  /**
+   * Declare a remotely-configurable value scoped to this agent's namespace.
+   *
+   * Equivalent to `sdk.cfg(key, defaultValue, options)` but always uses the
+   * `agents.<agentId>.<section>` namespace regardless of the current async context.
+   *
+   * @example
+   * const temp = researcher.cfg('llm.temperature', 0.3, { ge: 0, le: 2 });
+   */
+  cfg(key: string, defaultValue?: unknown, options?: CfgOptions): unknown {
+    if (!this._sdk) return defaultValue;
+    // If we're already inside this agent's context, just delegate directly.
+    const current = agentStorage.getStore();
+    if (current?.agentId === this._agentId) {
+      return this._sdk.cfg(key, defaultValue, options);
+    }
+    // Temporarily enter this agent's namespace for the sync cfg() resolution.
+    const fakeCtx: import('./types.js').RunContext = {
+      agentId: this._agentId,
+      runId: current?.runId ?? '',
+      traceId: current?.traceId ?? '',
+      callDepth: current?.callDepth ?? 0,
+      workflowId: current?.workflowId,
+      swarmId: current?.swarmId,
+      parentRunId: current?.runId,
+    };
+    return agentStorage.run(fakeCtx, () => this._sdk!.cfg(key, defaultValue, options));
+  }
+
+  /**
+   * Declare a remotely-configurable field and return `this` for fluent chaining.
+   *
+   * @example
+   * const researcher = sdk.agent('researcher')
+   *   .field('llm.temperature', 0.3, { ge: 0, le: 2 })
+   *   .field('llm.model', 'gpt-4o');
+   */
+  field(key: string, defaultValue?: unknown, options?: CfgOptions): this {
+    this.cfg(key, defaultValue, options);
+    return this;
+  }
 
   /**
    * Enter the agent context and run `fn` inside it.
@@ -142,6 +264,28 @@ export class AgentHandle {
   async run<T>(fn: () => Promise<T>): Promise<T> {
     const { withAgent } = await import('./agent/context.js');
     return withAgent(this._agentId, fn);
+  }
+
+  /**
+   * Run `fn` inside a combined session + agent context.
+   *
+   * Delegates to `sdk.context({ ...options, agentId: this._agentId }, fn)`.
+   *
+   * @example
+   * await researcher.session({ userId: 'alice' }, async (ctx) => {
+   *   console.log(ctx.agentId);   // "researcher"
+   *   console.log(ctx.sessionId); // "u:alice:2026-04-20"
+   * });
+   */
+  async session<T>(
+    options: Omit<ContextOptions, 'agent' | 'agentId'>,
+    fn: (ctx: SyrinContext) => Promise<T>,
+  ): Promise<T> {
+    if (!this._sdk) {
+      // No SDK — still run fn with a minimal context (fail-open).
+      return fn({ sessionId: null, agentId: this._agentId, workflowId: null, swarmId: null });
+    }
+    return this._sdk.context({ ...options, agentId: this._agentId }, fn);
   }
 }
 
@@ -189,21 +333,6 @@ export class SyrinSDKInstance implements SyrinSDK {
   }
 
   /**
-   * Register a custom adapter (e.g. LangChain, Anthropic) after init().
-   * Returns `this` so calls can be chained (after awaiting).
-   *
-   * @example
-   * import { MyCustomAdapter } from './my-adapter';
-   * await sdk.registerAdapter(new MyCustomAdapter());
-   * // or chained:
-   * await (await sdk.registerAdapter(adapterA)).registerAdapter(adapterB);
-   */
-  async registerAdapter(adapter: SyrinSDKAdapter): Promise<this> {
-    await this._core.registerAdapter(adapter);
-    return this;
-  }
-
-  /**
    * Register an agent with per-agent observability settings.
    *
    * Can be called at any point after `init()` — before or after the agent runs.
@@ -228,6 +357,39 @@ export class SyrinSDKInstance implements SyrinSDK {
    */
   registerAgent(config: import('./types.js').AgentConfig): this {
     this._core.registerAgent(config);
+    return this;
+  }
+
+  /**
+   * Register an endpoint's input schema so the Syrin dashboard can render a run form.
+   *
+   * The SDK introspects *schema* automatically — pass a Zod object schema or a plain
+   * dict `{ fieldName: { type, required, label, description, example, default } }`.
+   * After calling this, the "Run Agent" modal shows the correct fields for that endpoint.
+   *
+   * @param endpoint - Endpoint name without leading slash, e.g. `"run"` or `"workflow"`.
+   * @param schema   - Zod object schema or plain field dict.
+   *
+   * @example
+   * ```ts
+   * import { z } from 'zod';
+   *
+   * const RunSchema = z.object({
+   *   input: z.string().describe('Task to run'),
+   *   format: z.string().optional().describe('Output format'),
+   * });
+   *
+   * await sdk.registerEndpoint('run', RunSchema);
+   *
+   * // or plain dict:
+   * await sdk.registerEndpoint('run', {
+   *   input: { type: 'str', required: true, label: 'Task Input' },
+   *   format: { type: 'str', required: false, default: 'markdown' },
+   * });
+   * ```
+   */
+  async registerEndpoint(endpoint: string, schema: unknown): Promise<this> {
+    await this._core.registerEndpoint(endpoint, schema);
     return this;
   }
 
@@ -265,8 +427,174 @@ export class SyrinSDKInstance implements SyrinSDK {
     agentId: string,
     options?: Omit<import('./types.js').AgentConfig, 'agentId'>
   ): AgentHandle {
-    this._core.registerAgent({ agentId, ...options });
-    return new AgentHandle(agentId);
+    // registerAgent on the core is best-effort — fail-open if not supported.
+    try {
+      const coreAny = this._core as unknown as Record<string, unknown>;
+      if (typeof coreAny['registerAgent'] === 'function') {
+        (coreAny['registerAgent'] as (c: unknown) => void)({ agentId, ...options });
+      }
+    } catch { /* non-fatal */ }
+    return new AgentHandle(agentId, this);
+  }
+
+  /**
+   * Run `fn` within a named workflow scope.
+   *
+   * All agents nested inside automatically inherit the workflowId.
+   *
+   * @example
+   * ```ts
+   * await sdk.workflow('research-pipeline', async (ctx) => {
+   *   await researcher.run(async () => { ... });
+   *   await writer.run(async () => { ... });
+   * });
+   * ```
+   */
+  async workflow<T>(
+    workflowId: string,
+    fn: (ctx: import('./types.js').RunContext) => Promise<T>,
+  ): Promise<T> {
+    const { withWorkflow } = await import('./agent/context.js');
+    return withWorkflow(workflowId, fn);
+  }
+
+  /**
+   * Run `fn` within a named swarm scope.
+   *
+   * All parallel agents spawned inside share the swarmId.
+   *
+   * @example
+   * ```ts
+   * await sdk.swarm('parallel-research', async (ctx) => {
+   *   await Promise.all([agentA.run(...), agentB.run(...)]);
+   * });
+   * ```
+   */
+  async swarm<T>(
+    swarmId: string,
+    fn: (ctx: import('./types.js').RunContext) => Promise<T>,
+  ): Promise<T> {
+    const { withSwarm } = await import('./agent/context.js');
+    return withSwarm(swarmId, fn);
+  }
+
+  /**
+   * Run an async function in a flat, combined session + agent/workflow/swarm context.
+   *
+   * Replaces nested `withSession + withAgent` calls.  All options are optional —
+   * omitting an option simply skips that scoping layer.
+   *
+   * The resolved {@link SyrinContext} is passed to `fn` so you can read back the
+   * generated session ID without a separate `getSessionId()` call.
+   *
+   * @example
+   * ```ts
+   * const ctx = await sdk.context(
+   *   { userId: 'alice', agent: 'researcher', window: 'day' },
+   *   async (ctx) => {
+   *     const reply = await callLLM(messages);
+   *     return { reply, sessionId: ctx.sessionId };
+   *   }
+   * );
+   * ```
+   */
+  async context<T>(
+    options: ContextOptions,
+    fn: (ctx: SyrinContext) => Promise<T>,
+  ): Promise<T> {
+    // Resolve canonical IDs, honouring short-hand aliases.
+    const resolvedAgentId    = options.agentId    ?? options.agent    ?? null;
+    const resolvedWorkflowId = options.workflowId ?? options.workflow ?? null;
+    const resolvedSwarmId    = options.swarmId    ?? options.swarm    ?? null;
+
+    // Build the SyrinContext that will be handed to fn().
+    // sessionId is resolved after withSession (if any) sets the ALS store.
+    let resolvedSessionId: string | null = options.sessionId ?? null;
+
+    // Helper: innermost async call that enters agent/workflow/swarm scope and calls fn.
+    const runInner = async (): Promise<T> => {
+      // After withSession (if applicable) the ALS store is set — read it now.
+      resolvedSessionId = resolvedSessionId ?? sessionStorage.getStore() ?? this._sessionId ?? null;
+
+      const ctx: SyrinContext = {
+        sessionId:  resolvedSessionId,
+        agentId:    resolvedAgentId,
+        workflowId: resolvedWorkflowId,
+        swarmId:    resolvedSwarmId,
+      };
+
+      const { withAgent: _withAgent, withWorkflow: _withWorkflow, withSwarm: _withSwarm } =
+        await import('./agent/context.js');
+
+      // Layer: swarm → workflow → agent (outermost → innermost), then call fn.
+      let innerFn = (): Promise<T> => fn(ctx);
+
+      if (resolvedAgentId) {
+        const agentId = resolvedAgentId;
+        const prevInner = innerFn;
+        innerFn = () => _withAgent(agentId, prevInner);
+      }
+      if (resolvedWorkflowId) {
+        const workflowId = resolvedWorkflowId;
+        const prevInner = innerFn;
+        innerFn = () => _withWorkflow(workflowId, () => prevInner());
+      }
+      if (resolvedSwarmId) {
+        const swarmId = resolvedSwarmId;
+        const prevInner = innerFn;
+        innerFn = () => _withSwarm(swarmId, () => prevInner());
+      }
+
+      return innerFn();
+    };
+
+    // If userId or explicit sessionId provided, wrap with withSession.
+    if (options.userId || options.sessionId) {
+      if (options.sessionId) {
+        // Explicit session ID — use ALS directly without making a new id.
+        resolvedSessionId = options.sessionId;
+        return sessionStorage.run(options.sessionId, runInner);
+      }
+      // userId-based grouped session.
+      return withSession(
+        { userId: options.userId, window: options.window } as SessionOptions,
+        async (sid) => {
+          resolvedSessionId = sid;
+          return runInner();
+        },
+      );
+    }
+
+    return runInner();
+  }
+
+  /**
+   * Wrap an async function so every invocation is automatically scoped to the
+   * given {@link ContextOptions}.
+   *
+   * The wrapped function is otherwise identical to the original — same signature,
+   * same return type.
+   *
+   * @example
+   * ```ts
+   * const research = sdk.traced({ agent: 'researcher' })(
+   *   async (query: string) => chain.invoke({ query })
+   * );
+   *
+   * // Later:
+   * const result = await research('What is the latest on AI safety?');
+   * ```
+   */
+  traced<T extends (...args: unknown[]) => Promise<unknown>>(
+    options: ContextOptions,
+  ): (fn: T) => T {
+    return (fn: T): T => {
+      const self = this;
+      const wrapped = function (...args: Parameters<T>): ReturnType<T> {
+        return self.context(options, () => fn(...args) as Promise<unknown>) as ReturnType<T>;
+      };
+      return wrapped as unknown as T;
+    };
   }
 
   /**
@@ -304,7 +632,7 @@ export class SyrinSDKInstance implements SyrinSDK {
 
     // Update agent-level ConfigStore
     try {
-      const configStore = (this._core as Record<string, unknown>)['_configStore'] as
+      const configStore = (this._core as unknown as Record<string, unknown>)['_configStore'] as
         | { applyUpdates?: (o: Record<string, unknown>, source?: string) => void }
         | undefined;
       if (configStore?.applyUpdates) {
@@ -749,16 +1077,62 @@ export class SyrinSDKInstance implements SyrinSDK {
     await this._core.register();
   }
 
+  /**
+   * Check whether the Syrin backend is reachable.
+   * Returns `true` if the backend responds with a 2xx status, `false` otherwise.
+   */
+  async healthCheck(): Promise<boolean> {
+    try {
+      const response = await fetch(`${this._config.backendUrl}/health`, {
+        headers: { Authorization: `Bearer ${this._config.apiKey}` },
+        signal: AbortSignal.timeout(5_000),
+      });
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Subscribe to SDK events by type (or all events).
+   *
+   * Returns an unsubscribe function — call it to remove the listener.
+   *
+   * @example
+   * ```ts
+   * // Listen for a specific event type
+   * const unsub = sdk.on('LLM_CALL', (event) => {
+   *   console.log('LLM call:', event.model, event.cost_usd);
+   * });
+   *
+   * // Listen for ALL events
+   * const unsubAll = sdk.on((event) => console.log(event.event_type));
+   *
+   * // Remove the listener later
+   * unsub();
+   * ```
+   */
+  on(eventType: string, handler: EventListener): () => void;
+  on(handler: EventListener): () => void;
+  on(
+    eventTypeOrHandler: string | EventListener,
+    handler?: EventListener,
+  ): () => void {
+    if (typeof eventTypeOrHandler === 'function') {
+      return registerEventListener(null, eventTypeOrHandler);
+    }
+    return registerEventListener(eventTypeOrHandler, handler!);
+  }
+
   async shutdown(): Promise<void> {
     _setLifecycleEmitter(null);
     clearAutoRefreshTimer();
-    uninstallModuleHook();
     if (this._pollTimer) clearInterval(this._pollTimer);
     if (this._configSync) this._configSync.stopPolling();
     await this._heartbeat.stop();
     await this._emitter.stop();
-    this._core.uninstallAll();
     await this._otelBridge.shutdown();
+    this._sessionStore.dispose();
   }
 }
 
@@ -902,23 +1276,6 @@ export interface SyrinInitOptions {
    * the "Run" button for remote agent invocations.
    */
   serverUrl?: string;
-  /**
-   * Explicit framework/orchestration library name reported to the dashboard
-   * (e.g. `'langchain'`, `'langgraph'`, `'mastra'`, `'vercel-ai'`, `'pydantic-ai'`).
-   * When set, this takes priority over auto-detection. Useful when the SDK
-   * cannot auto-detect the framework (e.g. pure-ESM imports with tsx).
-   */
-  agentFramework?: string;
-  /**
-   * Additional adapters to install after the built-in ones.
-   * Each adapter is registered in order; explicit adapters take precedence
-   * over auto-detected ones of the same name.
-   *
-   * @example
-   * import { LangChainAdapter } from '@syrin/sdk';
-   * await init({ adapters: [new LangChainAdapter()] });
-   */
-  adapters?: import('./adapters/types.js').SyrinSDKAdapter[];
   /**
    * Name for this SDK instance in the registry.
    * Defaults to `'default'`. Multiple named instances can coexist in one process.
@@ -1089,16 +1446,12 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // Build SyrinSDKCore — the provider-agnostic instrumentation engine
   const core = new SyrinSDKCore(config, sessionStore, emitter, otelBridge, checkpointClient);
 
-  // Register the built-in OpenAI adapter (loads openai module lazily)
-  await core.registerAdapter(new OpenAIAdapter());
-
-  // Wire ConfigStore into core so framework adapters can read config
+  // Wire ConfigStore into core
   const { ConfigStore } = await import('./config/store.js');
   const configStore = new ConfigStore(config.configHistoryMaxlen ?? 50, config.configAuditMaxlen ?? 1000);
   core.setConfigStore(configStore);
   _registerBuiltinFields(configStore);
 
-  // Wire ConfigStore into emitter so ingest config_updates propagate to framework adapters
   emitter.setConfigStore(configStore);
 
   // Wire global TunableRegistry into core
@@ -1122,45 +1475,6 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
       }
     }
   } catch { /* non-fatal */ }
-
-  // Wire explicit agentFramework override — takes priority over auto-detection in register()
-  if (options.agentFramework) {
-    core.setAgentFramework(options.agentFramework);
-
-    // When the user explicitly declares their framework, install the corresponding
-    // Tier-2 adapter immediately — even if the library was loaded via ESM (which
-    // won't appear in require.cache or trigger Module._load hooks).
-    const _frameworkAdapterMap: Record<string, { path: string; exportName: string }> = {
-      'langchain':  { path: './adapters/langchain/index.js',  exportName: 'LangChainAdapter' },
-      'langgraph':  { path: './adapters/langgraph/index.js',  exportName: 'LangGraphAdapter' },
-      'mastra':     { path: './adapters/mastra/index.js',     exportName: 'MastraAdapter'    },
-      'vercel-ai':  { path: './adapters/vercel-ai/index.js',  exportName: 'VercelAIAdapter'  },
-      'pydantic_ai':{ path: '', exportName: '' }, // Python-only, skip in TS
-    };
-    const adapterEntry = _frameworkAdapterMap[options.agentFramework];
-    if (adapterEntry?.exportName && !core.isAdapterInstalled(options.agentFramework)) {
-      try {
-        const adapterMod = await import(adapterEntry.path) as Record<string, new () => SyrinSDKAdapter>;
-        const AdapterClass = adapterMod[adapterEntry.exportName];
-        if (typeof AdapterClass === 'function') {
-          await core.registerAdapter(new AdapterClass());
-        }
-      } catch { /* optional dep not installed — skip */ }
-    }
-  }
-
-  // Register user-provided adapters first — they always take precedence over auto-detection
-  if (options.adapters) {
-    for (const adapter of options.adapters) {
-      await core.registerAdapter(adapter);
-    }
-  }
-
-  // Auto-detect framework libraries: inspect require.cache for libraries already loaded,
-  // then hook Module._load to catch libraries loaded after init().
-  // Only libraries actively used in this process are instrumented (not merely installed).
-  await installForActiveLibraries(core, config);
-  installModuleHook(core, config);
 
   // Load persisted config from previous run (.syrin/syrin.config.json).
   // Parity with Python SDK — overrides survive restarts without waiting for polling.
@@ -1285,7 +1599,8 @@ export async function refreshSchema(name = 'default'): Promise<void> {
  * ```
  */
 export function makeSessionId(options: SessionOptions): string {
-  const { userId, key, window: win = 'day' } = options;
+  const { userId, key, window: _rawWin = 'day' } = options;
+  const win = normalizeWindow(_rawWin);
 
   if (!userId && !key) {
     // No grouping — callers who want auto-UUID should use withSession() directly
@@ -1461,8 +1776,6 @@ export function mountConfigEndpoint(instanceName = 'default') {
     // Cast is safe: overrides came from trusted backend JSON
     inst.configure(overrides as ConfigUpdate);
 
-    // Update ConfigStore — framework adapters (LangChain _buildConfig, etc.) read from here
-    // Without this, LangChain wrap() would inject stale startup values into configurable
     const coreRef = inst['_core'];
     const configStore = coreRef.getConfigStore?.();
     if (configStore) {
@@ -1579,16 +1892,17 @@ export function getSessionId(): string {
  *   `optionsOrFn` is a {@link SessionOptions} object).
  * @returns The return value of `fn`.
  */
-export async function withSession<T>(fn: () => Promise<T>): Promise<T>;
-export async function withSession<T>(options: SessionOptions, fn: () => Promise<T>): Promise<T>;
+// withSession overloads — all four combinations of (options?, sid-param?)
+export async function withSession<T>(fn: (sid: string) => Promise<T>): Promise<T>;
+export async function withSession<T>(options: SessionOptions, fn: (sid: string) => Promise<T>): Promise<T>;
 export async function withSession<T>(
-  optionsOrFn: SessionOptions | (() => Promise<T>),
-  fn?: () => Promise<T>,
+  optionsOrFn: SessionOptions | ((sid: string) => Promise<T>),
+  fn?: (sid: string) => Promise<T>,
 ): Promise<T> {
   // Mode 1: withSession(fn) — independent auto-UUID session
   if (typeof optionsOrFn === 'function') {
     const autoId = generateId('ses');
-    return _runWithSession(autoId, {}, optionsOrFn as () => Promise<T>);
+    return _runWithSession(autoId, {}, optionsOrFn as (sid: string) => Promise<T>);
   }
 
   // Mode 2: withSession(options, fn) — grouped session
@@ -1602,7 +1916,7 @@ export async function withSession<T>(
     sessionId = makeSessionId(opts);
     if (opts.userId) extraMeta.user_id = opts.userId;
     if (opts.key) extraMeta.group_key = opts.key;
-    if (opts.window) extraMeta.window = opts.window ?? 'day';
+    if (opts.window) extraMeta.window = normalizeWindow(opts.window) ?? 'day';
     extraMeta.is_grouped = true;
   }
   if (opts.metadata) extraMeta = { ...extraMeta, ...opts.metadata };
@@ -1618,7 +1932,7 @@ export async function withSession<T>(
 async function _runWithSession<T>(
   sessionId: string,
   extraMeta: Record<string, unknown>,
-  fn: () => Promise<T>,
+  fn: (sid: string) => Promise<T>,
 ): Promise<T> {
 
   const inst = _primaryInstance;
@@ -1647,7 +1961,7 @@ async function _runWithSession<T>(
   }
 
   try {
-    return await sessionStorage.run(sessionId, fn);
+    return await sessionStorage.run(sessionId, () => fn(sessionId));
   } finally {
     if (emitter) {
       const endedEvent: SyrinEvent = {
@@ -1684,6 +1998,103 @@ export function getInstance(name?: string): SyrinSDKInstance | null {
     throw new Error(`[Syrin] No SDK instance named "${name}". Call init({ instanceName: "${name}" }) first.`);
   }
   return inst;
+}
+
+/**
+ * Module-level shorthand for {@link SyrinSDKInstance.context}.
+ *
+ * Runs `fn` inside a flat, combined session + agent/workflow/swarm scope using the
+ * primary (default) SDK instance.  No-ops (still calls `fn`) when no instance exists.
+ *
+ * @example
+ * ```ts
+ * import { context } from "@syrin/sdk";
+ *
+ * const result = await context(
+ *   { userId: 'alice', agent: 'researcher' },
+ *   async (ctx) => {
+ *     const reply = await callLLM(messages);
+ *     return { reply, sessionId: ctx.sessionId };
+ *   }
+ * );
+ * ```
+ */
+export async function context<T>(
+  options: ContextOptions,
+  fn: (ctx: SyrinContext) => Promise<T>,
+): Promise<T> {
+  if (_primaryInstance) {
+    return _primaryInstance.context(options, fn);
+  }
+  // No SDK instance — still run fn with null context (fail-open).
+  return fn({ sessionId: null, agentId: null, workflowId: null, swarmId: null });
+}
+
+/**
+ * Module-level shorthand for {@link SyrinSDKInstance.traced}.
+ *
+ * Returns a decorator that wraps an async function so every invocation is
+ * automatically scoped to the given {@link ContextOptions} on the primary instance.
+ *
+ * @example
+ * ```ts
+ * import { traced } from "@syrin/sdk";
+ *
+ * const research = traced({ agent: 'researcher' })(
+ *   async (query: string) => chain.invoke({ query })
+ * );
+ * ```
+ */
+export function traced<T extends (...args: unknown[]) => Promise<unknown>>(
+  options: ContextOptions,
+): (fn: T) => T {
+  return (fn: T): T => {
+    const wrapped = function (...args: Parameters<T>): ReturnType<T> {
+      return context(options, () => fn(...args) as Promise<unknown>) as ReturnType<T>;
+    };
+    return wrapped as unknown as T;
+  };
+}
+
+/**
+ * Enter a workflow scope at module level — all nested LLM calls share this workflowId.
+ *
+ * @example
+ * ```ts
+ * import { workflow } from '@syrin/sdk';
+ *
+ * await workflow('research-pipeline', async (ctx) => {
+ *   await researcher.run(async () => { ... });
+ *   await writer.run(async () => { ... });
+ * });
+ * ```
+ */
+export async function workflow<T>(
+  workflowId: string,
+  fn: (ctx: import('./types.js').RunContext) => Promise<T>,
+): Promise<T> {
+  const { withWorkflow } = await import('./agent/context.js');
+  return withWorkflow(workflowId, fn);
+}
+
+/**
+ * Enter a swarm scope at module level — all nested parallel agents share this swarmId.
+ *
+ * @example
+ * ```ts
+ * import { swarm } from '@syrin/sdk';
+ *
+ * await swarm('parallel-research', async (ctx) => {
+ *   await Promise.all([agentA.run(...), agentB.run(...)]);
+ * });
+ * ```
+ */
+export async function swarm<T>(
+  swarmId: string,
+  fn: (ctx: import('./types.js').RunContext) => Promise<T>,
+): Promise<T> {
+  const { withSwarm } = await import('./agent/context.js');
+  return withSwarm(swarmId, fn);
 }
 
 /**

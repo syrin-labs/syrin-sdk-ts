@@ -135,10 +135,10 @@ describe('ConfigStore — Immutable Anchors', () => {
     expect(store.get('llm', 'temperature')).toBe(0.3);
   });
 
-  it('anchor blocks applyUpdates for anchored key (silently, not in rejected)', () => {
+  it('anchor blocks applyUpdates for anchored key (appears in rejected, value preserved)', () => {
     store.anchor('llm.temperature', 0.3);
     const rejected = store.applyUpdates({ 'llm.temperature': 0.9 });
-    expect(rejected).toEqual({});
+    expect(Object.keys(rejected)).toContain('llm.temperature');
     expect(store.get('llm', 'temperature')).toBe(0.3); // unchanged
   });
 
@@ -182,7 +182,9 @@ describe('ConfigStore — Immutable Anchors', () => {
       'llm.model': 'gpt-3.5-turbo',
       'langgraph.recursion_limit': 50,
     });
-    expect(rejected).toEqual({});
+    expect(Object.keys(rejected)).toContain('llm.temperature');
+    expect(Object.keys(rejected)).toContain('llm.model');
+    expect(Object.keys(rejected)).toContain('langgraph.recursion_limit');
     expect(store.get('llm', 'temperature')).toBe(0.1);
     expect(store.get('llm', 'model')).toBe('gpt-4o');
     expect(store.get('langgraph', 'recursion_limit')).toBe(5);
@@ -204,12 +206,12 @@ describe('ConfigStore — Immutable Anchors', () => {
     expect(store.getAnchors()['llm.temperature']).toBe(0.3);
   });
 
-  it('anchor takes priority over blocklist (both skip, but anchored value is preserved)', () => {
+  it('anchor takes priority over blocklist (anchor in rejected, value preserved)', () => {
     store.anchor('llm.temperature', 0.3);
     store.setBlocklist(new Set(['llm.temperature']));
-    // Both anchor and blocklist would skip the update; anchor value persists
+    // Anchor check runs first — appears in rejected, value preserved
     const rejected = store.applyUpdates({ 'llm.temperature': 0.9 });
-    expect(rejected).toEqual({});
+    expect(Object.keys(rejected)).toContain('llm.temperature');
     expect(store.get('llm', 'temperature')).toBe(0.3);
   });
 });

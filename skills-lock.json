@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "sdk-development": {
+      "source": "srstomp/pokayokay",
+      "sourceType": "github",
+      "computedHash": "1f4bcba37331f2f80ebf01a30d26558d77dbb96cf3cc5abde1638573767426e0"
+    }
+  }
+}

@@ -58,7 +58,7 @@ describe('Heartbeat', () => {
 
     expect(fetchSpy).toHaveBeenCalledOnce();
     const [url] = fetchSpy.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('http://localhost:4000/agents/my-agent/heartbeat');
+    expect(url).toBe('http://localhost:4000/api/v1/agents/my-agent/heartbeat');
   });
 
   // 2. Body is { stopped: false } for a keep-alive ping

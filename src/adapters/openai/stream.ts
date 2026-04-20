@@ -16,7 +16,6 @@ export function wrapOpenAIStream(
   let finishReason = 'stop';
   let actualModel = (ctx.modifiedRaw['model'] as string | undefined) ?? normalizedParams.model;
   const contentChunks: string[] = [];
-  let ttftMs: number | undefined;
 
   const streamWithIter = stream as AsyncIterable<Record<string, unknown>> & {
     [key: string | symbol]: unknown;
@@ -26,9 +25,6 @@ export function wrapOpenAIStream(
   const wrappedIterator = async function* (): AsyncGenerator<Record<string, unknown>> {
     try {
       for await (const chunk of { [Symbol.asyncIterator]: originalIterator }) {
-        if (ttftMs === undefined) {
-          ttftMs = Date.now() - startTime;
-        }
         if (chunk['model']) actualModel = chunk['model'] as string;
         const choices = chunk['choices'] as Array<{ delta?: { content?: string }; finish_reason?: string }> | undefined;
         const delta = choices?.[0]?.delta;
@@ -54,7 +50,6 @@ export function wrapOpenAIStream(
         durationMs,
         stream: true,
         responseText,
-        ttftMs,
       };
 
       core.onStreamComplete(ctx, normalizedParams, result);

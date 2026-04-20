@@ -82,7 +82,7 @@ function _ensureMetrics(): void {
   try {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { metrics } = require('@opentelemetry/api') as typeof import('@opentelemetry/api');
-    const meter = metrics.getMeter('syrin', '0.1.0');
+    const meter = metrics.getMeter('syrin', '1.0.0');
     _tokenUsageHist = meter.createHistogram('gen_ai.client.token.usage', {
       unit: '{token}',
       description: 'Measures number of input and output tokens used',
@@ -231,7 +231,7 @@ export class OTelBridge {
 
     provider.register();
     this.provider = provider;
-    this.tracer = otelApi.trace.getTracer('syrin-sdk', '0.1.0');
+    this.tracer = otelApi.trace.getTracer('syrin-sdk', '1.0.0');
 
     if (this.config.debug) {
       console.log(`[Syrin] OTel initialized with exporter: ${this.config.otelExporter}`);

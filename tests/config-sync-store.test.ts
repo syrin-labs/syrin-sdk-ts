@@ -43,7 +43,7 @@ const DEFAULT_OPTS = {
 
 function stubOverrides(overrides: Record<string, unknown>) {
   server.use(
-    http.get(`${BASE_URL}/agents/${AGENT_ID}/overrides`, () =>
+    http.get(`${BASE_URL}/api/v1/agents/${AGENT_ID}/overrides`, () =>
       HttpResponse.json({ ok: true, overrides }),
     ),
   );

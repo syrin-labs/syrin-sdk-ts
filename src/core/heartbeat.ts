@@ -9,6 +9,7 @@ export interface HeartbeatOptions {
   apiKey: string;
   offline: boolean;
   intervalMs: number;
+  debug?: boolean;
 }
 
 export class Heartbeat {
@@ -43,7 +44,7 @@ export class Heartbeat {
     const { agentId, backendUrl, apiKey } = this._opts;
     if (!agentId) return;
     try {
-      await fetch(`${backendUrl}/agents/${agentId}/heartbeat`, {
+      const resp = await fetch(`${backendUrl}/api/v1/agents/${agentId}/heartbeat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -52,8 +53,15 @@ export class Heartbeat {
         body: JSON.stringify({ stopped }),
         signal: AbortSignal.timeout(5_000),
       });
-    } catch {
-      // Non-fatal — network issues should never crash the agent
+      if (!resp.ok && this._opts.debug) {
+        console.warn(`[Syrin] Heartbeat received non-2xx response: ${resp.status}`);
+      }
+    } catch (err) {
+      if (this._opts.debug) {
+        const raw = err instanceof Error ? err.message : String(err);
+        const safe = raw.replaceAll(apiKey, '****');
+        console.warn(`[Syrin] Heartbeat error: ${safe}`);
+      }
     }
   }
 }

@@ -4,10 +4,10 @@
 
 import { withFrameworkContext } from '@/agent/framework-context.js';
 import { generateId } from '@/utils/helpers.js';
-import type { SyrinSDKBaseFrameworkAdapter } from '@/adapters/types.js';
+import type { BaseFrameworkAdapter } from '@/adapters/types.js';
 import { extractModelInfo } from './adapter.js';
 
-export interface MastraAdapterLike extends SyrinSDKBaseFrameworkAdapter {
+export interface MastraAdapterLike extends BaseFrameworkAdapter {
   readonly agentId: string | undefined;
   readonly sessionId: string | undefined;
   readonly captureContent: boolean;
@@ -30,10 +30,10 @@ export function makeGenerateWrapper(
   adapter: MastraAdapterLike,
   origFn: (...args: unknown[]) => unknown,
 ): (...args: unknown[]) => Promise<unknown> {
-  return async function patchedGenerate(
+  return (async function patchedGenerate(
     this: Record<string, unknown>,
     prompt: unknown,
-    opts?: unknown,
+    opts?: Record<string, unknown>,
     ...rest: unknown[]
   ): Promise<unknown> {
     const agentName = typeof this['name'] === 'string' ? this['name'] : 'unknown';
@@ -41,14 +41,13 @@ export function makeGenerateWrapper(
 
     const llmCfg = adapter.getConfig('llm');
     const mastraCfg = adapter.getConfig('mastra');
-    const promptCfg = adapter.getConfig('prompt');
-    const injectedOpts = _injectLlmConfig(opts as Record<string, unknown> | undefined, llmCfg, mastraCfg, promptCfg);
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, mastraCfg);
 
     const runId = generateId('mrun_');
     const start = Date.now();
 
     // Resolve instructions — remote config overrides agent's own instructions
-    const remoteSystemPrompt = promptCfg['system_prompt'];
+    const remoteSystemPrompt = llmCfg['system_prompt'];
     const resolvedInstructions = typeof remoteSystemPrompt === 'string' && remoteSystemPrompt
       ? remoteSystemPrompt
       : await _resolveInstructions(this);
@@ -107,17 +106,17 @@ export function makeGenerateWrapper(
         }
       },
     );
-  };
+  }) as unknown as (...args: unknown[]) => Promise<unknown>;
 }
 
 export function makeStreamWrapper(
   adapter: MastraAdapterLike,
   origFn: (...args: unknown[]) => unknown,
 ): (...args: unknown[]) => Promise<unknown> {
-  return async function patchedStream(
+  return (async function patchedStream(
     this: Record<string, unknown>,
     prompt: unknown,
-    opts?: unknown,
+    opts?: Record<string, unknown>,
     ...rest: unknown[]
   ): Promise<unknown> {
     const agentName = typeof this['name'] === 'string' ? this['name'] : 'unknown';
@@ -125,11 +124,10 @@ export function makeStreamWrapper(
 
     const llmCfg = adapter.getConfig('llm');
     const mastraCfg = adapter.getConfig('mastra');
-    const promptCfg = adapter.getConfig('prompt');
-    const injectedOpts = _injectLlmConfig(opts as Record<string, unknown> | undefined, llmCfg, mastraCfg, promptCfg);
+    const injectedOpts = _injectLlmConfig(opts, llmCfg, mastraCfg);
 
     const start = Date.now();
-    const remoteSystemPrompt = promptCfg['system_prompt'];
+    const remoteSystemPrompt = llmCfg['system_prompt'];
     const resolvedInstructions = typeof remoteSystemPrompt === 'string' && remoteSystemPrompt
       ? remoteSystemPrompt
       : await _resolveInstructions(this);
@@ -211,7 +209,7 @@ export function makeStreamWrapper(
     }
 
     return wrappedIterable();
-  };
+  }) as unknown as (...args: unknown[]) => Promise<unknown>;
 }
 
 /**
@@ -304,7 +302,6 @@ function _injectLlmConfig(
   opts: Record<string, unknown> | undefined,
   llmCfg: Record<string, unknown>,
   mastraCfg: Record<string, unknown> = {},
-  promptCfg: Record<string, unknown> = {},
 ): Record<string, unknown> {
   const result = { ...(opts ?? {}) };
 
@@ -315,8 +312,8 @@ function _injectLlmConfig(
   if (llmCfg['max_tokens'] != null) result['maxTokens'] = llmCfg['max_tokens'];
 
   // System prompt override — passed as AgentGenerateOptions.instructions
-  if (typeof promptCfg['system_prompt'] === 'string' && promptCfg['system_prompt']) {
-    result['instructions'] = promptCfg['system_prompt'];
+  if (typeof llmCfg['system_prompt'] === 'string' && llmCfg['system_prompt']) {
+    result['instructions'] = llmCfg['system_prompt'];
   }
 
   // Mastra-specific params

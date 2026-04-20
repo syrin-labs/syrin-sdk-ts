@@ -12,7 +12,7 @@ import type { SessionStore } from '@/core/session.js';
 import type { ConfigStore } from '@/config/store.js';
 import { SDK_VERSION } from '@/config/config.js';
 import { GovernanceResponse } from '@/core/governance.js';
-import { fireConfigChange, fireAlert } from '@/observability/hooks.js';
+import { fireConfigChange, fireAlert, dispatchEvent } from '@/observability/hooks.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
 
 // MAX_QUEUE_SIZE is now read from config.maxQueueSize (default: 1000)
@@ -74,6 +74,9 @@ export class Emitter {
   }
 
   emit(event: SyrinEvent, sessionId: string): void {
+    // Fire sdk.on() listeners immediately (synchronous, before queuing)
+    try { dispatchEvent(event); } catch { /* fail-open */ }
+
     const queued: QueuedEvent = { event, sessionId };
 
     // Enforce max queue size: drop oldest
@@ -146,7 +149,7 @@ export class Emitter {
 
   private async _checkHealth(): Promise<void> {
     try {
-      const response = await fetch(`${this.config.backendUrl}/health`, {
+      const response = await fetch(`${this.config.backendUrl}/api/v1/health`, {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${this.config.apiKey}` },
         signal: AbortSignal.timeout(5_000),
@@ -201,7 +204,7 @@ export class Emitter {
     };
 
     try {
-      const response = await fetch(`${this.config.backendUrl}/ingest`, {
+      const response = await fetch(`${this.config.backendUrl}/api/v1/ingest`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -214,7 +217,7 @@ export class Emitter {
       if (!response.ok) {
         // Only log status code and URL — never log request headers (they contain the API key)
         console.warn(
-          `[Syrin] Ingest failed (HTTP ${response.status} at ${this.config.backendUrl}/ingest). Re-queuing events.`
+          `[Syrin] Ingest failed (HTTP ${response.status} at ${this.config.backendUrl}/api/v1/ingest). Re-queuing events.`
         );
         this._requeue(batch);
       } else {
@@ -360,7 +363,7 @@ export class Emitter {
   ): Promise<void> {
     try {
       const res = await fetch(
-        `${this.config.backendUrl}/approvals/${approvalId}`,
+        `${this.config.backendUrl}/api/v1/approvals/${approvalId}`,
         {
           method: 'GET',
           headers: { 'Authorization': `Bearer ${this.config.apiKey}` },
@@ -445,18 +448,41 @@ export class Emitter {
         this.sessionStore.appendGovernanceAction(sessionId, enrichedAction);
         console.warn(`[Syrin] Backend sent STOP action for session ${sessionId} — reason: ${action['reason'] ?? '?'}`);
       } else if (actionType === 'inject_message') {
-        this.sessionStore.appendInjectedMessage(sessionId, {
-          role: (action['role'] as string) ?? 'system',
-          content: (action['content'] as string) ?? '',
-        });
-        if (this.config.debug) {
-          console.log(`[Syrin] inject_message queued for session ${sessionId}`);
+        const ALLOWED_ROLES = new Set(['system', 'user', 'assistant']);
+        let rawRole = (action['role'] as string) ?? 'system';
+        let rawContent = (action['content'] as string) ?? '';
+        // Validate role: only known chat roles accepted.
+        if (!ALLOWED_ROLES.has(rawRole)) {
+          console.warn(`[Syrin] inject_message has invalid role '${rawRole}' — defaulting to 'system'`);
+          rawRole = 'system';
+        }
+        // Validate content: must be a string, capped at 10 000 chars.
+        if (typeof rawContent !== 'string') {
+          console.warn('[Syrin] inject_message content is not a string — ignoring');
+        } else {
+          if (rawContent.length > 10_000) {
+            console.warn(`[Syrin] inject_message content truncated to 10 000 chars (was ${rawContent.length})`);
+            rawContent = rawContent.slice(0, 10_000);
+          }
+          this.sessionStore.appendInjectedMessage(sessionId, { role: rawRole, content: rawContent });
+          if (this.config.debug) {
+            console.log(`[Syrin] inject_message queued for session ${sessionId} (role=${rawRole} len=${rawContent.length})`);
+          }
         }
       } else if (actionType === 'alert') {
         fireAlert(action as Record<string, unknown>);
         console.info(`[Syrin][${action['level'] ?? 'info'}] alert for session ${sessionId}: ${action['message'] ?? ''}`);
       } else if (actionType === 'checkpoint' || actionType === 'restore') {
-        this.sessionStore.appendGovernanceAction(sessionId, action);
+        // Validate checkpoint label length to prevent unbounded metadata growth.
+        let validatedAction = action;
+        if (actionType === 'checkpoint') {
+          const rawLabel = (action as Record<string, unknown>)['label'];
+          if (typeof rawLabel === 'string' && rawLabel.length > 255) {
+            console.warn(`[Syrin] checkpoint label truncated to 255 chars (was ${rawLabel.length})`);
+            validatedAction = { ...action, label: rawLabel.slice(0, 255) } as typeof action;
+          }
+        }
+        this.sessionStore.appendGovernanceAction(sessionId, validatedAction);
         if (this.config.debug) {
           console.log(`[Syrin] ${actionType} action queued for session ${sessionId}`);
         }

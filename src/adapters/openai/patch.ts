@@ -2,14 +2,9 @@
  * OpenAI Adapter — Patching mechanics
  */
 
-import { createRequire } from 'module';
 import type { ISyrinCore, BeforeCallResult, NormalizedCallParams } from '@/adapters/types.js';
 import { normalizeOpenAIParams, extractOpenAIResult } from './normalize.js';
 import { wrapOpenAIStream } from './stream.js';
-
-// createRequire from the user's CWD so we resolve the user's openai, not the SDK's copy.
-// This is used to also patch the CJS version of openai (used by LangChain and other CJS packages).
-const _cwdRequire = createRequire(process.cwd() + '/package.json');
 
 // Minimal interfaces for the optional openai module (avoid direct import of optional dep)
 export interface CompletionsInstance {
@@ -58,34 +53,6 @@ function _patchWithModule(openaiModule: OpenAIModule, core: ISyrinCore): void {
     if (core.config.debug) {
       console.log('[Syrin] Patched Completions.prototype.create');
     }
-
-    // Also patch the CJS entry point of openai if it's a different class instance.
-    // Node.js loads ESM and CJS as separate module instances — frameworks like LangChain
-    // use the CJS `require('openai')` even when the user imports via ESM `import OpenAI`.
-    // Without patching the CJS prototype, their LLM calls would bypass instrumentation.
-    try {
-      const cjsOpenai = _cwdRequire('openai') as { default?: unknown; [k: string]: unknown };
-      const CJSOpenAIClass = (cjsOpenai.default ?? cjsOpenai) as {
-        new(opts: { apiKey: string }): { chat: { completions: CompletionsInstance } };
-      };
-      const cjsProbe = new CJSOpenAIClass({ apiKey: '_syrin_probe_cjs_' });
-      const CJSCompletions = (cjsProbe as { chat?: { completions?: { constructor?: unknown } } })
-        ?.chat?.completions?.constructor as { prototype?: { create?: (...args: unknown[]) => unknown } } | null | undefined;
-      if (
-        CJSCompletions &&
-        typeof CJSCompletions.prototype?.create === 'function' &&
-        CJSCompletions.prototype !== (ActualCompletions as { prototype?: unknown }).prototype
-      ) {
-        const origCJS = CJSCompletions.prototype.create;
-        CJSCompletions.prototype.create = _makePatchedCreate(origCJS, core);
-        if (core.config.debug) {
-          console.log('[Syrin] Also patched CJS Completions.prototype.create (for LangChain/CJS frameworks)');
-        }
-      }
-    } catch {
-      // CJS patch is best-effort — not fatal if it fails
-    }
-
     return;
   }
 

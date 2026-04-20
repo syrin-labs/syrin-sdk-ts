@@ -72,7 +72,7 @@ describe('Emitter: batching and flushing', () => {
     let capturedPayload: IngestPayload | null = null;
 
     server.use(
-      http.post('http://localhost:4399/ingest', async ({ request }) => {
+      http.post('http://localhost:4399/api/v1/ingest', async ({ request }) => {
         capturedPayload = (await request.json()) as IngestPayload;
         return HttpResponse.json({ ok: true });
       })
@@ -100,7 +100,7 @@ describe('Emitter: batching and flushing', () => {
     let capturedPayload: IngestPayload | null = null;
 
     server.use(
-      http.post('http://localhost:4399/ingest', async ({ request }) => {
+      http.post('http://localhost:4399/api/v1/ingest', async ({ request }) => {
         capturedPayload = (await request.json()) as IngestPayload;
         return HttpResponse.json({ ok: true });
       })
@@ -120,7 +120,7 @@ describe('Emitter: batching and flushing', () => {
 
   it('applies config_updates from backend response to session', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () => {
+      http.post('http://localhost:4399/api/v1/ingest', () => {
         return HttpResponse.json({
           ok: true,
           config_updates: { temperature: 0.3, max_tokens: 500 },
@@ -144,7 +144,7 @@ describe('Emitter: batching and flushing', () => {
     let callCount = 0;
 
     server.use(
-      http.post('http://localhost:4399/ingest', () => {
+      http.post('http://localhost:4399/api/v1/ingest', () => {
         callCount++;
         if (callCount === 1) {
           return new HttpResponse(null, { status: 500 });
@@ -187,7 +187,7 @@ describe('Emitter: batching and flushing', () => {
     let capturedPayload: IngestPayload | null = null;
 
     server.use(
-      http.post('http://localhost:4399/ingest', async ({ request }) => {
+      http.post('http://localhost:4399/api/v1/ingest', async ({ request }) => {
         capturedPayload = (await request.json()) as IngestPayload;
         return HttpResponse.json({ ok: true });
       })
@@ -208,7 +208,7 @@ describe('Emitter: batching and flushing', () => {
 
   it('handles network errors gracefully by requeuing events', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () => {
+      http.post('http://localhost:4399/api/v1/ingest', () => {
         return HttpResponse.error();
       })
     );
@@ -227,7 +227,7 @@ describe('Emitter: batching and flushing', () => {
     let flushCalled = false;
 
     server.use(
-      http.post('http://localhost:4399/ingest', () => {
+      http.post('http://localhost:4399/api/v1/ingest', () => {
         flushCalled = true;
         return HttpResponse.json({ ok: true });
       })
@@ -266,7 +266,7 @@ describe('Emitter: batching and flushing', () => {
     const capturedPayloads: { session_id: string; event_ids: string[] }[] = [];
 
     server.use(
-      http.post('http://localhost:4399/ingest', async ({ request }) => {
+      http.post('http://localhost:4399/api/v1/ingest', async ({ request }) => {
         const body = (await request.json()) as { session_id: string; events: { event_id: string }[] };
         capturedPayloads.push({
           session_id: body.session_id,
@@ -308,7 +308,7 @@ describe('Emitter: batching and flushing', () => {
     const capturedPayloads: unknown[] = [];
 
     server.use(
-      http.post('http://localhost:4399/ingest', async ({ request }) => {
+      http.post('http://localhost:4399/api/v1/ingest', async ({ request }) => {
         capturedPayloads.push(await request.json());
         return HttpResponse.json({ ok: true });
       })
@@ -352,7 +352,7 @@ describe('Emitter — config_updates propagation to ConfigStore', () => {
 
   it('dot-notation config_updates from ingest response update ConfigStore sections', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           config_updates: { 'llm.temperature': 0.42, 'llm.model': 'gpt-4o-mini' },
@@ -374,7 +374,7 @@ describe('Emitter — config_updates propagation to ConfigStore', () => {
     // The backend may return flat keys like "temperature" (old behaviour) — these should
     // still reach SessionStore but ConfigStore only applies dot-notation keys.
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({
           ok: true,
           config_updates: { 'llm.temperature': 0.99 },
@@ -392,7 +392,7 @@ describe('Emitter — config_updates propagation to ConfigStore', () => {
 
   it('ConfigStore is unchanged when ingest response has no config_updates', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({ ok: true }),
       ),
     );
@@ -410,7 +410,7 @@ describe('Emitter — config_updates propagation to ConfigStore', () => {
     // Emitter without configStore — should still work as before
     const plainEmitter = new Emitter(config, sessionStore);
     server.use(
-      http.post('http://localhost:4399/ingest', () =>
+      http.post('http://localhost:4399/api/v1/ingest', () =>
         HttpResponse.json({ ok: true, config_updates: { 'llm.temperature': 0.5 } }),
       ),
     );

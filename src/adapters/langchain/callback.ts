@@ -126,9 +126,8 @@ export class SyrinLangChainCallback {
     _tags?: string[],
     _extraParams?: unknown,
   ): void {
-    // Guard: when the BaseChatModel prototype patch is active it already emits LLM_CALL
-    // for every generate() invocation. Emitting here too would double-count token usage,
-    // costs, and call counts in the dashboard.
+    // When BaseChatModel.prototype.generate is patched, Tier 1 already emits LLM_CALL.
+    // Skip to avoid double-counting token costs.
     if (isLLMPatched()) return;
 
     const durationMs = Date.now() - this._llmStartTime;
@@ -176,7 +175,7 @@ export class SyrinLangChainCallback {
     _tags?: string[],
     _extraParams?: unknown,
   ): void {
-    // Guard: same as handleLLMEnd — prototype patch already captures error events
+    // When BaseChatModel.prototype.generate is patched, Tier 1 already emits LLM_CALL.
     if (isLLMPatched()) return;
 
     const durationMs = Date.now() - this._llmStartTime;

@@ -10,6 +10,8 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
+    include: ['tests/**/*.test.ts'],
+    exclude: ['.claude/**'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
@@ -22,6 +24,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),
+      '@syrin/sdk/advanced': resolve(__dirname, 'src/advanced.ts'),
+      '@syrin/sdk': resolve(__dirname, 'src/index.ts'),
     },
     extensions: ['.ts', '.mts', '.js', '.mjs'],
   },
