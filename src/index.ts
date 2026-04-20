@@ -591,7 +591,7 @@ export class SyrinSDKInstance implements SyrinSDK {
     return (fn: T): T => {
       const self = this;
       const wrapped = function (...args: Parameters<T>): ReturnType<T> {
-        return self.context(options, () => fn(...args) as Promise<unknown>) as ReturnType<T>;
+        return self.context(options, () => fn(...args)) as ReturnType<T>;
       };
       return wrapped as unknown as T;
     };
@@ -2049,7 +2049,7 @@ export function traced<T extends (...args: unknown[]) => Promise<unknown>>(
 ): (fn: T) => T {
   return (fn: T): T => {
     const wrapped = function (...args: Parameters<T>): ReturnType<T> {
-      return context(options, () => fn(...args) as Promise<unknown>) as ReturnType<T>;
+      return context(options, () => fn(...args)) as ReturnType<T>;
     };
     return wrapped as unknown as T;
   };

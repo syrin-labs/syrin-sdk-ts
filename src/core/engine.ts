@@ -202,7 +202,7 @@ export class SyrinCore implements ISyrinCore {
         for (const [fieldName, rawField] of Object.entries(fields)) {
           if (!globalSections[sectionName][fieldName]) {
             // Normalize: flat ge/le into nested constraints object
-            const field = rawField as Record<string, unknown>;
+            const field = rawField;
             const constraints: Record<string, number> = {};
             if (field['ge'] != null) constraints['ge'] = field['ge'] as number;
             if (field['le'] != null) constraints['le'] = field['le'] as number;

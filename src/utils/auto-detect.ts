@@ -27,7 +27,7 @@ const _installed = new Set<string>();
 
 function isAlreadyRegistered(core: ISyrinCore, adapterName: string): boolean {
   const coreInternal = core as unknown as Record<string, unknown>;
-  if (typeof (coreInternal['isAdapterInstalled'] as unknown) === 'function') {
+  if (typeof (coreInternal['isAdapterInstalled']) === 'function') {
     const exportToAdapterName: Record<string, string> = {
       OpenAIAdapter: 'openai',
     };
