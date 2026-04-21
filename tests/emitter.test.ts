@@ -71,7 +71,7 @@ describe('Emitter: batching and flushing', () => {
     let capturedPayload: IngestPayload | null = null;
 
     server.use(
-      http.post('http://localhost:4399/ingest', async ({ request }) => {
+      http.post('http://localhost:4399/api/v1/ingest', async ({ request }) => {
         capturedPayload = (await request.json()) as IngestPayload;
         return HttpResponse.json({ ok: true });
       })
@@ -99,7 +99,7 @@ describe('Emitter: batching and flushing', () => {
     let capturedPayload: IngestPayload | null = null;
 
     server.use(
-      http.post('http://localhost:4399/ingest', async ({ request }) => {
+      http.post('http://localhost:4399/api/v1/ingest', async ({ request }) => {
         capturedPayload = (await request.json()) as IngestPayload;
         return HttpResponse.json({ ok: true });
       })
@@ -119,7 +119,7 @@ describe('Emitter: batching and flushing', () => {
 
   it('applies config_updates from backend response to session', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () => {
+      http.post('http://localhost:4399/api/v1/ingest', () => {
         return HttpResponse.json({
           ok: true,
           config_updates: { temperature: 0.3, max_tokens: 500 },
@@ -143,7 +143,7 @@ describe('Emitter: batching and flushing', () => {
     let callCount = 0;
 
     server.use(
-      http.post('http://localhost:4399/ingest', () => {
+      http.post('http://localhost:4399/api/v1/ingest', () => {
         callCount++;
         if (callCount === 1) {
           return new HttpResponse(null, { status: 500 });
@@ -186,7 +186,7 @@ describe('Emitter: batching and flushing', () => {
     let capturedPayload: IngestPayload | null = null;
 
     server.use(
-      http.post('http://localhost:4399/ingest', async ({ request }) => {
+      http.post('http://localhost:4399/api/v1/ingest', async ({ request }) => {
         capturedPayload = (await request.json()) as IngestPayload;
         return HttpResponse.json({ ok: true });
       })
@@ -207,7 +207,7 @@ describe('Emitter: batching and flushing', () => {
 
   it('handles network errors gracefully by requeuing events', async () => {
     server.use(
-      http.post('http://localhost:4399/ingest', () => {
+      http.post('http://localhost:4399/api/v1/ingest', () => {
         return HttpResponse.error();
       })
     );
@@ -226,7 +226,7 @@ describe('Emitter: batching and flushing', () => {
     let flushCalled = false;
 
     server.use(
-      http.post('http://localhost:4399/ingest', () => {
+      http.post('http://localhost:4399/api/v1/ingest', () => {
         flushCalled = true;
         return HttpResponse.json({ ok: true });
       })

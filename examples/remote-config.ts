@@ -19,26 +19,28 @@
  * Inject config changes from another terminal while the script runs:
  *
  *   # Swap model + tighten temperature:
- *   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
+ *   curl -X POST http://localhost:4000/api/v1/agents/remote-config-demo/config \
  *        -H "Content-Type: application/json" \
  *        -H "Authorization: Bearer $SYRIN_API_KEY" \
  *        -d '{"overrides": {"temperature": 0.1, "model": "gpt-4o-mini"}}'
  *
  *   # Cap output length:
- *   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
+ *   curl -X POST http://localhost:4000/api/v1/agents/remote-config-demo/config \
  *        -H "Content-Type: application/json" \
  *        -H "Authorization: Bearer $SYRIN_API_KEY" \
  *        -d '{"overrides": {"max_tokens": 30}}'
  *
  *   # Disable a tool (visible in Round 5):
- *   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
+ *   curl -X POST http://localhost:4000/api/v1/agents/remote-config-demo/config \
  *        -H "Content-Type: application/json" \
  *        -H "Authorization: Bearer $SYRIN_API_KEY" \
  *        -d '{"overrides": {"disabled_tools": ["send_email"]}}'
  *
- *   # Reset everything:
- *   curl -X DELETE http://localhost:4000/agents/remote-config-demo/config \
- *        -H "Authorization: Bearer $SYRIN_API_KEY"
+ *   # Reset everything: clear all bare-key overrides via multiple nulls
+ *   curl -X POST http://localhost:4000/api/v1/agents/remote-config-demo/config \
+ *        -H "Content-Type: application/json" \
+ *        -H "Authorization: Bearer $SYRIN_API_KEY" \
+ *        -d '{"overrides": {"temperature": null, "model": null, "max_tokens": null, "system_prompt": null, "disabled_tools": null, "enabled_tools": null}}'
  */
 
 import OpenAI from 'openai';
@@ -88,7 +90,7 @@ function sleep(ms: number): Promise<void> {
 
 async function injectConfig(updates: Record<string, unknown>): Promise<void> {
   const apiKey = process.env['SYRIN_API_KEY'] ?? 'syrin_demo';
-  await fetch(`${BACKEND_URL}/agents/${AGENT_ID}/config`, {
+  await fetch(`${BACKEND_URL}/api/v1/agents/${AGENT_ID}/config`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -295,12 +297,12 @@ async function roundMultiTurn(): Promise<void> {
 // Try while Round 5 is running:
 //
 //   Block send_email:
-//   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
+//   curl -X POST http://localhost:4000/api/v1/agents/remote-config-demo/config \
 //        -H "Content-Type: application/json" -H "Authorization: Bearer syrin_test" \
 //        -d '{"overrides": {"disabled_tools": ["send_email"]}}'
 //
 //   Restrict to search only:
-//   curl -X POST http://localhost:4000/agents/remote-config-demo/config \
+//   curl -X POST http://localhost:4000/api/v1/agents/remote-config-demo/config \
 //        -H "Content-Type: application/json" -H "Authorization: Bearer syrin_test" \
 //        -d '{"overrides": {"enabled_tools": ["search_web"]}}'
 // ---------------------------------------------------------------------------
@@ -363,8 +365,8 @@ async function roundPerAgentTools(): Promise<void> {
   console.log('\n  agent-researcher  tools: search_web, send_email');
   console.log('  agent-writer      tools: search_web, create_document');
   console.log('\n  Inject config via real backend API to toggle tools per-agent:');
-  console.log('    POST /agents/remote-config-demo/config  {"overrides": {"disabled_tools": ["send_email"]}}');
-  console.log('    POST /agents/remote-config-demo/config  {"overrides": {"enabled_tools": ["search_web"]}}\n');
+  console.log('    POST /api/v1/agents/remote-config-demo/config  {"overrides": {"disabled_tools": ["send_email"]}}');
+  console.log('    POST /api/v1/agents/remote-config-demo/config  {"overrides": {"enabled_tools": ["search_web"]}}\n');
 
   for (let i = 1; i <= 3; i++) {
     console.log(`  ── Iteration ${i}/3 ──`);

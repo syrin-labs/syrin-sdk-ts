@@ -18,6 +18,7 @@ export default defineConfig({
     },
     testTimeout: 10000,
     hookTimeout: 10000,
+    exclude: ['**/node_modules/**', '**/dist/**', '**/.claude/**'],
   },
   resolve: {
     alias: {

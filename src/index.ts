@@ -21,10 +21,11 @@ import { generateId, nowIso } from '@/utils/helpers.js';
 import type { SyrinConfig, SyrinSDK, SyrinEvent } from '@/types.js';
 import type { SyrinAdapter } from '@/adapters/types.js';
 import { _setAutoRefreshCallback } from '@/tunable/tunable.js';
+import { agentStorage } from '@/agent/context.js';
 
 
 export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData } from '@/types.js';
-export { withAgent, withWorkflow, withSwarm, getRunContext } from '@/agent/context.js';
+export { getRunContext } from '@/agent/context.js';
 export { GovernanceStopError } from '@/core/governance.js';
 export type { Checkpoint } from '@/core/checkpoint.js';
 export { onConfigChange, onAlert } from '@/observability/hooks.js';
@@ -170,6 +171,62 @@ export class SyrinSDKInstance implements SyrinSDK {
   configSnapshot(): Record<string, unknown> {
     const { apiKey: _masked, ...rest } = this._config;
     return { ...rest, apiKey: '****' };
+  }
+
+  /**
+   * Emit a named lifecycle event to the Syrin dashboard.
+   *
+   * Use this to surface production-grade lifecycle events such as guardrail
+   * checks, circuit breakers, agent handoffs, budget estimations, and more.
+   * Active context fields (agentId, runId, workflowId, etc.) are automatically
+   * resolved from AsyncLocalStorage.
+   *
+   * @param eventType - Event type string. Built-in dashboard values:
+   *   `GUARDRAIL_INPUT`, `GUARDRAIL_OUTPUT`, `CIRCUIT_BREAKER_OPEN`,
+   *   `CIRCUIT_BREAKER_CLOSE`, `HANDOFF`, `AGENT_FORK`, `AGENT_JOIN`,
+   *   `WORKER_SPAWNED`, `BUDGET_ESTIMATION`, `TOOL_SELECTED`, `CHECKPOINT`.
+   * @param payload - Optional additional fields merged into the event.
+   * @param sessionId - Target session (defaults to current active session).
+   *
+   * @example
+   * sdk.emit('GUARDRAIL_INPUT', { name: 'pii_filter', passed: true });
+   * sdk.emit('HANDOFF', { from_agent: 'orchestrator', to_agent: 'researcher' });
+   * sdk.emit('BUDGET_ESTIMATION', { estimated_cost_usd: 0.12, budget_usd: 1.0 });
+   */
+  emit(
+    eventType: string,
+    payload?: Record<string, unknown>,
+    sessionId?: string,
+  ): void {
+    const ctx = agentStorage.getStore();
+    const sid = sessionId ?? this._sessionId;
+
+    const event: Record<string, unknown> = {
+      event_id: generateId('evt_'),
+      event_type: eventType,
+      timestamp: nowIso(),
+      session_id: sid,
+      agent_id: ctx?.agentId ?? this._config.agentId ?? '',
+      run_id: ctx?.runId ?? null,
+      workflow_id: ctx?.workflowId ?? null,
+      swarm_id: ctx?.swarmId ?? null,
+      parent_run_id: ctx?.parentRunId ?? null,
+      duration_ms: 0,
+      model: '',
+      provider: '',
+      input_tokens: 0,
+      output_tokens: 0,
+      cost_usd: 0,
+      stream: false,
+      config_applied: false,
+      ...payload,
+    };
+
+    try {
+      this._emitter.emit(event as unknown as SyrinEvent, sid);
+    } catch {
+      // fail-open: never throw from emit
+    }
   }
 
   async flush(): Promise<void> {
@@ -355,15 +412,19 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
     const pollTimer = setInterval(async () => {
       try {
         const resp = await fetch(
-          `${config.backendUrl}/agents/${config.agentId}/overrides`,
+          `${config.backendUrl}/api/v1/agents/${config.agentId}/overrides`,
           { headers: { Authorization: `Bearer ${config.apiKey}` } }
         );
         if (resp.ok) {
-          const data = await resp.json() as { ok: boolean; overrides: Record<string, unknown> };
+          const data = await resp.json() as { ok: boolean; overrides: Array<{path: string; value: unknown}> | Record<string, unknown> };
           if (data.ok && data.overrides) {
+            // Handle list format [{path, value}] (Python-compatible) and legacy flat map
+            const overridesMap: Record<string, unknown> = Array.isArray(data.overrides)
+              ? Object.fromEntries((data.overrides as Array<{path: string; value: unknown}>).map(o => [o.path, o.value]))
+              : data.overrides as Record<string, unknown>;
             // Apply overrides to all active sessions
             for (const sid of sessionStore.getSessionIds()) {
-              sessionStore.applyConfigUpdate(sid, data.overrides);
+              sessionStore.applyConfigUpdate(sid, overridesMap);
             }
           }
         }
@@ -470,6 +531,81 @@ export function mountConfigEndpoint(instanceName = 'default') {
 
     res.json({ ok: true, applied: Object.keys(overrides).length });
   };
+}
+
+// ── Lifecycle-emitting context wrappers ───────────────────────────────────────
+// These wrap the bare AsyncLocalStorage helpers from agent/context.ts and add
+// AGENT_RUN_STARTED/ENDED, WORKFLOW_STARTED/ENDED, SWARM_STARTED/ENDED events
+// so the dashboard timeline has proper hierarchy blocks.
+
+import {
+  withAgent as _withAgent,
+  withWorkflow as _withWorkflow,
+  withSwarm as _withSwarm,
+} from '@/agent/context.js';
+import type { RunContext } from '@/types.js';
+
+function _emitLifecycle(eventType: string, extra: Record<string, unknown> = {}): void {
+  const inst = _primaryInstance;
+  if (!inst) return;
+  const emitter = (inst as unknown as { _emitter: Emitter })._emitter;
+  const sid = sessionStorage.getStore() ?? inst.sessionId;
+  emitter.emit({
+    event_id: generateId('evt_'),
+    event_type: eventType,
+    timestamp: nowIso(),
+    session_id: sid,
+    agent_id: inst.config.agentId,
+    duration_ms: 0,
+    model: '', provider: '',
+    input_tokens: 0, output_tokens: 0, cost_usd: 0,
+    stream: false,
+    ...extra,
+  } as SyrinEvent, sid);
+}
+
+export async function withAgent<T>(
+  agentId: string,
+  fn: (ctx: RunContext) => Promise<T>,
+  options?: { runId?: string; workflowId?: string; swarmId?: string },
+): Promise<T> {
+  const start = Date.now();
+  _emitLifecycle('AGENT_RUN_STARTED', { agent_id: agentId });
+  try {
+    return await _withAgent(agentId, fn, options);
+  } finally {
+    _emitLifecycle('AGENT_RUN_ENDED', { agent_id: agentId, duration_ms: Date.now() - start });
+  }
+}
+
+export async function withWorkflow<T>(
+  workflowId: string | undefined,
+  fn: (ctx: RunContext) => Promise<T>,
+  options?: { runId?: string },
+): Promise<T> {
+  const start = Date.now();
+  const wid = workflowId ?? generateId('wf_');
+  _emitLifecycle('WORKFLOW_STARTED', { workflow_id: wid });
+  try {
+    return await _withWorkflow(wid, fn, options);
+  } finally {
+    _emitLifecycle('WORKFLOW_ENDED', { workflow_id: wid, duration_ms: Date.now() - start });
+  }
+}
+
+export async function withSwarm<T>(
+  swarmId: string | undefined,
+  fn: (ctx: RunContext) => Promise<T>,
+  options?: { runId?: string },
+): Promise<T> {
+  const start = Date.now();
+  const sid2 = swarmId ?? generateId('swarm_');
+  _emitLifecycle('SWARM_STARTED', { swarm_id: sid2 });
+  try {
+    return await _withSwarm(sid2, fn, options);
+  } finally {
+    _emitLifecycle('SWARM_ENDED', { swarm_id: sid2, duration_ms: Date.now() - start });
+  }
 }
 
 /**

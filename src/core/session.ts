@@ -112,9 +112,17 @@ export class SessionStore {
   applyConfigUpdate(sessionId: string, updates: Record<string, unknown>): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
-    for (const [key, value] of Object.entries(updates)) {
+    for (const [rawKey, value] of Object.entries(updates)) {
+      // Normalize qualified paths to bare keys:
+      // "global.llm.temperature" → "temperature"
+      // "global.prompt.system_prompt" → "system_prompt"
+      let key = rawKey;
+      const parts = rawKey.split('.');
+      if (parts[0] === 'global' && parts.length >= 3) {
+        key = parts.slice(2).join('.');
+      }
       if (!ALLOWED_CONFIG_KEYS.has(key)) {
-        console.warn(`[Syrin] Ignoring unknown remote config key: "${key}"`);
+        console.warn(`[Syrin] Ignoring unknown remote config key: "${rawKey}"`);
         continue;
       }
       if (!_validateConfigValue(key, value)) {

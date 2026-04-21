@@ -131,13 +131,23 @@ export class CheckpointClient {
 
     if (!this._config.offline) {
       try {
-        await fetch(`${this._config.backendUrl}/checkpoints`, {
+        await fetch(`${this._config.backendUrl}/api/v1/checkpoints`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${this._config.apiKey}`,
           },
-          body: JSON.stringify(cp),
+          body: JSON.stringify({
+            checkpoint_id: cp.checkpointId,
+            session_id: cp.sessionId,
+            messages: cp.messages,
+            active_config: cp.activeConfig,
+            call_count: cp.callCount,
+            cumulative_cost_usd: cp.cumulativeCostUsd,
+            created_at: cp.createdAt,
+            label: cp.label ?? null,
+            metadata: cp.metadata,
+          }),
           signal: AbortSignal.timeout(5_000),
         });
       } catch {
@@ -164,17 +174,42 @@ export class CheckpointClient {
 
     try {
       const resp = await fetch(
-        `${this._config.backendUrl}/checkpoints/${encodeURIComponent(checkpointId)}`,
+        `${this._config.backendUrl}/api/v1/checkpoints/${encodeURIComponent(checkpointId)}`,
         {
           headers: { 'Authorization': `Bearer ${this._config.apiKey}` },
           signal: AbortSignal.timeout(5_000),
         }
       );
       if (!resp.ok) return undefined;
-      const data = (await resp.json()) as { ok: boolean; checkpoint?: Checkpoint };
+      const data = (await resp.json()) as {
+        ok: boolean;
+        checkpoint?: {
+          checkpoint_id: string;
+          session_id: string;
+          messages: Array<Record<string, unknown>>;
+          active_config: Record<string, unknown>;
+          call_count: number;
+          cumulative_cost_usd: number;
+          created_at: string;
+          label?: string | null;
+          metadata: Record<string, unknown>;
+        };
+      };
       if (data.checkpoint) {
-        this._cache.put(data.checkpoint); // warm local cache
-        return data.checkpoint;
+        const raw = data.checkpoint;
+        const cp: Checkpoint = {
+          checkpointId: raw.checkpoint_id,
+          sessionId: raw.session_id,
+          messages: raw.messages,
+          activeConfig: raw.active_config,
+          callCount: raw.call_count,
+          cumulativeCostUsd: raw.cumulative_cost_usd,
+          createdAt: raw.created_at,
+          label: raw.label ?? undefined,
+          metadata: raw.metadata,
+        };
+        this._cache.put(cp); // warm local cache
+        return cp;
       }
     } catch {
       if (this._config.debug) {

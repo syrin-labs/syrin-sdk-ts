@@ -77,7 +77,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const receivedPayloads: IngestPayload[] = [];
 
     server.use(
-      http.post(`${BACKEND_URL}/ingest`, async ({ request }) => {
+      http.post(`${BACKEND_URL}/api/v1/ingest`, async ({ request }) => {
         receivedPayloads.push((await request.json()) as IngestPayload);
         return HttpResponse.json({ ok: true });
       })
@@ -138,7 +138,7 @@ describe('Integration: init → call → event at mock backend', () => {
     let callCount = 0;
 
     server.use(
-      http.post(`${BACKEND_URL}/ingest`, async () => {
+      http.post(`${BACKEND_URL}/api/v1/ingest`, async () => {
         callCount++;
         if (callCount === 1) {
           return HttpResponse.json({ ok: true, config_updates: { temperature: 0.1 } });
@@ -215,7 +215,7 @@ describe('Integration: init → call → event at mock backend', () => {
     unpatch();
 
     server.use(
-      http.post(`${BACKEND_URL}/ingest`, () => HttpResponse.json({ ok: true }))
+      http.post(`${BACKEND_URL}/api/v1/ingest`, () => HttpResponse.json({ ok: true }))
     );
 
     const config = createConfig({
@@ -286,7 +286,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const receivedPayloads: IngestPayload[] = [];
 
     server.use(
-      http.post(`${BACKEND_URL}/ingest`, async ({ request }) => {
+      http.post(`${BACKEND_URL}/api/v1/ingest`, async ({ request }) => {
         receivedPayloads.push((await request.json()) as IngestPayload);
         return HttpResponse.json({ ok: true });
       })

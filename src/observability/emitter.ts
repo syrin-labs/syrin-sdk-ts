@@ -112,7 +112,7 @@ export class Emitter {
 
   private async _checkHealth(): Promise<void> {
     try {
-      const response = await fetch(`${this.config.backendUrl}/health`, {
+      const response = await fetch(`${this.config.backendUrl}/api/v1/health`, {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${this.config.apiKey}` },
         signal: AbortSignal.timeout(5_000),
@@ -150,7 +150,7 @@ export class Emitter {
     };
 
     try {
-      const response = await fetch(`${this.config.backendUrl}/ingest`, {
+      const response = await fetch(`${this.config.backendUrl}/api/v1/ingest`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

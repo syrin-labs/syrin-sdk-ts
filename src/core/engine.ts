@@ -149,7 +149,7 @@ export class SyrinCore implements ISyrinCore {
       server_url: this.config.serverUrl ?? null,
     };
 
-    const url = `${this.config.backendUrl}/agents/${agentId}/register`;
+    const url = `${this.config.backendUrl}/api/v1/agents/${agentId}/register`;
 
     try {
       const res = await fetch(url, {
@@ -488,6 +488,7 @@ export class SyrinCore implements ISyrinCore {
       stream,
       config_applied: configApplied,
       governance_applied: governanceApplied,
+      agent_id: agentId,
       ..._runCtxFields(),
       ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
       ...(toolDefinitions?.length ? { tool_definitions: toolDefinitions } : {}),
@@ -527,6 +528,27 @@ export class SyrinCore implements ISyrinCore {
     };
 
     this._emitter.emit(event, sessionId);
+
+    // Auto-emit a TOOL_CALL event for each tool the model requested.
+    // This pairs with the TOOL_RESULT events the user emits after executing tools.
+    if (toolCalls?.length) {
+      for (const tc of toolCalls) {
+        let parsedArgs: unknown;
+        try { parsedArgs = JSON.parse(tc.arguments); } catch { parsedArgs = { _raw: tc.arguments }; }
+        const tcEvent = {
+          event_id: generateId('evt_'),
+          event_type: 'TOOL_CALL',
+          timestamp: nowIso(),
+          session_id: sessionId,
+          agent_id: agentId,
+          tool_call_id: tc.id,
+          tool_name: tc.name,
+          arguments: parsedArgs,
+          ..._runCtxFields(),
+        };
+        this._emitter.emit(tcEvent as unknown as SyrinEvent, sessionId);
+      }
+    }
 
     if (this.config.toolValidation && toolCalls?.length) {
       this._emitter.flush().catch((err) => {

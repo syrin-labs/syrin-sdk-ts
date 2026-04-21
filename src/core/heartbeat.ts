@@ -43,7 +43,7 @@ export class Heartbeat {
     const { agentId, backendUrl, apiKey } = this._opts;
     if (!agentId) return;
     try {
-      await fetch(`${backendUrl}/agents/${agentId}/heartbeat`, {
+      await fetch(`${backendUrl}/api/v1/agents/${agentId}/heartbeat`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
