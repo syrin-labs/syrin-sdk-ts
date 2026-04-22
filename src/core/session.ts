@@ -3,7 +3,7 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
-import type { SessionState } from '@/types.js';
+import type { SessionState, ContextInjection, SessionType } from '@/types.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
 
 /**
@@ -91,6 +91,8 @@ export class SessionStore {
         pendingGovernance: [],
         injectedMessages: [],
         lastCheckpointId: undefined,
+        pendingInjections: [],
+        sessionType: undefined,
       };
       this.sessions.set(sessionId, newSession);
       return newSession;
@@ -107,19 +109,31 @@ export class SessionStore {
   }
 
   /**
+   * Set the session type for a session (used by AgentServer to tag sessions
+   * coming through the Syrin backend proxy).
+   */
+  setSessionType(sessionId: string, sessionType: SessionType): void {
+    const session = this.sessions.get(sessionId);
+    if (session) session.sessionType = sessionType;
+  }
+
+  /**
    * Apply config updates to a session's activeConfig.
+   * Only whitelisted keys are accepted; unknown keys are logged and dropped.
    */
   applyConfigUpdate(sessionId: string, updates: Record<string, unknown>): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     for (const [rawKey, value] of Object.entries(updates)) {
       // Normalize qualified paths to bare keys:
-      // "global.llm.temperature" → "temperature"
-      // "global.prompt.system_prompt" → "system_prompt"
+      // "global.llm.temperature"                    → "temperature"
+      // "agents.my-agent.llm.temperature"           → "temperature"
       let key = rawKey;
       const parts = rawKey.split('.');
       if (parts[0] === 'global' && parts.length >= 3) {
         key = parts.slice(2).join('.');
+      } else if (parts[0] === 'agents' && parts.length >= 4) {
+        key = parts.slice(3).join('.');
       }
       if (!ALLOWED_CONFIG_KEYS.has(key)) {
         console.warn(`[Syrin] Ignoring unknown remote config key: "${rawKey}"`);
@@ -128,6 +142,31 @@ export class SessionStore {
       if (!_validateConfigValue(key, value)) {
         console.warn(`[Syrin] Remote config key "${key}" has unexpected type (${typeof value}) — dropping`);
         continue;
+      }
+      if (value === null || value === undefined) {
+        delete session.activeConfig[key];
+      } else {
+        session.activeConfig[key] = value;
+      }
+    }
+  }
+
+  /**
+   * Merge experiment variant overrides into a session's activeConfig.
+   * Unlike applyConfigUpdate, this bypasses the ALLOWED_CONFIG_KEYS whitelist —
+   * variant overrides are backend-trusted and may target any agent config key.
+   * Dot-path prefix normalisation still applies.
+   */
+  mergeExperimentOverrides(sessionId: string, overrides: Record<string, unknown>): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    for (const [rawKey, value] of Object.entries(overrides)) {
+      let key = rawKey;
+      const parts = rawKey.split('.');
+      if (parts[0] === 'global' && parts.length >= 3) {
+        key = parts.slice(2).join('.');
+      } else if (parts[0] === 'agents' && parts.length >= 4) {
+        key = parts.slice(3).join('.');
       }
       if (value === null || value === undefined) {
         delete session.activeConfig[key];
@@ -194,6 +233,26 @@ export class SessionStore {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.injectedMessages.push(message);
+  }
+
+  /**
+   * Append context injections received from an ingest response.
+   */
+  appendInjections(sessionId: string, injections: ContextInjection[]): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.pendingInjections.push(...injections);
+  }
+
+  /**
+   * Atomically pop (return and clear) all pending context injections.
+   */
+  popInjections(sessionId: string): ContextInjection[] {
+    const session = this.sessions.get(sessionId);
+    if (!session) return [];
+    const items = [...session.pendingInjections];
+    session.pendingInjections.length = 0;
+    return items;
   }
 
   incrementCallIndex(sessionId: string): void {

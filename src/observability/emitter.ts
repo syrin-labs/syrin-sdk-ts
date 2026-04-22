@@ -7,7 +7,7 @@
  *      the first queued event when a full batch hasn't triggered first.
  */
 
-import type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse } from '@/types.js';
+import type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, ContextInjection } from '@/types.js';
 import type { SessionStore } from '@/core/session.js';
 import { SDK_VERSION } from '@/config/config.js';
 import { GovernanceResponse } from '@/core/governance.js';
@@ -27,10 +27,21 @@ export class Emitter {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
   private flushPromise: Promise<void> | null = null;
+  /** Registered callbacks for context injections. */
+  private injectionCallbacks: Set<(injection: ContextInjection) => void> = new Set();
 
   constructor(config: SyrinConfig, sessionStore: SessionStore) {
     this.config = config;
     this.sessionStore = sessionStore;
+  }
+
+  /**
+   * Register a callback that fires when the backend returns context injections.
+   * Returns an unsubscribe function.
+   */
+  onContextInjection(callback: (injection: ContextInjection) => void): () => void {
+    this.injectionCallbacks.add(callback);
+    return () => { this.injectionCallbacks.delete(callback); };
   }
 
   start(): void {
@@ -147,6 +158,7 @@ export class Emitter {
       agent_id: session?.agentId ?? this.config.agentId,
       sdk: { language: 'typescript', version: SDK_VERSION },
       events: batch.map((q) => q.event),
+      ...(session?.sessionType ? { session_type: session.sessionType } : {}),
     };
 
     try {
@@ -201,6 +213,32 @@ export class Emitter {
             this._applyGovernance(sid, data.governance);
           }
         }
+
+        if (data.experiments && data.experiments.length > 0) {
+          const sessionIds = new Set(batch.map((q) => q.sessionId));
+          for (const sid of sessionIds) {
+            this._applyExperiments(sid, data.experiments);
+          }
+        }
+
+        // Accept both camelCase (SDK-generated) and snake_case (backend wire format)
+        const incomingInjections = (data as Record<string, unknown>).pendingInjections as typeof data.pendingInjections
+          ?? (data as Record<string, unknown>).pending_injections as typeof data.pendingInjections;
+        if (incomingInjections && incomingInjections.length > 0) {
+          const sessionIds = new Set(batch.map((q) => q.sessionId));
+          for (const sid of sessionIds) {
+            this.sessionStore.appendInjections(sid, incomingInjections);
+          }
+          // Fire registered callbacks for each injection
+          for (const injection of incomingInjections) {
+            for (const cb of this.injectionCallbacks) {
+              try { cb(injection); } catch { /* fail-open */ }
+            }
+          }
+          if (this.config.debug) {
+            console.log(`[Syrin] Received ${incomingInjections.length} context injection(s).`);
+          }
+        }
       }
     } catch (err) {
       if (this.config.debug) {
@@ -241,6 +279,16 @@ export class Emitter {
           console.log(`[Syrin] ${actionType} action queued for session ${sessionId}`);
         }
       }
+    }
+  }
+
+  private _applyExperiments(sessionId: string, assignments: import('../types.js').ExperimentAssignment[]): void {
+    for (const assignment of assignments) {
+      if (!assignment.overrides || Object.keys(assignment.overrides).length === 0) continue;
+      if (this.config.debug) {
+        console.log(`[Syrin] Experiment variant assigned: ${assignment.variantName} (session=${sessionId})`);
+      }
+      this.sessionStore.mergeExperimentOverrides(sessionId, assignment.overrides);
     }
   }
 

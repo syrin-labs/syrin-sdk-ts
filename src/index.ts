@@ -15,34 +15,33 @@ import { CheckpointClient } from '@/core/checkpoint.js';
 import { SyrinCore } from '@/core/engine.js';
 import { Heartbeat } from '@/core/heartbeat.js';
 import { load as loadPersistedConfig, save as savePersistedConfig } from '@/config/persist.js';
-import { OpenAIAdapter, unpatch, isPatched } from '@/adapters/openai/index.js';
+import { patchOpenAI, unpatch, isPatched } from '@/interceptors/openai.js';
 import { clearHooks } from '@/observability/hooks.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
-import type { SyrinConfig, SyrinSDK, SyrinEvent } from '@/types.js';
-import type { SyrinAdapter } from '@/adapters/types.js';
+import type { SyrinConfig, SyrinSDK, SyrinEvent, ContextInjection } from '@/types.js';
 import { _setAutoRefreshCallback } from '@/tunable/tunable.js';
 import { agentStorage } from '@/agent/context.js';
+import { SessionFeedback, sendFeedback } from '@/feedback.js';
+import { AlreadyRatedError, SessionNotFoundError, ValidationError } from '@/errors.js';
+import type { FeedbackRating, FeedbackOptions } from '@/feedback.js';
 
 
-export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData } from '@/types.js';
+export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ContextInjection, SessionType } from '@/types.js';
+export { AgentServer } from '@/agent/server.js';
+export type { AgentHandler, AgentServerOptions } from '@/agent/server.js';
+export { SessionFeedback } from '@/feedback.js';
+export type { FeedbackRating, FeedbackOptions } from '@/feedback.js';
+export { AlreadyRatedError, SessionNotFoundError, ValidationError, SyrinError } from '@/errors.js';
 export { getRunContext } from '@/agent/context.js';
 export { GovernanceStopError } from '@/core/governance.js';
 export type { Checkpoint } from '@/core/checkpoint.js';
 export { onConfigChange, onAlert } from '@/observability/hooks.js';
 export { SyrinCore } from '@/core/engine.js';
-export type { SyrinAdapter, NormalizedCallParams, NormalizedCallResult, BeforeCallResult, ISyrinCore, SchemaField as AdapterSchemaField } from '@/adapters/types.js';
-export { OpenAIAdapter } from '@/adapters/openai/index.js';
+export type { NormalizedCallParams, NormalizedCallResult, BeforeCallResult, SchemaField } from '@/core/call-types.js';
 export { ConfigStore } from '@/config/store.js';
 export type { FieldSchema } from '@/config/store.js';
 export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry } from '@/tunable/tunable.js';
 export type { TuneOptions, TuneFieldDef } from '@/tunable/tunable.js';
-export { AnthropicAdapter } from '@/adapters/anthropic/index.js';
-export { LangChainAdapter } from '@/adapters/langchain/index.js';
-export { LangGraphAdapter } from '@/adapters/langgraph/index.js';
-export { MastraAdapter } from '@/adapters/mastra/index.js';
-export { VercelAIAdapter } from '@/adapters/vercel-ai/index.js';
-export { BaseFrameworkAdapter } from '@/adapters/types.js';
-export type { FrameworkAdapter } from '@/adapters/types.js';
 
 export class SyrinSDKInstance implements SyrinSDK {
   private _sessionId: string;
@@ -76,17 +75,6 @@ export class SyrinSDKInstance implements SyrinSDK {
 
   get config(): SyrinConfig {
     return this._config;
-  }
-
-  /**
-   * Register a custom adapter (e.g. LangChain, Anthropic) after init().
-   *
-   * @example
-   * import { MyCustomAdapter } from './my-adapter';
-   * await sdk.registerAdapter(new MyCustomAdapter());
-   */
-  async registerAdapter(adapter: SyrinAdapter): Promise<void> {
-    await this._core.registerAdapter(adapter);
   }
 
   /**
@@ -229,6 +217,123 @@ export class SyrinSDKInstance implements SyrinSDK {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Session feedback namespace
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Namespace for session feedback and rating operations.
+   *
+   * @example
+   * await sdk.sessions.rate('sess_001', 'positive');
+   * await sdk.sessions.withId('sess_001').rate('negative', { reason: 'Wrong output' });
+   */
+  readonly sessions = {
+    /**
+     * Send a feedback rating for a specific session.
+     * 409 → AlreadyRatedError, 404 → SessionNotFoundError, 422 → ValidationError
+     */
+    rate: async (sessionId: string, rating: FeedbackRating, options?: FeedbackOptions): Promise<void> => {
+      await sendFeedback(this._config, sessionId, rating, options);
+    },
+
+    /**
+     * Send feedback ratings for multiple sessions.
+     * All requests are sent concurrently. Any errors are collected and rethrown
+     * as an AggregateError.
+     */
+    rateBatch: async (
+      items: Array<{ sessionId: string; rating: FeedbackRating } & FeedbackOptions>,
+    ): Promise<void> => {
+      if (items.length === 0) return;
+      const errors: unknown[] = [];
+      await Promise.all(
+        items.map((item) =>
+          sendFeedback(this._config, item.sessionId, item.rating, {
+            reason: item.reason,
+            voterId: item.voterId,
+          }).catch((err) => { errors.push(err); }),
+        ),
+      );
+      if (errors.length > 0) {
+        const aggMsg = errors.map((e) => (e instanceof Error ? e.message : String(e))).join('; ');
+        throw new Error(`[Syrin] rateBatch encountered errors: ${aggMsg}`);
+      }
+    },
+
+    /**
+     * Returns a builder scoped to `sessionId` for fluent rating.
+     *
+     * @example
+     * await sdk.sessions.withId('sess_001').rate('positive');
+     */
+    withId: (sessionId: string) => ({
+      rate: async (rating: FeedbackRating, options?: FeedbackOptions): Promise<void> => {
+        await sendFeedback(this._config, sessionId, rating, options);
+      },
+    }),
+
+    /**
+     * Start a session and return a handle with a `feedback` object attached.
+     *
+     * When `successCriteria` is provided, a `SESSION_CRITERIA` event is emitted
+     * and the criteria are stored on the session state.
+     */
+    start: async (options: {
+      sessionId: string;
+      agentId?: string;
+      successCriteria?: string[];
+    }): Promise<{ sessionId: string; feedback: SessionFeedback }> => {
+      const { sessionId, agentId, successCriteria } = options;
+
+      // Ensure session state exists
+      const session = await this._sessionStore.getOrCreate(sessionId, agentId);
+
+      if (successCriteria && successCriteria.length > 0) {
+        session.successCriteria = successCriteria;
+        // Emit SESSION_CRITERIA event
+        this.emit(
+          'SESSION_CRITERIA',
+          { criteria: successCriteria },
+          sessionId,
+        );
+      }
+
+      return {
+        sessionId,
+        feedback: new SessionFeedback(sessionId, this._config),
+      };
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // Context injection helpers
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Register a callback that fires whenever the Syrin backend pushes context
+   * injections in an ingest response.
+   *
+   * Returns an unsubscribe function.
+   *
+   * @example
+   * const unsub = sdk.onContextInjection((inj) => console.log(inj.content));
+   * // later:
+   * unsub();
+   */
+  onContextInjection(callback: (injection: ContextInjection) => void): () => void {
+    return this._emitter.onContextInjection(callback);
+  }
+
+  /**
+   * Return and clear all pending context injections for a session.
+   * Returns an empty array when no injections are pending.
+   */
+  getPendingInjections(sessionId?: string): ContextInjection[] {
+    const sid = sessionId ?? this._sessionId;
+    return this._sessionStore.popInjections(sid);
+  }
+
   async flush(): Promise<void> {
     await this._emitter.flush();
   }
@@ -277,7 +382,6 @@ export interface SyrinInitOptions {
   sessionTtlMs?: number;
   /** Public URL of this agent server — stored by dashboard to enable the "Run" button. */
   serverUrl?: string;
-  adapters?: import('./adapters/types.js').SyrinAdapter[];
   /**
    * Name for this SDK instance in the registry.
    * Defaults to 'default'. Multiple named instances can coexist.
@@ -346,10 +450,10 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // Build SyrinCore — the provider-agnostic instrumentation engine
   const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
 
-  // Register the built-in OpenAI adapter (loads openai module lazily)
-  await core.registerAdapter(new OpenAIAdapter());
+  // Patch OpenAI directly (lazily imports openai; no-op if not installed)
+  await patchOpenAI(core);
 
-  // Wire ConfigStore into core so framework adapters can read config
+  // Wire ConfigStore into core so config reads work
   const { ConfigStore } = await import('./config/store.js');
   const configStore = new ConfigStore();
   (core as unknown as Record<string, unknown>)['_configStore'] = configStore;
@@ -357,21 +461,6 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // Wire global TunableRegistry into core
   const { globalRegistry } = await import('./tunable/tunable.js');
   (core as unknown as Record<string, unknown>)['_tunableRegistry'] = globalRegistry;
-
-  // Try to auto-install Anthropic adapter if @anthropic-ai/sdk is available
-  try {
-    const { AnthropicAdapter } = await import('./adapters/anthropic/index.js');
-    await core.registerAdapter(new AnthropicAdapter());
-  } catch {
-    // @anthropic-ai/sdk not installed — skip silently
-  }
-
-  // Register user-provided adapters
-  if (options.adapters) {
-    for (const adapter of options.adapters) {
-      await core.registerAdapter(adapter);
-    }
-  }
 
   // Load persisted config from previous run (.syrin/syrin.config.json).
   // Parity with Python SDK — overrides survive restarts without waiting for polling.
@@ -421,7 +510,7 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
             // Handle list format [{path, value}] (Python-compatible) and legacy flat map
             const overridesMap: Record<string, unknown> = Array.isArray(data.overrides)
               ? Object.fromEntries((data.overrides as Array<{path: string; value: unknown}>).map(o => [o.path, o.value]))
-              : data.overrides as Record<string, unknown>;
+              : data.overrides;
             // Apply overrides to all active sessions
             for (const sid of sessionStore.getSessionIds()) {
               sessionStore.applyConfigUpdate(sid, overridesMap);

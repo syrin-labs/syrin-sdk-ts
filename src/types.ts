@@ -100,11 +100,14 @@ export interface RunContext {
   parentRunId?: string;
 }
 
+export type SessionType = 'production' | 'chat_test' | 'workflow_test' | 'simulation';
+
 export interface IngestPayload {
   session_id: string;
   agent_id?: string;
   sdk: { language: 'typescript'; version: string };
   events: SyrinEvent[];
+  session_type?: SessionType;
 }
 
 export interface GovernanceAction {
@@ -119,11 +122,26 @@ export interface GovernanceData {
   incident_id?: string | null;
 }
 
+export interface ExperimentAssignment {
+  experimentId: string;
+  variantId: string;
+  variantName: string;
+  overrides: Record<string, unknown>;
+}
+
+export interface ContextInjection {
+  id: string;
+  injection_type: 'governance_correction' | 'manual' | 'world_state' | 'constraint' | 'fact' | 'custom';
+  content: string;
+}
+
 export interface IngestResponse {
   ok: boolean;
   config_updates?: Record<string, unknown>;
   tool_validation_results?: Record<string, { valid: boolean; error?: string }>;
   governance?: GovernanceData;
+  experiments?: ExperimentAssignment[];
+  pendingInjections?: ContextInjection[];
 }
 
 export interface SessionState {
@@ -139,6 +157,12 @@ export interface SessionState {
   pendingGovernance: GovernanceAction[];
   injectedMessages: Array<{ role: string; content: string }>;
   lastCheckpointId?: string;
+  /** Criteria for evaluating session success — stored for dashboard display. */
+  successCriteria?: string[];
+  /** Context injections received from ingest responses. */
+  pendingInjections: ContextInjection[];
+  /** Session type tag set by AgentServer — forwarded to ingest payload. */
+  sessionType?: SessionType;
 }
 
 export interface SyrinSDK {
