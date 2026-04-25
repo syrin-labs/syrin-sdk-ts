@@ -62,6 +62,7 @@ function _validateConfigValue(key: string, value: unknown): boolean {
 export class SessionStore {
   private sessions: Map<string, SessionState> = new Map();
   private mutex = new AsyncMutex();
+  private _globalConfig: Record<string, unknown> = {};
 
   /**
    * Get existing session or create a new one.
@@ -81,7 +82,7 @@ export class SessionStore {
       const newSession: SessionState = {
         sessionId,
         agentId,
-        activeConfig: {},
+        activeConfig: { ...this._globalConfig },
         localConfig: {},
         cumulativeCostUsd: 0,
         callCount: 0,
@@ -128,12 +129,18 @@ export class SessionStore {
       // Normalize qualified paths to bare keys:
       // "global.llm.temperature"                    → "temperature"
       // "agents.my-agent.llm.temperature"           → "temperature"
+      // "llm.temperature"                           → "temperature"
       let key = rawKey;
       const parts = rawKey.split('.');
       if (parts[0] === 'global' && parts.length >= 3) {
         key = parts.slice(2).join('.');
       } else if (parts[0] === 'agents' && parts.length >= 4) {
         key = parts.slice(3).join('.');
+      }
+      // Strip section prefix (e.g. "llm.temperature" → "temperature")
+      if (!ALLOWED_CONFIG_KEYS.has(key) && key.includes('.')) {
+        const lastSegment = key.split('.').pop()!;
+        if (ALLOWED_CONFIG_KEYS.has(lastSegment)) key = lastSegment;
       }
       if (!ALLOWED_CONFIG_KEYS.has(key)) {
         console.warn(`[Syrin] Ignoring unknown remote config key: "${rawKey}"`);
@@ -147,6 +154,45 @@ export class SessionStore {
         delete session.activeConfig[key];
       } else {
         session.activeConfig[key] = value;
+      }
+    }
+  }
+
+  /**
+   * Update the global config template. New sessions created after this call
+   * will inherit these values in their activeConfig. Existing sessions are
+   * also updated so in-flight sessions pick up the change immediately.
+   */
+  setGlobalConfig(updates: Record<string, unknown>): void {
+    // Normalize keys using same logic as applyConfigUpdate
+    const normalized: Record<string, unknown> = {};
+    for (const [rawKey, value] of Object.entries(updates)) {
+      let key = rawKey;
+      const parts = rawKey.split('.');
+      if (parts[0] === 'global' && parts.length >= 3) {
+        key = parts.slice(2).join('.');
+      } else if (parts[0] === 'agents' && parts.length >= 4) {
+        key = parts.slice(3).join('.');
+      }
+      if (!ALLOWED_CONFIG_KEYS.has(key) && key.includes('.')) {
+        const lastSegment = key.split('.').pop()!;
+        if (ALLOWED_CONFIG_KEYS.has(lastSegment)) key = lastSegment;
+      }
+      if (!ALLOWED_CONFIG_KEYS.has(key)) continue;
+      if (!_validateConfigValue(key, value)) continue;
+      if (value === null || value === undefined) {
+        delete this._globalConfig[key];
+      } else {
+        this._globalConfig[key] = value;
+        normalized[key] = value;
+      }
+    }
+    // Propagate to all active sessions that don't have a local override
+    for (const session of this.sessions.values()) {
+      for (const [key, value] of Object.entries(normalized)) {
+        if (session.activeConfig[key] === undefined || session.activeConfig[key] === null) {
+          session.activeConfig[key] = value;
+        }
       }
     }
   }

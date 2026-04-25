@@ -18,7 +18,11 @@ import { load as loadPersistedConfig, save as savePersistedConfig } from '@/conf
 import { patchOpenAI, unpatch, isPatched } from '@/interceptors/openai.js';
 import { clearHooks } from '@/observability/hooks.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
-import type { SyrinConfig, SyrinSDK, SyrinEvent, ContextInjection } from '@/types.js';
+import type { SyrinConfig, SyrinSDK, SyrinEvent, ContextInjection, AgentTopology } from '@/types.js';
+import { AgentServer } from '@/agent/server.js';
+import type { AgentServerOptions } from '@/agent/server.js';
+import { MultiAgentRouter } from '@/agent/router.js';
+import type { AgentRunFn } from '@/agent/router.js';
 import { _setAutoRefreshCallback } from '@/tunable/tunable.js';
 import { agentStorage } from '@/agent/context.js';
 import { SessionFeedback, sendFeedback } from '@/feedback.js';
@@ -29,6 +33,10 @@ import type { FeedbackRating, FeedbackOptions } from '@/feedback.js';
 export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ContextInjection, SessionType } from '@/types.js';
 export { AgentServer } from '@/agent/server.js';
 export type { AgentHandler, AgentServerOptions } from '@/agent/server.js';
+export { MultiAgentRouter } from '@/agent/router.js';
+export type { AgentRunFn } from '@/agent/router.js';
+export { AgentHandle } from '@/agent/handle.js';
+import { AgentHandle } from '@/agent/handle.js';
 export { SessionFeedback } from '@/feedback.js';
 export type { FeedbackRating, FeedbackOptions } from '@/feedback.js';
 export { AlreadyRatedError, SessionNotFoundError, ValidationError, SyrinError } from '@/errors.js';
@@ -187,7 +195,7 @@ export class SyrinSDKInstance implements SyrinSDK {
     sessionId?: string,
   ): void {
     const ctx = agentStorage.getStore();
-    const sid = sessionId ?? this._sessionId;
+    const sid = sessionId ?? sessionStorage.getStore() ?? this._sessionId;
 
     const event: Record<string, unknown> = {
       event_id: generateId('evt_'),
@@ -334,6 +342,75 @@ export class SyrinSDKInstance implements SyrinSDK {
     return this._sessionStore.popInjections(sid);
   }
 
+  /**
+   * Create an AgentHandle — scoped agent API with cfg, field, run, chat.
+   */
+  agent(agentId: string): AgentHandle {
+    return new AgentHandle(agentId, this);
+  }
+
+  /**
+   * Define or update the multi-agent topology after init().
+   *
+   * @param topology - Dict with keys: type, nodes, edges, entryPoint, terminalNodes
+   *
+   * @example
+   * ```ts
+   * sdk.defineTopology({
+   *   type: 'orchestrator',
+   *   nodes: {
+   *     root: { role: 'orchestrator' },
+   *     'worker-1': { role: 'worker', execMode: 'parallel' },
+   *     'worker-2': { role: 'worker', execMode: 'parallel' },
+   *   },
+   *   edges: [
+   *     { from: 'root', to: 'worker-1' },
+   *     { from: 'root', to: 'worker-2' },
+   *   ],
+   *   entryPoint: 'root',
+   *   terminalNodes: ['worker-1', 'worker-2'],
+   * });
+   * ```
+   */
+  defineTopology(topology: AgentTopology): void {
+    (this._core as unknown as { _explicitTopology: AgentTopology })._explicitTopology = topology;
+  }
+
+  /**
+   * Emit a CHECKPOINT event to mark milestones in agents.
+   */
+  checkpoint(label: string, metadata?: Record<string, unknown>, sessionId?: string): void {
+    this.emit('CHECKPOINT', { name: label, label, metadata: metadata || {} }, sessionId);
+  }
+
+  /**
+   * Create an AgentServer wired to this SDK instance's session store.
+   * Mount its routes on your framework of choice:
+   *   server.mountExpress(app)   // Express
+   *   server.mountHono(app)      // Hono
+   *   fastify.register(server.fastifyPlugin())  // Fastify
+   */
+  createServer(options: AgentServerOptions): AgentServer {
+    return new AgentServer(this._sessionStore, options);
+  }
+
+  /**
+   * Create a MultiAgentRouter — routes POST /agent/:agentId/run|chat to the correct handler.
+   *
+   * @param agentFunctions - Map of agentId → async run function
+   *
+   * @example
+   * const router = sdk.createAgentRouter({
+   *   'researcher-agent': async (task) => { ... return result; },
+   *   'writer-agent':     async (task) => { ... return result; },
+   * });
+   * app.use(router.express());           // Express
+   * fastify.register(router.fastify());  // Fastify
+   */
+  createAgentRouter(agentFunctions: Record<string, AgentRunFn>): MultiAgentRouter {
+    return new MultiAgentRouter({ agentFunctions, sessionStore: this._sessionStore });
+  }
+
   async flush(): Promise<void> {
     await this._emitter.flush();
   }
@@ -381,7 +458,7 @@ export interface SyrinInitOptions {
   toolValidation?: boolean;
   sessionTtlMs?: number;
   /** Public URL of this agent server — stored by dashboard to enable the "Run" button. */
-  serverUrl?: string;
+  agentUrl?: string;
   /**
    * Name for this SDK instance in the registry.
    * Defaults to 'default'. Multiple named instances can coexist.
@@ -398,6 +475,19 @@ export interface SyrinInitOptions {
    * Parity with Python SDK's schema_defaults option.
    */
   schemaDefaults?: Record<string, unknown>;
+  /**
+   * List of sub-agent IDs (strings) or dict mapping agent_id → config.
+   * When provided as a list, the SDK auto-generates minimal agent schemas.
+   * When provided as a dict, each value is a config object with optional
+   * `description` and `sections` keys. Used for multi-agent systems.
+   */
+  agents?: string[] | Record<string, { description?: string; sections?: Record<string, unknown> }>;
+  /**
+   * Explicit topology definition for multi-agent systems.
+   * A dict with keys: type, nodes, edges, entryPoint, terminalNodes.
+   * When not provided, the SDK auto-infers orchestrator topology from agents list.
+   */
+  topology?: AgentTopology;
 }
 
 /**
@@ -450,6 +540,28 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // Build SyrinCore — the provider-agnostic instrumentation engine
   const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
 
+  // Multi-agent schema definitions — agents= can be:
+  // 1. A list of agent IDs (strings) — SDK auto-generates minimal schemas
+  // 2. A dict mapping agent_id → {description, sections} — full agent definitions
+  if (options.agents) {
+    const agentsDict: Record<string, { description?: string; sections?: Record<string, unknown> }> = {};
+    if (Array.isArray(options.agents)) {
+      // Simple list of agent IDs — auto-generate minimal configs
+      for (const agentId of options.agents) {
+        agentsDict[agentId] = {};
+      }
+    } else {
+      // Already a dict — use as-is
+      Object.assign(agentsDict, options.agents);
+    }
+    (core as unknown as { _multiAgentDefs: Record<string, unknown> })._multiAgentDefs = agentsDict;
+  }
+
+  // Explicit topology definition for multi-agent systems
+  if (options.topology) {
+    (core as unknown as { _explicitTopology: AgentTopology })._explicitTopology = options.topology;
+  }
+
   // Patch OpenAI directly (lazily imports openai; no-op if not installed)
   await patchOpenAI(core);
 
@@ -467,11 +579,7 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   try {
     const persisted = loadPersistedConfig();
     if (Object.keys(persisted).length > 0) {
-      const store = sessionStore as unknown as { applyConfigUpdate(sid: string, overrides: Record<string, unknown>): void };
-      const sid = resolveSessionId(config.sessionId);
-      if (typeof store.applyConfigUpdate === 'function') {
-        store.applyConfigUpdate(sid, persisted);
-      }
+      sessionStore.setGlobalConfig(persisted);
     }
   } catch {
     // Non-fatal
@@ -511,7 +619,8 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
             const overridesMap: Record<string, unknown> = Array.isArray(data.overrides)
               ? Object.fromEntries((data.overrides as Array<{path: string; value: unknown}>).map(o => [o.path, o.value]))
               : data.overrides;
-            // Apply overrides to all active sessions
+            // Persist as global template (new sessions inherit this) and apply to active sessions
+            sessionStore.setGlobalConfig(overridesMap);
             for (const sid of sessionStore.getSessionIds()) {
               sessionStore.applyConfigUpdate(sid, overridesMap);
             }
@@ -537,7 +646,7 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
     );
   }
 
-  sessionStore.getOrCreate(sessionId, config.agentId).catch(() => { /* ignore */ });
+  await sessionStore.getOrCreate(sessionId, config.agentId).catch(() => { /* ignore */ });
 
   return instance;
 }
@@ -601,15 +710,11 @@ export function mountConfigEndpoint(instanceName = 'default') {
 
     const overrides = body as Record<string, unknown>;
 
-    // Apply to all active sessions
+    // Apply to global template (new sessions inherit) and all active sessions
     const store = (inst as unknown as { _sessionStore: SessionStore })._sessionStore;
-    const ids = typeof (store as unknown as { getSessionIds?(): string[] }).getSessionIds === 'function'
-      ? (store as unknown as { getSessionIds(): string[] }).getSessionIds()
-      : [];
-    for (const sid of ids) {
-      if (typeof (store as unknown as { applyConfigUpdate?(s: string, o: Record<string, unknown>): void }).applyConfigUpdate === 'function') {
-        (store as unknown as { applyConfigUpdate(s: string, o: Record<string, unknown>): void }).applyConfigUpdate(sid, overrides);
-      }
+    store.setGlobalConfig(overrides);
+    for (const sid of store.getSessionIds()) {
+      store.applyConfigUpdate(sid, overrides);
     }
 
     // Also apply to the primary session config
