@@ -12,7 +12,7 @@ import { Emitter } from '@/observability/emitter';
 import { OTelBridge } from '@/observability/otel';
 import { CheckpointClient } from '@/core/checkpoint';
 import { SyrinCore } from '@/core/engine';
-import { patchWithModule, unpatch } from '@/adapters/openai/index';
+import { patchWithModule, unpatch } from '@/interceptors/openai';
 
 // Mock openai module — create is on the prototype to match real SDK v4 behavior
 vi.mock('openai', () => {

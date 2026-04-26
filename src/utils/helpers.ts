@@ -140,7 +140,7 @@ export function isTemperatureUnsupported(model: string): boolean {
 /**
  * Detect the AI provider from a model name.
  */
-export function detectProvider(model: string): string {
+export function detectProviderFromModel(model: string): string {
   const lower = model.toLowerCase();
   if (lower.startsWith('claude-')) return 'anthropic';
   if (lower.startsWith('gemini-') || lower.startsWith('models/gemini')) return 'google';

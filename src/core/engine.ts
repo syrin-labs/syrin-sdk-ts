@@ -8,10 +8,6 @@
  *   - OTel span recording
  *   - Loop signal observation
  *   - Checkpoint lifecycle (via CheckpointClient)
- *   - Adapter registry
- *
- * Adapters call beforeCall() / afterCall() / onStreamComplete() / onCallError()
- * to plug any LLM SDK into this engine without re-implementing any of the above.
  */
 
 import type { SyrinConfig, SyrinEvent } from '@/types.js';
@@ -22,14 +18,13 @@ import type { Emitter } from '@/observability/emitter.js';
 import type { OTelBridge } from '@/observability/otel.js';
 import type { CheckpointClient } from '@/core/checkpoint.js';
 import type {
-  SyrinAdapter,
-  ISyrinCore,
+  ICallTarget,
   NormalizedCallParams,
   NormalizedCallResult,
   BeforeCallResult,
   NormalizedMessage,
   SchemaField,
-} from '@/adapters/types.js';
+} from '@/core/call-types.js';
 import { agentStorage } from '@/agent/context.js';
 import { GovernanceStopError } from '@/core/governance.js';
 import { getFrameworkContext } from '@/agent/framework-context.js';
@@ -48,12 +43,12 @@ import {
   stableHash,
 } from '@/utils/helpers.js';
 import { detectProvider } from '@/utils/provider.js';
+import { unpatch as unpatchOpenAI } from '@/interceptors/openai.js';
 
 // Re-export for convenience
-export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/adapters/types.js';
+export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/core/call-types.js';
 
-export class SyrinCore implements ISyrinCore {
-  private readonly _adapters = new Map<string, SyrinAdapter>();
+export class SyrinCore implements ICallTarget {
 
   constructor(
     readonly config: SyrinConfig,
@@ -63,52 +58,40 @@ export class SyrinCore implements ISyrinCore {
     readonly checkpointClient: CheckpointClient,
   ) {}
 
-  // ── Adapter registry ────────────────────────────────────────────────────
-
-  async registerAdapter(adapter: SyrinAdapter): Promise<void> {
-    this._adapters.set(adapter.name, adapter);
-    await adapter.install(this);
-  }
-
-  uninstallAdapter(name: string): void {
-    this._adapters.get(name)?.uninstall();
-    this._adapters.delete(name);
-  }
-
   uninstallAll(): void {
-    for (const adapter of this._adapters.values()) {
-      adapter.uninstall();
-    }
-    this._adapters.clear();
-  }
-
-  isAdapterInstalled(name: string): boolean {
-    return this._adapters.get(name)?.isInstalled() ?? false;
+    unpatchOpenAI();
   }
 
   // ── Schema registration ──────────────────────────────────────────────────
 
   /**
-   * Merge configSchema() from all installed adapters that expose it.
-   * First-writer wins: if two adapters declare the same section+field, the first one wins.
+   * Build the config schema sent to the backend on registration.
+   * Applies schemaDefaults from init options on top of the built-in fields.
    */
   buildSchema(): Record<string, unknown> {
-    const sections: Record<string, Record<string, SchemaField>> = {};
+    const builtIn: Record<string, SchemaField[]> = {
+      llm: [
+        { name: 'model',             type: 'str',   default: null },
+        { name: 'temperature',       type: 'float', default: null, constraints: { ge: 0.0, le: 2.0 } },
+        { name: 'max_tokens',        type: 'int',   default: null, constraints: { ge: 1 } },
+        { name: 'top_p',             type: 'float', default: null, constraints: { ge: 0.0, le: 1.0 } },
+        { name: 'frequency_penalty', type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
+        { name: 'presence_penalty',  type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
+        { name: 'seed',              type: 'int',   default: null },
+        { name: 'n',                 type: 'int',   default: null, constraints: { ge: 1, le: 10 } },
+      ],
+      prompt: [
+        { name: 'system_prompt', type: 'str', default: null, multiline: true },
+      ],
+    };
 
-    for (const adapter of this._adapters.values()) {
-      const adapterSchema = adapter.configSchema();
-      for (const [sectionName, fields] of Object.entries(adapterSchema)) {
-        if (!sections[sectionName]) sections[sectionName] = {};
-        for (const field of fields) {
-          if (!sections[sectionName][field.name]) {
-            sections[sectionName][field.name] = field;
-          }
-        }
-      }
+    const sections: Record<string, Record<string, SchemaField>> = {};
+    for (const [sec, fields] of Object.entries(builtIn)) {
+      sections[sec] = {};
+      for (const field of fields) sections[sec][field.name] = field;
     }
 
-    // Apply schemaDefaults — patch matching field defaults before returning.
-    // Parity with Python SDK's schema_defaults option.
+    // Apply schemaDefaults — patch matching field defaults before sending.
     const defaults = this.config.schemaDefaults ?? {};
     for (const [path, value] of Object.entries(defaults)) {
       const dot = path.indexOf('.');
@@ -120,15 +103,99 @@ export class SyrinCore implements ISyrinCore {
       }
     }
 
-    return {
+    // Build per-agent sections from field declarations (via handle.field())
+    const agentFieldDecls = (this as unknown as { _agentFields?: Record<string, Array<{
+      key: string; default: unknown; label?: string; ge?: number; le?: number;
+      enum?: unknown[]; multiline?: boolean; description?: string;
+    }>> })._agentFields ?? {};
+
+    const agentsSections: Record<string, unknown> = {};
+    for (const [agentId, fields] of Object.entries(agentFieldDecls)) {
+      const agentSections: Record<string, { fields: SchemaField[] }> = {};
+      for (const decl of fields) {
+        const dotIdx = decl.key.indexOf('.');
+        if (dotIdx === -1) continue;
+        const sec = decl.key.slice(0, dotIdx);
+        const name = decl.key.slice(dotIdx + 1);
+        if (!agentSections[sec]) agentSections[sec] = { fields: [] };
+        const inferredType: SchemaField['type'] =
+          typeof decl.default === 'number'
+            ? (Number.isInteger(decl.default) ? 'int' : 'float')
+            : 'str';
+        const f: SchemaField & { label?: string; enum?: unknown[]; multiline?: boolean } = {
+          name,
+          type: inferredType,
+          default: decl.default,
+          ...(decl.label ? { label: decl.label } : {}),
+          ...(decl.ge !== undefined ? { constraints: { ...(agentSections[sec].fields.find(x => x.name === name) as Record<string, unknown> | undefined)?.['constraints'] as Record<string, number> | undefined, ge: decl.ge } } : {}),
+          ...(decl.multiline ? { multiline: decl.multiline } : {}),
+        };
+        // Merge ge/le into constraints
+        if (decl.ge !== undefined || decl.le !== undefined) {
+          const constraints: Record<string, number> = {};
+          if (decl.ge !== undefined) constraints['ge'] = decl.ge;
+          if (decl.le !== undefined) constraints['le'] = decl.le;
+          (f as unknown as { constraints: Record<string, number> }).constraints = constraints;
+        }
+        if (decl.enum !== undefined) {
+          (f as unknown as { constraints: Record<string, unknown> }).constraints = {
+            ...((f as unknown as { constraints?: Record<string, unknown> }).constraints ?? {}),
+            enum: decl.enum,
+          };
+        }
+        agentSections[sec].fields.push(f);
+      }
+      agentsSections[agentId] = {
+        label: agentId,
+        sections: Object.fromEntries(
+          Object.entries(agentSections).map(([sec, v]) => [sec, v])
+        ),
+      };
+    }
+
+    const schema: Record<string, unknown> = {
+      version: 2,
       agent_id: this.config.agentId,
-      sections: Object.fromEntries(
-        Object.entries(sections).map(([sec, fields]) => [
-          sec,
-          { fields: Object.values(fields) },
-        ])
+      global: Object.fromEntries(
+        Object.entries(sections).map(([sec, fields]) => [sec, { fields: Object.values(fields) }])
       ),
+      agents: agentsSections,
     };
+
+    // Handle explicit or auto-discovered topology for multi-agent systems
+    const multiAgentDefs = (this as unknown as { _multiAgentDefs?: Record<string, unknown> })._multiAgentDefs;
+    const explicitTopology = (this as unknown as { _explicitTopology?: Record<string, unknown> })._explicitTopology;
+
+    if (multiAgentDefs && Object.keys(multiAgentDefs).length > 0) {
+      const agentIds = Object.keys(multiAgentDefs);
+      const rootId = this.config.agentId || '';
+      const subAgentIds = agentIds.filter(id => id !== rootId);
+
+      if (subAgentIds.length > 0 && rootId) {
+        // Use explicit topology if defined, otherwise auto-discover orchestrator
+        let topology: Record<string, unknown>;
+        if (explicitTopology) {
+          topology = explicitTopology;
+        } else {
+          // Multi-agent system: infer orchestrator topology
+          // Root agent orchestrates all sub-agents in parallel
+          topology = {
+            type: 'orchestrator',
+            nodes: {
+              [rootId]: { role: 'orchestrator' },
+              ...Object.fromEntries(subAgentIds.map(id => [id, { role: 'worker', execMode: 'parallel' }]))
+            },
+            edges: subAgentIds.map(id => ({ from: rootId, to: id })),
+            entryPoint: rootId,
+            terminalNodes: subAgentIds,
+          };
+        }
+        schema.version = 3;
+        schema.topology = topology;
+      }
+    }
+
+    return schema;
   }
 
   /**
@@ -146,7 +213,7 @@ export class SyrinCore implements ISyrinCore {
       agent_framework: this._detectFramework(),
       sdk: { language: 'typescript', version: SDK_VERSION },
       schema,
-      server_url: this.config.serverUrl ?? null,
+      agent_url: this.config.agentUrl ?? null,
     };
 
     const url = `${this.config.backendUrl}/api/v1/agents/${agentId}/register`;
@@ -182,19 +249,6 @@ export class SyrinCore implements ISyrinCore {
   }
 
   private _detectFramework(): string | undefined {
-    // Tier 1: framework/orchestration adapters (preferred)
-    const llmProviders = new Set(['openai', 'anthropic']);
-    for (const adapter of this._adapters.values()) {
-      if (!llmProviders.has(adapter.name)) {
-        return adapter.name;
-      }
-    }
-    // Tier 2: fall back to LLM provider name (parity with Python SDK)
-    for (const adapter of this._adapters.values()) {
-      if (llmProviders.has(adapter.name)) {
-        return adapter.name;
-      }
-    }
     return undefined;
   }
 

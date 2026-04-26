@@ -2,10 +2,10 @@
  * Tests: SyrinCore.buildSchema() + SyrinCore.register()
  *
  * Covers:
- *  1. buildSchema with no adapters returns empty sections
- *  2. buildSchema with OpenAI adapter returns llm section with 3 fields
- *  3. buildSchema with LangGraph adapter returns llm + langgraph sections
- *  4. buildSchema deduplicates fields when two adapters declare same section
+ *  1. buildSchema returns llm and prompt sections (always present)
+ *  2. buildSchema llm section contains model, temperature, max_tokens fields
+ *  3. buildSchema prompt section contains system_prompt field
+ *  4. buildSchema all built-in llm fields have null defaults
  *  5. register POSTs to correct URL with schema in body
  *  6. register applies configDelta to ConfigStore
  *  7. register with no agentId is a no-op (no fetch call)
@@ -16,10 +16,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SyrinCore } from '@/core/engine';
 import { ConfigStore } from '@/config/store';
-import { OpenAIAdapter } from '@/adapters/openai/index';
-import { LangGraphAdapter } from '@/adapters/langgraph/index';
-import { BaseFrameworkAdapter } from '@/adapters/types';
-import type { ISyrinCore, SchemaField } from '@/adapters/types';
+import type { ICallTarget, SchemaField } from '@/core/call-types';
 import type { SyrinConfig } from '@/types';
 
 // ---------------------------------------------------------------------------
@@ -78,7 +75,7 @@ function makeCore(configOverrides: Partial<SyrinConfig> = {}): {
     getToolValidation: vi.fn(),
     deleteSession: vi.fn(),
     clearStaleSessions: vi.fn().mockReturnValue(0),
-  } as unknown as ISyrinCore['sessionStore'];
+  } as unknown as ICallTarget['sessionStore'];
 
   const emitter = {
     emit: vi.fn(),
@@ -112,122 +109,49 @@ function makeCore(configOverrides: Partial<SyrinConfig> = {}): {
 }
 
 // ---------------------------------------------------------------------------
-// A custom adapter that exposes a duplicate llm section (for dedup test)
-// ---------------------------------------------------------------------------
-
-class DuplicateLlmAdapter extends BaseFrameworkAdapter {
-  readonly name = 'duplicate-llm';
-
-  protected _doInstall(_core: ISyrinCore): void {}
-  protected _doUninstall(): void {}
-
-  override configSchema(): Record<string, SchemaField[]> {
-    return {
-      llm: [
-        // Same field names as OpenAI/Anthropic but different defaults
-        { name: 'model', type: 'str', default: 'claude-3-opus' },
-        { name: 'temperature', type: 'float', default: 0.5 },
-        // Extra field not in OpenAI schema
-        { name: 'top_k', type: 'int', default: null },
-      ],
-    };
-  }
-}
-
-// ---------------------------------------------------------------------------
-// 1. buildSchema with no adapters returns empty sections
+// 1–4: buildSchema() tests
 // ---------------------------------------------------------------------------
 
 describe('SyrinCore.buildSchema()', () => {
-  it('returns empty sections when no adapters are registered', () => {
+  it('returns llm and prompt sections', () => {
     const { core } = makeCore();
     const schema = core.buildSchema();
 
     expect(schema).toMatchObject({ agent_id: 'test-agent' });
-    const sections = (schema as { sections: Record<string, unknown> }).sections;
-    expect(Object.keys(sections)).toHaveLength(0);
+    const sections = (schema as { global: Record<string, unknown> }).global;
+    expect(sections['llm']).toBeDefined();
+    expect(sections['prompt']).toBeDefined();
   });
 
-  // -------------------------------------------------------------------------
-  // 2. buildSchema with OpenAI adapter returns llm section with 3 fields
-  // -------------------------------------------------------------------------
-
-  it('returns llm section with 3 fields after registering OpenAI adapter', async () => {
+  it('llm section contains model, temperature, max_tokens fields', () => {
     const { core } = makeCore();
+    const schema = core.buildSchema() as { global: Record<string, { fields: SchemaField[] }> };
+    const fieldNames = schema.global['llm'].fields.map((f) => f.name);
 
-    // Manually register adapter without actually patching (use null module trick)
-    const openaiAdapter = new OpenAIAdapter({} as never);
-    // Override install to be a no-op for this unit test
-    openaiAdapter.install = vi.fn().mockResolvedValue(undefined);
-    openaiAdapter.isInstalled = vi.fn().mockReturnValue(true);
-    await core.registerAdapter(openaiAdapter);
-
-    const schema = core.buildSchema();
-    const sections = (schema as { sections: Record<string, { fields: SchemaField[] }> }).sections;
-
-    expect(sections['llm']).toBeDefined();
-
-    const fieldNames = sections['llm'].fields.map((f) => f.name);
     expect(fieldNames).toContain('model');
     expect(fieldNames).toContain('temperature');
     expect(fieldNames).toContain('max_tokens');
+    expect(fieldNames).toContain('top_p');
+    expect(fieldNames).toContain('frequency_penalty');
+    expect(fieldNames).toContain('presence_penalty');
   });
 
-  // -------------------------------------------------------------------------
-  // 3. buildSchema with LangGraph adapter returns llm + langgraph sections
-  // -------------------------------------------------------------------------
-
-  it('returns llm + langgraph sections after registering LangGraph adapter', async () => {
+  it('prompt section contains system_prompt field', () => {
     const { core } = makeCore();
+    const schema = core.buildSchema() as { global: Record<string, { fields: SchemaField[] }> };
+    const fieldNames = schema.global['prompt'].fields.map((f) => f.name);
 
-    const lgAdapter = new LangGraphAdapter();
-    lgAdapter.install = vi.fn().mockResolvedValue(undefined);
-    lgAdapter.isInstalled = vi.fn().mockReturnValue(true);
-    await core.registerAdapter(lgAdapter);
-
-    const schema = core.buildSchema();
-    const sections = (schema as { sections: Record<string, { fields: SchemaField[] }> }).sections;
-
-    expect(sections['llm']).toBeDefined();
-    expect(sections['langgraph']).toBeDefined();
-
-    const lgFieldNames = sections['langgraph'].fields.map((f) => f.name);
-    expect(lgFieldNames).toContain('recursion_limit');
-    expect(lgFieldNames).toContain('interrupt_before');
-    expect(lgFieldNames).toContain('interrupt_after');
-    expect(lgFieldNames).toContain('thread_id');
+    expect(fieldNames).toContain('system_prompt');
   });
 
-  // -------------------------------------------------------------------------
-  // 4. buildSchema deduplicates fields when two adapters declare same section
-  // -------------------------------------------------------------------------
-
-  it('deduplicates fields — first adapter wins', async () => {
+  it('all built-in llm fields have null defaults', () => {
     const { core } = makeCore();
+    const schema = core.buildSchema() as { global: Record<string, { fields: SchemaField[] }> };
+    const llmFields = schema.global['llm'].fields;
 
-    // Register OpenAI first (model default = null)
-    const openaiAdapter = new OpenAIAdapter({} as never);
-    openaiAdapter.install = vi.fn().mockResolvedValue(undefined);
-    openaiAdapter.isInstalled = vi.fn().mockReturnValue(true);
-    await core.registerAdapter(openaiAdapter);
-
-    // Register duplicate adapter second (model default = 'claude-3-opus')
-    const dupAdapter = new DuplicateLlmAdapter();
-    dupAdapter.install = vi.fn().mockResolvedValue(undefined);
-    dupAdapter.isInstalled = vi.fn().mockReturnValue(true);
-    await core.registerAdapter(dupAdapter);
-
-    const schema = core.buildSchema();
-    const sections = (schema as { sections: Record<string, { fields: SchemaField[] }> }).sections;
-    const llmFields = sections['llm'].fields;
-
-    // 'model' from OpenAI (default=null) should win; 'top_k' from duplicate should be added
-    const modelField = llmFields.find((f) => f.name === 'model');
-    expect(modelField?.default).toBeNull(); // OpenAI's default wins
-
-    // 'top_k' from duplicate should be present since it's not in OpenAI schema
-    const topKField = llmFields.find((f) => f.name === 'top_k');
-    expect(topKField).toBeDefined();
+    for (const field of llmFields) {
+      expect(field.default).toBeNull();
+    }
   });
 });
 
@@ -246,10 +170,6 @@ describe('SyrinCore.register()', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
   });
-
-  // -------------------------------------------------------------------------
-  // 5. register POSTs to correct URL with schema in body
-  // -------------------------------------------------------------------------
 
   it('POSTs to /agents/:agentId/register with schema in body', async () => {
     const { core } = makeCore({ agentId: 'my-agent' });
@@ -281,10 +201,6 @@ describe('SyrinCore.register()', () => {
     expect(body.schema.agent_id).toBe('my-agent');
   });
 
-  // -------------------------------------------------------------------------
-  // 6. register applies configDelta to ConfigStore
-  // -------------------------------------------------------------------------
-
   it('applies configDelta to the ConfigStore', async () => {
     const { core, configStore } = makeCore({ agentId: 'delta-agent' });
 
@@ -304,10 +220,6 @@ describe('SyrinCore.register()', () => {
     expect(configStore.get('llm', 'max_tokens')).toBe(2000);
   });
 
-  // -------------------------------------------------------------------------
-  // 7. register with no agentId is a no-op (no fetch call)
-  // -------------------------------------------------------------------------
-
   it('is a no-op when agentId is not set', async () => {
     const { core } = makeCore({ agentId: undefined });
 
@@ -316,16 +228,11 @@ describe('SyrinCore.register()', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  // -------------------------------------------------------------------------
-  // 8. register when fetch throws does not propagate the error
-  // -------------------------------------------------------------------------
-
   it('does not propagate error when fetch throws', async () => {
     const { core } = makeCore({ agentId: 'throwing-agent' });
 
     fetchSpy.mockRejectedValue(new Error('Network unreachable'));
 
-    // Should not throw
     await expect(core.register()).resolves.toBeUndefined();
   });
 
@@ -357,7 +264,6 @@ describe('init() calls register()', () => {
   });
 
   it('calls /agents/:agentId/register during init()', async () => {
-    // Set up a mock server response for both /ingest and /register
     fetchSpy.mockImplementation((url: string) => {
       if ((url as string).includes('/register')) {
         return Promise.resolve({
@@ -380,7 +286,6 @@ describe('init() calls register()', () => {
       otelExporter: 'none',
     });
 
-    // At least one fetch call should target the register endpoint
     const registerCalls = fetchSpy.mock.calls.filter(([url]: [string]) =>
       url.includes('/register')
     );

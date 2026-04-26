@@ -222,8 +222,9 @@ export class Emitter {
         }
 
         // Accept both camelCase (SDK-generated) and snake_case (backend wire format)
-        const incomingInjections = (data as Record<string, unknown>).pendingInjections as typeof data.pendingInjections
-          ?? (data as Record<string, unknown>).pending_injections as typeof data.pendingInjections;
+        const dataLoose = data as unknown as Record<string, unknown>;
+        const incomingInjections = dataLoose['pendingInjections'] as typeof data.pendingInjections
+          ?? dataLoose['pending_injections'] as typeof data.pendingInjections;
         if (incomingInjections && incomingInjections.length > 0) {
           const sessionIds = new Set(batch.map((q) => q.sessionId));
           for (const sid of sessionIds) {

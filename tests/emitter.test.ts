@@ -257,3 +257,162 @@ describe('Emitter: batching and flushing', () => {
     fetchSpy.mockRestore();
   });
 });
+
+describe('Emitter: experiment assignment', () => {
+  let config: SyrinConfig;
+  let sessionStore: SessionStore;
+  let emitter: Emitter;
+
+  beforeEach(() => {
+    config = makeConfig();
+    sessionStore = new SessionStore();
+    emitter = new Emitter(config, sessionStore);
+  });
+
+  afterEach(async () => {
+    await emitter.stop();
+    vi.restoreAllMocks();
+  });
+
+  it('applies experiment variant overrides to session on flush', async () => {
+    server.use(
+      http.post('http://localhost:4399/api/v1/ingest', () => {
+        return HttpResponse.json({
+          ok: true,
+          experiments: [
+            {
+              experimentId: 'exp_1',
+              variantId: 'var_a',
+              variantName: 'Variant A',
+              overrides: { temperature: 0.2, model: 'gpt-4o-mini' },
+            },
+          ],
+        });
+      })
+    );
+
+    const sessionId = 'exp-session-1';
+    await sessionStore.getOrCreate(sessionId, 'agent-exp');
+
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    const session = sessionStore.getSession(sessionId);
+    expect(session?.activeConfig['temperature']).toBe(0.2);
+    expect(session?.activeConfig['model']).toBe('gpt-4o-mini');
+  });
+
+  it('skips experiment assignment with empty overrides', async () => {
+    server.use(
+      http.post('http://localhost:4399/api/v1/ingest', () => {
+        return HttpResponse.json({
+          ok: true,
+          experiments: [
+            {
+              experimentId: 'exp_2',
+              variantId: 'var_control',
+              variantName: 'Control',
+              overrides: {},
+            },
+          ],
+        });
+      })
+    );
+
+    const sessionId = 'exp-session-2';
+    await sessionStore.getOrCreate(sessionId, 'agent-exp');
+
+    const applyConfigSpy = vi.spyOn(sessionStore, 'applyConfigUpdate');
+
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    expect(applyConfigSpy).not.toHaveBeenCalled();
+  });
+
+  it('applies overrides from multiple experiment assignments', async () => {
+    server.use(
+      http.post('http://localhost:4399/api/v1/ingest', () => {
+        return HttpResponse.json({
+          ok: true,
+          experiments: [
+            {
+              experimentId: 'exp_3a',
+              variantId: 'var_x',
+              variantName: 'Variant X',
+              overrides: { temperature: 0.5 },
+            },
+            {
+              experimentId: 'exp_3b',
+              variantId: 'var_y',
+              variantName: 'Variant Y',
+              overrides: { max_tokens: 1024 },
+            },
+          ],
+        });
+      })
+    );
+
+    const sessionId = 'exp-session-3';
+    await sessionStore.getOrCreate(sessionId, 'agent-exp');
+
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    const session = sessionStore.getSession(sessionId);
+    expect(session?.activeConfig['temperature']).toBe(0.5);
+    expect(session?.activeConfig['max_tokens']).toBe(1024);
+  });
+
+  it('does not call applyConfigUpdate when experiments array is absent', async () => {
+    server.use(
+      http.post('http://localhost:4399/api/v1/ingest', () => {
+        return HttpResponse.json({ ok: true });
+      })
+    );
+
+    const sessionId = 'exp-session-4';
+    await sessionStore.getOrCreate(sessionId, 'agent-exp');
+
+    const applyConfigSpy = vi.spyOn(sessionStore, 'applyConfigUpdate');
+
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    expect(applyConfigSpy).not.toHaveBeenCalled();
+  });
+
+  it('logs debug message when debug=true and experiment assigned', async () => {
+    const debugConfig = makeConfig({ debug: true });
+    const debugEmitter = new Emitter(debugConfig, sessionStore);
+
+    server.use(
+      http.post('http://localhost:4399/api/v1/ingest', () => {
+        return HttpResponse.json({
+          ok: true,
+          experiments: [
+            {
+              experimentId: 'exp_5',
+              variantId: 'var_b',
+              variantName: 'Variant B',
+              overrides: { 'llm.temperature': 0.9 },
+            },
+          ],
+        });
+      })
+    );
+
+    const sessionId = 'exp-session-5';
+    await sessionStore.getOrCreate(sessionId, 'agent-exp');
+
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    debugEmitter.emit(makeEvent(), sessionId);
+    await debugEmitter.flush();
+    await debugEmitter.stop();
+
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/Variant B.*exp-session-5|exp-session-5.*Variant B/)
+    );
+  });
+});

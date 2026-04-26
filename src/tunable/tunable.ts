@@ -273,7 +273,7 @@ export function tunable(options: TunableDecoratorOptions): ClassDecorator {
         current,
       });
 
-      return instance;
+      return instance as unknown as void;
     }
 
     // Wire up the prototype chain so instanceof checks and method lookups work
@@ -323,9 +323,9 @@ export function tune(options: TuneOptions): void {
           type: typeOrDef.type,
           default: typeOrDef.default ?? null,
           description: typeOrDef.description,
-          constraints: (typeOrDef.ge !== undefined || typeOrDef.le !== undefined || typeOrDef.enum !== undefined)
-            ? { ge: typeOrDef.ge, le: typeOrDef.le, enum: typeOrDef.enum }
-            : undefined,
+          ge: typeOrDef.ge,
+          le: typeOrDef.le,
+          enum: typeOrDef.enum,
         };
       }
       // Read the current value from the target (supports dotted paths via apply fn)

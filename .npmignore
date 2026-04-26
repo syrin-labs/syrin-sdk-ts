@@ -1,0 +1,24 @@
+# Source (dist is published instead)
+src/
+tests/
+examples/
+mock-backend/
+
+# Config and tooling
+tsconfig.json
+vitest.config.ts
+.eslintrc*
+.eslintignore
+.prettierrc*
+.editorconfig
+.claude/
+
+# Dev files
+*.log
+*.tgz
+.env*
+test-*.ts
+
+# OS
+.DS_Store
+Thumbs.db

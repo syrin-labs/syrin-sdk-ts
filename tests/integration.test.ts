@@ -70,7 +70,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const { OTelBridge } = await import('../src/observability/otel.js');
     const { CheckpointClient } = await import('../src/core/checkpoint.js');
     const { SyrinCore } = await import('../src/core/engine.js');
-    const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
+    const { patchWithModule, unpatch } = await import('../src/interceptors/openai.js');
 
     unpatch();
 
@@ -130,7 +130,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const { OTelBridge } = await import('../src/observability/otel.js');
     const { CheckpointClient } = await import('../src/core/checkpoint.js');
     const { SyrinCore } = await import('../src/core/engine.js');
-    const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
+    const { patchWithModule, unpatch } = await import('../src/interceptors/openai.js');
     const { sessionStorage } = await import('../src/core/session.js');
 
     unpatch();
@@ -209,7 +209,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const { OTelBridge } = await import('../src/observability/otel.js');
     const { CheckpointClient } = await import('../src/core/checkpoint.js');
     const { SyrinCore } = await import('../src/core/engine.js');
-    const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
+    const { patchWithModule, unpatch } = await import('../src/interceptors/openai.js');
     const { withSession } = await import('../src/index.js');
 
     unpatch();
@@ -279,7 +279,7 @@ describe('Integration: init → call → event at mock backend', () => {
     const { OTelBridge } = await import('../src/observability/otel.js');
     const { CheckpointClient } = await import('../src/core/checkpoint.js');
     const { SyrinCore } = await import('../src/core/engine.js');
-    const { patchWithModule, unpatch } = await import('../src/adapters/openai/index.js');
+    const { patchWithModule, unpatch } = await import('../src/interceptors/openai.js');
 
     unpatch();
 

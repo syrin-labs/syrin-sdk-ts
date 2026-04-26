@@ -200,7 +200,7 @@ export class OTelBridge {
     let resource: ConstructorParameters<typeof NodeTracerProvider>[0] extends { resource?: infer R } ? R : never;
     if (otelResources) {
       resource = new otelResources.Resource({
-        [otelResources.SEMRESATTRS_SERVICE_NAME ?? 'service.name']: serviceName,
+        [(otelResources as unknown as Record<string, string>)['SEMRESATTRS_SERVICE_NAME'] ?? 'service.name']: serviceName,
         'syrin.sdk.language': 'typescript',
         'syrin.sdk.version': '0.1.0',
       }) as typeof resource;
@@ -226,7 +226,7 @@ export class OTelBridge {
     }
 
     // Add BaggageSpanProcessor so W3C baggage flows into spans
-    provider.addSpanProcessor(new BaggageSpanProcessor() as SpanProcessor);
+    provider.addSpanProcessor(new BaggageSpanProcessor() as unknown as SpanProcessor);
 
     provider.register();
     this.provider = provider;

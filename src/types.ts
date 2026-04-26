@@ -2,6 +2,34 @@
  * Syrin SDK — Core TypeScript types
  */
 
+export type TopologyType = 'single' | 'orchestrator' | 'pipeline' | 'parallel' | 'graph' | 'conditional_graph' | 'hybrid';
+
+export type ExecutionMode = 'sequential' | 'parallel' | 'conditional';
+
+export interface TopologyNode {
+  role?: string;
+  execMode?: ExecutionMode;
+  group?: string;
+  [key: string]: unknown;
+}
+
+export interface TopologyEdge {
+  from: string;
+  to: string;
+  condition?: string;
+  group?: string;
+  label?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentTopology {
+  type: TopologyType;
+  nodes: Record<string, TopologyNode>;
+  edges: TopologyEdge[];
+  entryPoint?: string;
+  terminalNodes?: string[];
+}
+
 export interface SyrinConfig {
   apiKey: string;
   agentId?: string;
@@ -21,7 +49,7 @@ export interface SyrinConfig {
   /** Auto-delete sessions older than this many ms (undefined = disabled). */
   sessionTtlMs?: number;
   /** Public URL of this agent server — stored by dashboard to enable the "Run" button. */
-  serverUrl?: string;
+  agentUrl?: string;
   /**
    * How often (in ms) to poll the backend for agent config overrides.
    * 0 or undefined = disabled (default).
@@ -33,6 +61,19 @@ export interface SyrinConfig {
    * Parity with Python SDK's schema_defaults option.
    */
   schemaDefaults?: Record<string, unknown>;
+  /**
+   * List of sub-agent IDs (strings) or dict mapping agent_id → config.
+   * When provided as a list, the SDK auto-generates minimal agent schemas.
+   * When provided as a dict, each value is a config object with optional
+   * `description` and `sections` keys. Used for multi-agent systems.
+   */
+  agents?: string[] | Record<string, { description?: string; sections?: Record<string, unknown> }>;
+  /**
+   * Explicit topology definition for multi-agent systems.
+   * A dict with keys: type, nodes, edges, entryPoint, terminalNodes.
+   * When not provided, the SDK auto-infers orchestrator topology from agents list.
+   */
+  topology?: AgentTopology;
 }
 
 export interface SyrinEvent {

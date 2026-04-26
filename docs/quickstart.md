@@ -251,6 +251,8 @@ if (response.choices[0].finish_reason === "tool_calls") {
 
 ## Multi-Agent Support
 
+### Observability Scoping (Recommended)
+
 Scope individual agents to their own sessions and tag calls with workflow/swarm context:
 
 ```typescript
@@ -288,6 +290,28 @@ await withSwarm("fact-check", async (swarmCtx) => {
 ```
 
 Each agent's calls are tagged with `run_id`, `workflow_id`, and `swarm_id` in the telemetry.
+
+### Zero-Change Integration with Frameworks
+
+The SDK automatically instruments all LLM calls regardless of your orchestration layer:
+
+```typescript
+// LangGraph — no changes needed
+import { StateGraph } from "@langchain/langgraph";
+
+const graph = new StateGraph(State)
+  .addNode("researcher", researcherNode)
+  .addNode("writer", writerNode)
+  .addEdge("researcher", "writer")
+  .compile();
+
+// All calls inside are auto-instrumented
+const result = await graph.invoke({ question: "..." });
+
+// Same with any other framework or custom orchestration
+```
+
+All LLM calls are automatically tracked, including tokens, cost, and latency — **no additional wrapper code needed**.
 
 ### Session Scoping (lower level)
 

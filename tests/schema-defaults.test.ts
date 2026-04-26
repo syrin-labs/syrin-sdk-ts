@@ -11,8 +11,7 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { SyrinCore } from '@/core/engine';
-import { OpenAIAdapter } from '@/adapters/openai/index';
-import type { ISyrinCore, SchemaField } from '@/adapters/types';
+import type { ICallTarget, SchemaField } from '@/core/call-types';
 import type { SyrinConfig } from '@/types';
 
 vi.mock('openai', () => {
@@ -49,7 +48,7 @@ function makeCore(schemaDefaults?: Record<string, unknown>): SyrinCore {
     getToolValidation: vi.fn(),
     deleteSession: vi.fn(),
     clearStaleSessions: vi.fn().mockReturnValue(0),
-  } as unknown as ISyrinCore['sessionStore'];
+  } as unknown as ICallTarget['sessionStore'];
 
   const emitter = { emit: vi.fn(), flush: vi.fn(), start: vi.fn(), stop: vi.fn() };
   const otelBridge = { recordSpan: vi.fn(), setup: vi.fn(), shutdown: vi.fn() };
@@ -58,57 +57,47 @@ function makeCore(schemaDefaults?: Record<string, unknown>): SyrinCore {
   return new SyrinCore(config, sessionStore, emitter as never, otelBridge as never, checkpointClient as never);
 }
 
-async function makeOpenAICore(schemaDefaults?: Record<string, unknown>): Promise<SyrinCore> {
-  const core = makeCore(schemaDefaults);
-  const adapter = new OpenAIAdapter({} as never);
-  adapter.install = vi.fn().mockResolvedValue(undefined);
-  adapter.isInstalled = vi.fn().mockReturnValue(true);
-  await core.registerAdapter(adapter);
-  return core;
-}
-
-type Schema = { sections: Record<string, { fields: SchemaField[] }> };
+type Schema = { global: Record<string, { fields: SchemaField[] }> };
 
 describe('schemaDefaults', () => {
   afterEach(() => {
     vi.clearAllMocks();
   });
 
-  // 1. Without schemaDefaults, model default is null (as defined by the adapter)
-  it('leaves field defaults as-is when schemaDefaults is not provided', async () => {
-    const core = await makeOpenAICore();
+  // 1. Without schemaDefaults, model default is null
+  it('leaves field defaults as-is when schemaDefaults is not provided', () => {
+    const core = makeCore();
     const schema = core.buildSchema() as Schema;
-    const modelField = schema.sections['llm'].fields.find((f) => f.name === 'model');
+    const modelField = schema.global['llm'].fields.find((f) => f.name === 'model');
     expect(modelField?.default).toBeNull();
   });
 
   // 2. With schemaDefaults, matching fields get patched
-  it('patches llm.model default from schemaDefaults', async () => {
-    const core = await makeOpenAICore({ 'llm.model': 'gpt-4o-mini' });
+  it('patches llm.model default from schemaDefaults', () => {
+    const core = makeCore({ 'llm.model': 'gpt-4o-mini' });
     const schema = core.buildSchema() as Schema;
-    const modelField = schema.sections['llm'].fields.find((f) => f.name === 'model');
+    const modelField = schema.global['llm'].fields.find((f) => f.name === 'model');
     expect(modelField?.default).toBe('gpt-4o-mini');
   });
 
   // 3. Patches across multiple sections
-  it('patches llm.temperature and prompt.system_prompt from schemaDefaults', async () => {
-    const core = await makeOpenAICore({
+  it('patches llm.temperature and prompt.system_prompt from schemaDefaults', () => {
+    const core = makeCore({
       'llm.temperature': 0.2,
       'prompt.system_prompt': 'You are a concise assistant.',
     });
     const schema = core.buildSchema() as Schema;
 
-    const tempField = schema.sections['llm']?.fields.find((f) => f.name === 'temperature');
+    const tempField = schema.global['llm']?.fields.find((f) => f.name === 'temperature');
     expect(tempField?.default).toBe(0.2);
 
-    const promptField = schema.sections['prompt']?.fields.find((f) => f.name === 'system_prompt');
+    const promptField = schema.global['prompt']?.fields.find((f) => f.name === 'system_prompt');
     expect(promptField?.default).toBe('You are a concise assistant.');
   });
 
   // 4. Unknown field path in schemaDefaults is silently ignored
-  it('ignores unknown field paths in schemaDefaults', async () => {
-    const core = await makeOpenAICore({ 'nonexistent.field': 'value' });
-    // Should not throw
+  it('ignores unknown field paths in schemaDefaults', () => {
+    const core = makeCore({ 'nonexistent.field': 'value' });
     expect(() => core.buildSchema()).not.toThrow();
   });
 
@@ -117,7 +106,7 @@ describe('schemaDefaults', () => {
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue({}) });
     vi.stubGlobal('fetch', fetchSpy);
 
-    const core = await makeOpenAICore({ 'llm.model': 'gpt-4o', 'llm.temperature': 0.5 });
+    const core = makeCore({ 'llm.model': 'gpt-4o', 'llm.temperature': 0.5 });
     await core.register();
 
     vi.unstubAllGlobals();
@@ -125,7 +114,7 @@ describe('schemaDefaults', () => {
     expect(fetchSpy).toHaveBeenCalled();
     const [, options] = fetchSpy.mock.calls[0] as [string, RequestInit];
     const body = JSON.parse(options.body as string) as { schema: Schema };
-    const modelField = body.schema.sections['llm']?.fields.find((f) => f.name === 'model');
+    const modelField = body.schema.global['llm']?.fields.find((f) => f.name === 'model');
     expect(modelField?.default).toBe('gpt-4o');
   });
 });
