@@ -237,6 +237,7 @@ export interface TunableDecoratorOptions {
  * in esbuild/vitest transforms.
  */
 export function tunable(options: TunableDecoratorOptions): ClassDecorator {
+  // eslint-disable-next-line @typescript-eslint/ban-types
   return function (ctor: Function): Function {
     const registry = options.registry ?? globalRegistry;
     const applyTiming = options.applyTiming ?? 'immediate';
@@ -277,7 +278,7 @@ export function tunable(options: TunableDecoratorOptions): ClassDecorator {
     }
 
     // Wire up the prototype chain so instanceof checks and method lookups work
-    TunableWrapper.prototype = ctor.prototype;
+    TunableWrapper.prototype = (ctor as { prototype: object }).prototype;
     Object.defineProperty(TunableWrapper, 'name', { value: ctor.name, configurable: true });
     Object.defineProperty(TunableWrapper, 'length', { value: ctor.length, configurable: true });
 

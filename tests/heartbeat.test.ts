@@ -39,6 +39,7 @@ describe('Heartbeat', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     fetchSpy = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchSpy);
   });

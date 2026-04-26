@@ -2,9 +2,12 @@
  * Internal call-lifecycle types shared between the engine and the OpenAI interceptor.
  */
 
+import type { SyrinConfig } from '../types.js';
+import type { SessionStore } from './session.js';
+
 export interface NormalizedMessage {
   role: string;
-  content: string | null | unknown;
+  content: unknown;
 }
 
 export interface NormalizedToolCall {
@@ -61,8 +64,8 @@ export interface SchemaField {
 
 /** Minimal interface the OpenAI interceptor needs from the core. */
 export interface ICallTarget {
-  readonly config: import('../types.js').SyrinConfig;
-  readonly sessionStore: import('./session.js').SessionStore;
+  readonly config: SyrinConfig;
+  readonly sessionStore: SessionStore;
   beforeCall(params: NormalizedCallParams): Promise<BeforeCallResult>;
   afterCall(ctx: BeforeCallResult, params: NormalizedCallParams, result: NormalizedCallResult): void;
   onStreamComplete(ctx: BeforeCallResult, params: NormalizedCallParams, result: NormalizedCallResult): void;

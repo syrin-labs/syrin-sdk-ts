@@ -9,9 +9,7 @@ import {
   TunableField,
   tune,
   getTune,
-  TUNABLE_FIELD_MARKER,
   isTunableFieldMarker,
-  globalRegistry,
 } from '@/tunable/tunable';
 
 describe('TunableField marker', () => {
@@ -52,7 +50,7 @@ describe('@tunable class decorator', () => {
       batchSize = TunableField({ default: 10 });
     }
 
-    const proc = new DocumentProcessor();
+    void new DocumentProcessor();
     const values = registry.get('processor');
     expect(values).toBeDefined();
     expect('batchSize' in values).toBe(true);
@@ -66,7 +64,7 @@ describe('@tunable class decorator', () => {
       systemPrompt = 'hello'; // not tunable
     }
 
-    const agent = new MyAgent();
+    void new MyAgent();
     const values = registry.get('myagent');
     expect('temperature' in values).toBe(true);
     expect('maxTokens' in values).toBe(true);
@@ -100,8 +98,8 @@ describe('@tunable class decorator', () => {
       x = TunableField({ default: 1 });
     }
 
-    const m1 = new Multi();
-    const m2 = new Multi();
+    void new Multi();
+    void new Multi();
     // Second instance replaces first (same namespace)
     const values = registry.get('multi');
     expect('x' in values).toBe(true);

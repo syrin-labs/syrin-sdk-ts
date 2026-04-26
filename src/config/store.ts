@@ -32,30 +32,6 @@ const BUILTIN_SECTIONS: Record<string, Record<string, FieldSchema>> = {
     stop:              { name: 'stop',               type: 'array',   default: null },
     stream:            { name: 'stream',             type: 'boolean', default: null },
   },
-  langgraph: {
-    recursion_limit:  { name: 'recursion_limit',  type: 'number',  default: 25, ge: 1 },
-    interrupt_before: { name: 'interrupt_before', type: 'array',   default: null },
-    interrupt_after:  { name: 'interrupt_after',  type: 'array',   default: null },
-    max_concurrency:  { name: 'max_concurrency',  type: 'number',  default: null, ge: 1 },
-    stream_mode:      { name: 'stream_mode',      type: 'string',  default: null },
-    thread_id:        { name: 'thread_id',        type: 'string',  default: null },
-  },
-  mastra: {
-    model:         { name: 'model',         type: 'string',  default: null },
-    temperature:   { name: 'temperature',   type: 'number',  default: null },
-    max_tokens:    { name: 'max_tokens',    type: 'number',  default: null },
-    system_prompt: { name: 'system_prompt', type: 'string',  default: null },
-    max_steps:     { name: 'max_steps',     type: 'number',  default: null, ge: 1 },
-    toolChoice:    { name: 'toolChoice',    type: 'string',  default: null },
-  },
-  vercel_ai: {
-    model:         { name: 'model',         type: 'string',  default: null },
-    temperature:   { name: 'temperature',   type: 'number',  default: null },
-    max_tokens:    { name: 'max_tokens',    type: 'number',  default: null },
-    system_prompt: { name: 'system_prompt', type: 'string',  default: null },
-    max_steps:     { name: 'max_steps',     type: 'number',  default: null, ge: 1 },
-    tool_choice:   { name: 'tool_choice',   type: 'string',  default: null },
-  },
 };
 
 // ---------------------------------------------------------------------------

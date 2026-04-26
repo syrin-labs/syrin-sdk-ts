@@ -1,25 +1,36 @@
 /**
- * Syrin SDK — Configuration management
+ * Syrin SDK — Configuration management.
+ *
+ * All defaults are sourced from constants.ts — never hardcode values here.
  */
 
 import type { SyrinConfig } from '@/types.js';
+import {
+  DEFAULT_BACKEND_URL,
+  DEFAULT_BATCH_SIZE,
+  DEFAULT_IDLE_FLUSH_MS,
+  SDK_VERSION,
+} from '@/constants.js';
 
-const SDK_VERSION = '1.1.0';
+export { SDK_VERSION };
 
 const DEFAULTS: Omit<SyrinConfig, 'apiKey'> = {
-  backendUrl: 'https://api.syrin.ai',
+  backendUrl: DEFAULT_BACKEND_URL,
   otelExporter: 'none',
   otelEndpoint: 'http://localhost:4318',
   debug: false,
   captureContent: false,
   offline: false,
-  batchSize: 100,
-  idleFlushMs: 10_000,
+  batchSize: DEFAULT_BATCH_SIZE,
+  idleFlushMs: DEFAULT_IDLE_FLUSH_MS,
   toolValidation: false,
   sessionTtlMs: undefined,
+  // configPollIntervalMs is intentionally NOT in DEFAULTS — it is an
+  // internal fallback, not a user-facing option.
   configPollIntervalMs: 0,
 };
 
+/** Read config from environment variables. */
 export function fromEnv(): Partial<SyrinConfig> {
   const env: Partial<SyrinConfig> = {};
 
@@ -32,8 +43,8 @@ export function fromEnv(): Partial<SyrinConfig> {
   if (process.env['SYRIN_SESSION_ID']) {
     env.sessionId = process.env['SYRIN_SESSION_ID'];
   }
-  if (process.env['SYRIN_BACKEND_URL']) {
-    env.backendUrl = process.env['SYRIN_BACKEND_URL'];
+  if (process.env['SYRIN_BACKEND_URL'] || process.env['SYRIN_URL']) {
+    env.backendUrl = (process.env['SYRIN_BACKEND_URL'] ?? process.env['SYRIN_URL'])!;
   }
   if (process.env['SYRIN_OTEL_EXPORTER']) {
     env.otelExporter = process.env['SYRIN_OTEL_EXPORTER'] as SyrinConfig['otelExporter'];
@@ -61,25 +72,53 @@ export function fromEnv(): Partial<SyrinConfig> {
     const parsed = parseInt(process.env['SYRIN_IDLE_FLUSH_MS'], 10);
     if (!isNaN(parsed)) env.idleFlushMs = parsed;
   }
-  if (process.env['SYRIN_TOOL_VALIDATION']) {
-    env.toolValidation =
-      process.env['SYRIN_TOOL_VALIDATION'] === 'true' ||
-      process.env['SYRIN_TOOL_VALIDATION'] === '1';
-  }
   if (process.env['SYRIN_SESSION_TTL_MS']) {
     const parsed = parseInt(process.env['SYRIN_SESSION_TTL_MS'], 10);
     if (!isNaN(parsed)) env.sessionTtlMs = parsed;
-  }
-  if (process.env['SYRIN_CONFIG_POLL_INTERVAL_MS']) {
-    const parsed = parseInt(process.env['SYRIN_CONFIG_POLL_INTERVAL_MS'], 10);
-    if (!isNaN(parsed)) env.configPollIntervalMs = parsed;
   }
 
   return env;
 }
 
+/**
+ * Normalise a backend URL to a clean base URL without `/api/v1` suffix.
+ *
+ * Accepts both:
+ *   - `https://app.syrin.ai`
+ *   - `https://app.syrin.ai/api/v1`
+ *
+ * @throws {Error} If the URL is invalid or uses an insecure protocol.
+ */
+export function normalizeBackendUrl(url: string): string {
+  url = url.trim();
+
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    throw new Error(
+      `[Syrin] Invalid backendUrl: '${url}' — must include protocol (http:// or https://).`,
+    );
+  }
+
+  const isLocal =
+    url.startsWith('http://localhost') || url.startsWith('http://127.0.0.1');
+  if (!url.startsWith('https://') && !isLocal) {
+    throw new Error(
+      `[Syrin] backendUrl must use HTTPS (got: '${url}'). ` +
+      'Use http://localhost or http://127.0.0.1 for local development.',
+    );
+  }
+
+  // Strip /api/v1 suffix if present
+  url = url.replace(/\/api\/v1\/?$/, '');
+
+  // Strip trailing slashes
+  url = url.replace(/\/+$/, '');
+
+  return url;
+}
+
+/** Merge env vars + user options + defaults into a validated SyrinConfig. */
 export function createConfig(
-  options: Partial<SyrinConfig> & { apiKey?: string }
+  options: Partial<SyrinConfig> & { apiKey?: string },
 ): SyrinConfig {
   const envConfig = fromEnv();
 
@@ -89,39 +128,23 @@ export function createConfig(
     ...options,
   };
 
-  // Validate apiKey
   if (!merged.apiKey) {
     throw new Error(
-      '[Syrin] apiKey is required. Set SYRIN_API_KEY env var or pass apiKey to init().'
+      '[Syrin] apiKey is required. Set SYRIN_API_KEY env var or pass apiKey to init().',
     );
   }
 
-  // Validate otelExporter
   const validExporters = ['none', 'console', 'otlp'];
   if (merged.otelExporter && !validExporters.includes(merged.otelExporter)) {
     throw new Error(
-      `[Syrin] Invalid otelExporter: "${merged.otelExporter}". Must be one of: ${validExporters.join(', ')}`
+      `[Syrin] Invalid otelExporter: "${merged.otelExporter}". Must be one of: ${validExporters.join(', ')}`,
     );
   }
 
-  // Strip trailing slash from backendUrl
+  // Normalise the backend URL (strip /api/v1, trailing slash, enforce HTTPS)
   if (merged.backendUrl) {
-    merged.backendUrl = merged.backendUrl.replace(/\/+$/, '');
-  }
-
-  // Enforce HTTPS for non-local backends
-  const resolvedUrl = merged.backendUrl ?? '';
-  const isLocal =
-    resolvedUrl.startsWith('http://localhost') ||
-    resolvedUrl.startsWith('http://127.0.0.1');
-  if (!resolvedUrl.startsWith('https://') && !isLocal) {
-    throw new Error(
-      `[Syrin] backendUrl must use HTTPS (got: "${resolvedUrl}"). ` +
-      'Use http://localhost or http://127.0.0.1 for local development.'
-    );
+    merged.backendUrl = normalizeBackendUrl(merged.backendUrl);
   }
 
   return merged as SyrinConfig;
 }
-
-export { SDK_VERSION };

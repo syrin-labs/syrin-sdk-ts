@@ -23,28 +23,12 @@ describe('ConfigStore — built-in sections', () => {
     expect('stream' in section).toBe(true);
   });
 
-  it('builtin langgraph section exists', () => {
-    const section = store.getSection('langgraph');
-    expect(section).toBeDefined();
-    expect('recursion_limit' in section).toBe(true);
-    expect('interrupt_before' in section).toBe(true);
-    expect('max_concurrency' in section).toBe(true);
-  });
-
-  it('builtin mastra section exists', () => {
-    const section = store.getSection('mastra');
-    expect(section).toBeDefined();
-    expect('model' in section).toBe(true);
-    expect('temperature' in section).toBe(true);
-    expect('max_steps' in section).toBe(true);
-  });
-
-  it('builtin vercel_ai section exists', () => {
-    const section = store.getSection('vercel_ai');
-    expect(section).toBeDefined();
-    expect('model' in section).toBe(true);
-    expect('temperature' in section).toBe(true);
-    expect('tool_choice' in section).toBe(true);
+  it('only llm builtin section exists', () => {
+    const schema = store.exportSchema();
+    expect('llm' in schema).toBe(true);
+    for (const removed of ['langgraph', 'mastra', 'vercel_ai', 'crewai']) {
+      expect(removed in schema).toBe(false);
+    }
   });
 });
 
@@ -207,12 +191,12 @@ describe('ConfigStore — snapshot and restore', () => {
   it('snapshot and restoreSnapshot', () => {
     store.set('llm', 'temperature', 0.5);
     store.set('llm', 'model', 'gpt-4o');
-    store.set('langgraph', 'recursion_limit', 50);
+    store.set('llm', 'max_tokens', 1024);
 
     const snap = store.snapshot();
     expect(snap['llm.temperature']).toBe(0.5);
     expect(snap['llm.model']).toBe('gpt-4o');
-    expect(snap['langgraph.recursion_limit']).toBe(50);
+    expect(snap['llm.max_tokens']).toBe(1024);
 
     // Mutate
     store.set('llm', 'temperature', 1.5);
@@ -222,7 +206,7 @@ describe('ConfigStore — snapshot and restore', () => {
     store.restoreSnapshot(snap);
     expect(store.get('llm', 'temperature')).toBe(0.5);
     expect(store.get('llm', 'model')).toBe('gpt-4o');
-    expect(store.get('langgraph', 'recursion_limit')).toBe(50);
+    expect(store.get('llm', 'max_tokens')).toBe(1024);
   });
 });
 
@@ -233,12 +217,9 @@ describe('ConfigStore — exportSchema', () => {
     store = new ConfigStore();
   });
 
-  it('exportSchema contains all sections', () => {
+  it('exportSchema contains llm section', () => {
     const schema = store.exportSchema();
     expect('llm' in schema).toBe(true);
-    expect('langgraph' in schema).toBe(true);
-    expect('mastra' in schema).toBe(true);
-    expect('vercel_ai' in schema).toBe(true);
   });
 
   it('exportSchema includes custom registered sections', () => {

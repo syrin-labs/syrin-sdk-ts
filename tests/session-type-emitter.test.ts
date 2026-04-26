@@ -7,7 +7,7 @@
  *  3. All valid SessionType values are forwarded correctly
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import { Emitter } from '@/observability/emitter';
@@ -36,7 +36,6 @@ function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
     offline: false,
     batchSize: 50,
     idleFlushMs: 60_000,
-    toolValidation: false,
     ...overrides,
   };
 }

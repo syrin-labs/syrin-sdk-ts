@@ -26,11 +26,13 @@ import type { AgentRunFn } from '@/agent/router.js';
 import { _setAutoRefreshCallback } from '@/tunable/tunable.js';
 import { agentStorage } from '@/agent/context.js';
 import { SessionFeedback, sendFeedback } from '@/feedback.js';
-import { AlreadyRatedError, SessionNotFoundError, ValidationError } from '@/errors.js';
 import type { FeedbackRating, FeedbackOptions } from '@/feedback.js';
+import type { Checkpoint } from '@/core/checkpoint.js';
+import type { SyrinDiagnostics } from '@/types.js';
+import { SSEClient } from '@/observability/sse-client.js';
 
 
-export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, CallInfo, RunContext, GovernanceAction, GovernanceData, ContextInjection, SessionType } from '@/types.js';
+export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, SyrinDiagnostics, CallInfo, RunContext, GovernanceAction, GovernanceData, ContextInjection, SessionType } from '@/types.js';
 export { AgentServer } from '@/agent/server.js';
 export type { AgentHandler, AgentServerOptions } from '@/agent/server.js';
 export { MultiAgentRouter } from '@/agent/router.js';
@@ -39,7 +41,15 @@ export { AgentHandle } from '@/agent/handle.js';
 import { AgentHandle } from '@/agent/handle.js';
 export { SessionFeedback } from '@/feedback.js';
 export type { FeedbackRating, FeedbackOptions } from '@/feedback.js';
-export { AlreadyRatedError, SessionNotFoundError, ValidationError, SyrinError } from '@/errors.js';
+export {
+  AlreadyRatedError,
+  SessionNotFoundError,
+  ValidationError,
+  SyrinError,
+  SetupError,
+  GovernanceApprovalRequiredError,
+  GovernanceCheckpointRestoredError,
+} from '@/errors.js';
 export { getRunContext } from '@/agent/context.js';
 export { GovernanceStopError } from '@/core/governance.js';
 export type { Checkpoint } from '@/core/checkpoint.js';
@@ -59,6 +69,8 @@ export class SyrinSDKInstance implements SyrinSDK {
   private _otelBridge: OTelBridge;
   private _core: SyrinCore;
   private _heartbeat: Heartbeat;
+  /** SSE client for real-time config delivery. Null when offline or no agentId. */
+  _sseClient: SSEClient | null = null;
 
   constructor(
     config: SyrinConfig,
@@ -120,7 +132,7 @@ export class SyrinSDKInstance implements SyrinSDK {
   async createCheckpoint(
     messages: Array<Record<string, unknown>>,
     options: { sessionId?: string; label?: string; metadata?: Record<string, unknown> } = {}
-  ): Promise<import('./core/checkpoint.js').Checkpoint> {
+  ): Promise<Checkpoint> {
     const sid = options.sessionId ?? this._sessionId;
     const session = this._sessionStore.getSession(sid);
     const cp = await this._core.checkpointClient.save(sid, messages, {
@@ -149,7 +161,7 @@ export class SyrinSDKInstance implements SyrinSDK {
   /**
    * List all checkpoints for a session (from local cache).
    */
-  listCheckpoints(sessionId?: string): import('./core/checkpoint.js').Checkpoint[] {
+  listCheckpoints(sessionId?: string): Checkpoint[] {
     return this._core.checkpointClient.listForSession(sessionId ?? this._sessionId);
   }
 
@@ -165,8 +177,50 @@ export class SyrinSDKInstance implements SyrinSDK {
    * Return a sanitized config snapshot with the API key masked.
    */
   configSnapshot(): Record<string, unknown> {
-    const { apiKey: _masked, ...rest } = this._config;
-    return { ...rest, apiKey: '****' };
+    const snap = { ...this._config } as Record<string, unknown>;
+    snap['apiKey'] = '****';
+    return snap;
+  }
+
+  /**
+   * Return a diagnostic snapshot of the current SDK state.
+   *
+   * Useful for health checks, debugging dashboards, and CI assertions.
+   * Does not make any network calls (except the health check).
+   *
+   * @example
+   * ```ts
+   * const diag = sdk.diagnose();
+   * if (!diag.connected) logger.warn('Syrin backend unreachable');
+   * ```
+   */
+  diagnose(): SyrinDiagnostics {
+    const eventsQueued = (this._emitter as unknown as { _queue?: unknown[] })._queue?.length ?? 0;
+    const sseConnected = this._sseClient?.isConnected ?? false;
+    const agentRegistered = !!(this._core as unknown as { _registered?: boolean })._registered;
+
+    let lastLoopDetected = false;
+    let lastDriftScore: number | undefined;
+    let lastIncidentId: string | undefined;
+    for (const sid of this._sessionStore.getSessionIds()) {
+      const s = this._sessionStore.getSession(sid);
+      if (s?.lastLoopDetected) lastLoopDetected = true;
+      if (s?.lastDriftScore != null) lastDriftScore = s.lastDriftScore;
+      if (s?.lastIncidentId != null) lastIncidentId = s.lastIncidentId;
+    }
+
+    return {
+      connected: !this._config.offline,
+      agentRegistered,
+      eventsQueued,
+      configSource: 'default',
+      lastConfigUpdate: undefined,
+      activeExperiments: [],
+      governanceActive: lastLoopDetected,
+      sseConnected,
+      lastDriftScore,
+      lastIncidentId,
+    };
   }
 
   /**
@@ -311,7 +365,7 @@ export class SyrinSDKInstance implements SyrinSDK {
      * @example
      * await sdk.sessions.withId('sess_001').rate('positive');
      */
-    withId: (sessionId: string) => ({
+    withId: (sessionId: string): { rate: (rating: FeedbackRating, options?: FeedbackOptions) => Promise<void> } => ({
       rate: async (rating: FeedbackRating, options?: FeedbackOptions): Promise<void> => {
         await sendFeedback(this._config, sessionId, rating, options);
       },
@@ -413,10 +467,43 @@ export class SyrinSDKInstance implements SyrinSDK {
   }
 
   /**
-   * Emit a CHECKPOINT event to mark milestones in agents.
+   * Emit a CHECKPOINT event to mark milestones in agent execution.
+   *
+   * @param label    Human-readable name for this checkpoint.
+   * @param metadata Optional key/value context.
+   * @param sessionId Target session (defaults to current active session).
+   *
+   * @example
+   * sdk.checkpoint('research_complete', { sources: 5 });
    */
   checkpoint(label: string, metadata?: Record<string, unknown>, sessionId?: string): void {
     this.emit('CHECKPOINT', { name: label, label, metadata: metadata || {} }, sessionId);
+  }
+
+  /**
+   * Check whether the Syrin backend is reachable.
+   *
+   * Makes a GET request to `{backendUrl}/api/v1/health` and returns `true`
+   * on a 2xx response. Returns `false` on any network or HTTP error.
+   *
+   * Does not throw — always returns a boolean.
+   *
+   * @example
+   * if (!await sdk.healthCheck()) {
+   *   logger.warn('Syrin backend unreachable — telemetry will be queued');
+   * }
+   */
+  async healthCheck(): Promise<boolean> {
+    if (this._config.offline) return false;
+    try {
+      const resp = await fetch(`${this._config.backendUrl}/api/v1/health`, {
+        headers: { Authorization: `Bearer ${this._config.apiKey}` },
+        signal: AbortSignal.timeout(5000),
+      });
+      return resp.ok;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -461,6 +548,8 @@ export class SyrinSDKInstance implements SyrinSDK {
   }
 
   async shutdown(): Promise<void> {
+    this._sseClient?.stop();
+    this._sseClient = null;
     await this._heartbeat.stop();
     await this._emitter.stop();
     this._core.uninstallAll();
@@ -558,6 +647,20 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
     _teardown();
   }
 
+  // Deprecation warnings for options that should not be user-visible
+  if ('configPollIntervalMs' in options && options.configPollIntervalMs) {
+    console.warn('[Syrin] init() option "configPollIntervalMs" is deprecated — the SDK uses SSE for real-time config delivery and falls back to polling automatically. This option will be removed in a future release.');
+  }
+  if ('schemaDefaults' in options && options.schemaDefaults) {
+    console.warn('[Syrin] init() option "schemaDefaults" is deprecated — use agent.field() to declare fields with defaults. This option will be removed in a future release.');
+  }
+  if ('agentUrl' in options && options.agentUrl) {
+    console.warn('[Syrin] init() option "agentUrl" is deprecated — the SDK registers its own endpoint automatically. This option will be removed in a future release.');
+  }
+  if ('toolValidation' in options && options.toolValidation !== undefined) {
+    console.warn('[Syrin] init() option "toolValidation" is deprecated — tool validation is always active when the backend supports it. This option will be removed in a future release.');
+  }
+
   clearHooks();
 
   const config = createConfig(options as Partial<SyrinConfig> & { apiKey?: string });
@@ -575,6 +678,9 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
 
   // Build SyrinCore — the provider-agnostic instrumentation engine
   const core = new SyrinCore(config, sessionStore, emitter, otelBridge, checkpointClient);
+  // Mark as NOT ready until all async setup completes (lazy-init queue).
+  // Any LLM calls made between here and markReady() will be queued and replayed.
+  core.isReady = false;
 
   // Multi-agent schema definitions — agents= can be:
   // 1. A list of agent IDs (strings) — SDK auto-generates minimal schemas
@@ -597,6 +703,19 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   if (options.topology) {
     (core as unknown as { _explicitTopology: AgentTopology })._explicitTopology = options.topology;
   }
+
+  // Warn if OpenAI was imported before init() was called.
+  // Any completions.create() calls made before this point were not instrumented.
+  // Fix: move `await init(...)` to before you construct your OpenAI client.
+  try {
+    const mod = require.cache[require.resolve('openai')] as unknown;
+    if (mod && !isPatched()) {
+      console.warn(
+        '[Syrin] ⚠ openai was imported before init() — LLM calls made before this point were NOT instrumented. ' +
+        'Move `await init(...)` to before you construct your OpenAI client to capture all telemetry.',
+      );
+    }
+  } catch { /* openai not installed — fine */ }
 
   // Patch OpenAI directly (lazily imports openai; no-op if not installed)
   await patchOpenAI(core);
@@ -639,10 +758,46 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
 
   const instance = new SyrinSDKInstance(config, sessionStore, emitter, otelBridge, core, heartbeat);
 
+  // Start SSE client — real-time config delivery via GET /agents/{id}/stream.
+  // Falls back to polling automatically after SSE_MAX_RECONNECT_ATTEMPTS failures.
+  // No-op when offline=true or agentId is not set.
+  if (!config.offline && config.agentId) {
+    const sseClient = new SSEClient(config, sessionStore, {
+      onConfigUpdate: undefined,
+      onFallbackToPolling: (): void => {
+        const pollIntervalMs = options.configPollIntervalMs ?? config.configPollIntervalMs ?? 0;
+        if (pollIntervalMs <= 0) {
+          // SSE failed and polling wasn't configured — start with a sensible default
+          const fallbackInterval = 30_000;
+          const pollTimer = setInterval(() => { void (async (): Promise<void> => {
+            try {
+              const resp = await fetch(
+                `${config.backendUrl}/api/v1/agents/${config.agentId}/overrides`,
+                { headers: { Authorization: `Bearer ${config.apiKey}` } }
+              );
+              if (resp.ok) {
+                const data = await resp.json() as { ok: boolean; overrides: Record<string, unknown> };
+                if (data.ok && data.overrides) {
+                  sessionStore.setGlobalConfig(data.overrides);
+                  for (const sid of sessionStore.getSessionIds()) {
+                    sessionStore.applyConfigUpdate(sid, data.overrides);
+                  }
+                }
+              }
+            } catch { /* best-effort */ }
+          })(); }, fallbackInterval);
+          (instance as unknown as { _pollTimer: ReturnType<typeof setInterval> })._pollTimer = pollTimer;
+        }
+      },
+    });
+    sseClient.start();
+    instance._sseClient = sseClient;
+  }
+
   // Start config polling if requested (check both options and resolved config)
   const pollIntervalMs = options.configPollIntervalMs ?? config.configPollIntervalMs ?? 0;
   if (pollIntervalMs > 0) {
-    const pollTimer = setInterval(async () => {
+    const pollTimer = setInterval(() => { void (async (): Promise<void> => {
       try {
         const resp = await fetch(
           `${config.backendUrl}/api/v1/agents/${config.agentId}/overrides`,
@@ -665,7 +820,7 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
       } catch {
         // Non-fatal — polling is best-effort
       }
-    }, pollIntervalMs);
+    })(); }, pollIntervalMs);
 
     (instance as unknown as { _pollTimer: ReturnType<typeof setInterval> })._pollTimer = pollTimer;
   }
@@ -683,6 +838,9 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   }
 
   await sessionStore.getOrCreate(sessionId, config.agentId).catch(() => { /* ignore */ });
+
+  // Mark core as ready — replays any LLM events captured before init() resolved
+  core.markReady(emitter);
 
   return instance;
 }
@@ -731,7 +889,7 @@ export async function refreshSchema(name = 'default'): Promise<void> {
  * Parity with Python SDK's syrin_sdk.mount_config_endpoint(app).
  */
 export function mountConfigEndpoint(instanceName = 'default') {
-  return async (req: { body?: unknown }, res: { status(c: number): { json(b: unknown): void }; json(b: unknown): void }): Promise<void> => {
+  return (req: { body?: unknown }, res: { status(c: number): { json(b: unknown): void }; json(b: unknown): void }): void => {
     const inst = _instances.get(instanceName);
     if (!inst) {
       res.status(503).json({ ok: false, error: 'SDK not initialised' });
@@ -892,17 +1050,25 @@ export async function withSession<T>(sessionId: string, fn: () => Promise<T>): P
     emitter.emit(startedEvent, sessionId);
   }
 
+  let crashed = false;
   try {
     return await sessionStorage.run(sessionId, fn);
+  } catch (err) {
+    crashed = true;
+    throw err;
   } finally {
     if (emitter) {
+      const durationMs = Date.now() - startTime;
+      const store = inst ? (inst as unknown as { _sessionStore: SessionStore })._sessionStore : null;
+      const session = store?.getSession(sessionId);
+
       const endedEvent: SyrinEvent = {
         event_id: generateId('evt_'),
-        event_type: 'SESSION_ENDED',
+        event_type: crashed ? 'SESSION_CRASHED' : 'SESSION_ENDED',
         timestamp: nowIso(),
         session_id: sessionId,
         agent_id: agentId,
-        duration_ms: Date.now() - startTime,
+        duration_ms: durationMs,
         model: '',
         provider: '',
         input_tokens: 0,
@@ -912,6 +1078,30 @@ export async function withSession<T>(sessionId: string, fn: () => Promise<T>): P
         config_applied: false,
       };
       emitter.emit(endedEvent, sessionId);
+
+      // SESSION_SUMMARY — behavioural fingerprint for drift detection
+      const summaryEvent = {
+        event_id: generateId('evt_'),
+        event_type: 'SESSION_SUMMARY',
+        timestamp: nowIso(),
+        session_id: sessionId,
+        agent_id: agentId,
+        duration_ms: durationMs,
+        model: '',
+        provider: '',
+        stream: false,
+        config_applied: false,
+        total_llm_calls: session?.callCount ?? 0,
+        total_input_tokens: session?.totalInputTokens ?? 0,
+        total_output_tokens: session?.totalOutputTokens ?? 0,
+        total_cost_usd: session?.cumulativeCostUsd ?? 0,
+        input_tokens: session?.totalInputTokens ?? 0,
+        output_tokens: session?.totalOutputTokens ?? 0,
+        cost_usd: session?.cumulativeCostUsd ?? 0,
+        session_type: session?.sessionType ?? 'production',
+        end_status: crashed ? 'crashed' : 'completed',
+      };
+      emitter.emit(summaryEvent as unknown as SyrinEvent, sessionId);
     }
   }
 }
@@ -946,7 +1136,7 @@ export function configure(overrides: Record<string, unknown>, sessionId?: string
 export async function createCheckpoint(
   messages: Array<Record<string, unknown>>,
   options: { sessionId?: string; label?: string; metadata?: Record<string, unknown> } = {}
-): Promise<import('./core/checkpoint.js').Checkpoint | undefined> {
+): Promise<Checkpoint | undefined> {
   return _primaryInstance?.createCheckpoint(messages, options);
 }
 
@@ -993,4 +1183,45 @@ export function log(
   sessionId?: string,
 ): void {
   _primaryInstance?.log(message, level, metadata, sessionId);
+}
+
+/**
+ * Return a diagnostic snapshot of the default SDK instance.
+ * Returns null if the SDK has not been initialized.
+ *
+ * @example
+ * import { diagnose } from '@syrin/sdk';
+ * const d = diagnose();
+ * if (!d?.connected) console.warn('Syrin backend unreachable');
+ */
+export function diagnose(): SyrinDiagnostics | null {
+  return _primaryInstance?.diagnose() ?? null;
+}
+
+/**
+ * Check whether the Syrin backend is reachable.
+ * Returns false if the SDK has not been initialized.
+ *
+ * @example
+ * import { healthCheck } from '@syrin/sdk';
+ * if (!await healthCheck()) logger.warn('Syrin unreachable');
+ */
+export async function healthCheck(): Promise<boolean> {
+  return _primaryInstance?.healthCheck() ?? false;
+}
+
+/**
+ * Emit a CHECKPOINT event on the current (or specified) session.
+ * Delegates to the default SDK instance.
+ *
+ * @example
+ * import { checkpoint } from '@syrin/sdk';
+ * checkpoint('research_complete', { sources: 5 });
+ */
+export function checkpoint(
+  label: string,
+  metadata?: Record<string, unknown>,
+  sessionId?: string,
+): void {
+  _primaryInstance?.checkpoint(label, metadata, sessionId);
 }

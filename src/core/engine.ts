@@ -27,7 +27,7 @@ import type {
 } from '@/core/call-types.js';
 import { agentStorage } from '@/agent/context.js';
 import { GovernanceStopError } from '@/core/governance.js';
-import { getFrameworkContext } from '@/agent/framework-context.js';
+
 import {
   generateId,
   nowIso,
@@ -50,6 +50,16 @@ export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } fro
 
 export class SyrinCore implements ICallTarget {
 
+  /**
+   * True when the SDK is fully initialized.
+   * Starts as `true` for direct instantiation (adapters/tests).
+   * Set to `false` by init() before async setup, then back to `true` via markReady().
+   */
+  isReady = true;
+
+  /** Events captured before init() resolved — replayed on markReady(). */
+  readonly preInitQueue: Array<{ event: SyrinEvent; sessionId: string }> = [];
+
   constructor(
     readonly config: SyrinConfig,
     readonly sessionStore: SessionStore,
@@ -57,6 +67,23 @@ export class SyrinCore implements ICallTarget {
     private readonly _otelBridge: OTelBridge,
     readonly checkpointClient: CheckpointClient,
   ) {}
+
+  /**
+   * Called by init() after all setup is complete.
+   * Replays any LLM events captured before the SDK was ready.
+   */
+  markReady(emitter: { emit(e: SyrinEvent, sessionId: string): void }): void {
+    this.isReady = true;
+    if (this.preInitQueue.length > 0) {
+      console.warn(
+        `[Syrin] ${this.preInitQueue.length} LLM event(s) were captured before init() resolved and are being replayed.`
+      );
+      for (const { event, sessionId } of this.preInitQueue) {
+        emitter.emit(event, sessionId);
+      }
+      this.preInitQueue.length = 0;
+    }
+  }
 
   uninstallAll(): void {
     unpatchOpenAI();
@@ -210,7 +237,7 @@ export class SyrinCore implements ICallTarget {
     const schema = this.buildSchema();
     const payload = {
       agent_id: agentId,
-      agent_framework: this._detectFramework(),
+
       sdk: { language: 'typescript', version: SDK_VERSION },
       schema,
       agent_url: this.config.agentUrl ?? null,
@@ -246,10 +273,6 @@ export class SyrinCore implements ICallTarget {
     } catch {
       // Non-fatal — backend unreachable at startup is acceptable
     }
-  }
-
-  private _detectFramework(): string | undefined {
-    return undefined;
   }
 
   // ── Call lifecycle ───────────────────────────────────────────────────────
@@ -398,16 +421,15 @@ export class SyrinCore implements ICallTarget {
       configApplied = true;
     }
 
-    const rawMessages = Array.isArray(modifiedRaw['messages']) ? modifiedRaw['messages'] : [];
+    const rawMessages = Array.isArray(modifiedRaw['messages']) ? (modifiedRaw['messages'] as NormalizedMessage[]) : [];
     // Anthropic passes the system prompt as a separate top-level `system` field
     // (not inside the messages array). Prepend it as a synthetic system message
     // so it appears in prompt_messages in the dashboard context window.
     const anthropicSystem = modifiedRaw['system'];
-    const modifiedMessages = (
+    const modifiedMessages: NormalizedMessage[] =
       anthropicSystem && typeof anthropicSystem === 'string'
         ? [{ role: 'system', content: anthropicSystem }, ...rawMessages]
-        : rawMessages
-    ) as NormalizedMessage[];
+        : rawMessages;
 
     return {
       sessionId,
@@ -569,19 +591,14 @@ export class SyrinCore implements ICallTarget {
         prompt_messages: modifiedMessages,
         ...(responseText != null ? { completion_text: responseText } : {}),
       } : {}),
-      // Framework context — injected by Tier 2 adapters (LangGraph, LangChain, etc.)
-      ...(() => {
-        const fwCtx = getFrameworkContext();
-        if (!fwCtx) return {};
-        return {
-          framework: fwCtx.framework,
-          ...(fwCtx.graphId ? { graph_id: fwCtx.graphId } : {}),
-          ...(fwCtx.nodeName ? { node_name: fwCtx.nodeName } : {}),
-        };
-      })(),
     };
 
-    this._emitter.emit(event, sessionId);
+    // Guard: if init() hasn't resolved yet, queue the event for replay instead of emitting
+    if (!this.isReady) {
+      this.preInitQueue.push({ event, sessionId });
+    } else {
+      this._emitter.emit(event, sessionId);
+    }
 
     // Auto-emit a TOOL_CALL event for each tool the model requested.
     // This pairs with the TOOL_RESULT events the user emits after executing tools.
@@ -610,9 +627,6 @@ export class SyrinCore implements ICallTarget {
       });
     }
 
-    // Read framework context for OTel attributes
-    const fwCtx = getFrameworkContext();
-
     this._otelBridge.recordSpan({
       model,
       provider,
@@ -633,10 +647,6 @@ export class SyrinCore implements ICallTarget {
       configApplied,
       messages: this.config.captureContent ? (modifiedMessages as unknown[]) : undefined,
       responseText: this.config.captureContent ? responseText : undefined,
-      // Framework context
-      framework: fwCtx?.framework,
-      langgraphGraphId: fwCtx?.graphId,
-      langgraphNodeName: fwCtx?.nodeName,
       // Telemetry signal attributes
       callIndex: updatedSession?.callIndex ?? 0,
       contextUtilization: ctxSize ? parseFloat((totalTokens / ctxSize).toFixed(4)) : undefined,

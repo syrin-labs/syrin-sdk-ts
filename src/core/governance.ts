@@ -38,7 +38,8 @@ export class GovernanceStopError extends Error {
 }
 
 export interface GovernanceAction {
-  type: 'stop' | 'inject_message' | 'alert' | 'checkpoint' | 'restore' | string;
+  // eslint-disable-next-line @typescript-eslint/ban-types
+  type: 'stop' | 'inject_message' | 'alert' | 'checkpoint' | 'restore' | (string & {});
   [key: string]: unknown;
 }
 

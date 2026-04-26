@@ -14,7 +14,9 @@ import {
   InMemorySpanExporter,
   SimpleSpanProcessor,
 } from '@opentelemetry/sdk-trace-node';
-import { trace, context } from '@opentelemetry/api';
+import { trace, propagation, ROOT_CONTEXT } from '@opentelemetry/api';
+import type { Span } from '@opentelemetry/api';
+import { SpanStatusCode } from '@opentelemetry/api';
 
 function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
   return {
@@ -89,7 +91,7 @@ describe('OTelBridge', () => {
 
     const spans = exporter.getFinishedSpans();
     expect(spans).toHaveLength(1);
-    expect(spans[0]!.name).toBe('chat gpt-4o');
+    expect(spans[0].name).toBe('chat gpt-4o');
   });
 
   it('includes all gen_ai.* attributes', () => {
@@ -110,7 +112,7 @@ describe('OTelBridge', () => {
     });
 
     const spans = exporter.getFinishedSpans();
-    const attrs = spans[0]!.attributes;
+    const attrs = spans[0].attributes;
 
     expect(attrs['gen_ai.system']).toBe('openai');
     expect(attrs['gen_ai.operation.name']).toBe('chat');
@@ -137,7 +139,7 @@ describe('OTelBridge', () => {
     });
 
     const spans = exporter.getFinishedSpans();
-    const attrs = spans[0]!.attributes;
+    const attrs = spans[0].attributes;
 
     expect(attrs['syrin.agent_id']).toBe('agent_test');
     expect(attrs['syrin.session_id']).toBe('ses_test123');
@@ -161,7 +163,7 @@ describe('OTelBridge', () => {
     }));
 
     const spans = exporter.getFinishedSpans();
-    const events = spans[0]!.events;
+    const events = spans[0].events;
     const eventNames = events.map((e) => e.name);
 
     // Deprecated events must NOT appear
@@ -191,14 +193,13 @@ describe('OTelBridge', () => {
     }));
 
     const spans = exporter.getFinishedSpans();
-    const eventNames = spans[0]!.events.map((e) => e.name);
+    const eventNames = spans[0].events.map((e) => e.name);
     expect(eventNames).not.toContain('gen_ai.user.message');
     expect(eventNames).not.toContain('gen_ai.choice');
     expect(eventNames).not.toContain('gen_ai.content.prompt');
   });
 
   it('records error span on API exception', () => {
-    const { SpanStatusCode } = require('@opentelemetry/api');
     const tracer = provider.getTracer('syrin-sdk-test');
     const error = new Error('API rate limit exceeded');
 
@@ -209,11 +210,11 @@ describe('OTelBridge', () => {
     });
 
     const spans = exporter.getFinishedSpans();
-    expect(spans[0]!.status.code).toBe(SpanStatusCode.ERROR);
-    expect(spans[0]!.status.message).toBe('API rate limit exceeded');
+    expect(spans[0].status.code).toBe(SpanStatusCode.ERROR);
+    expect(spans[0].status.message).toBe('API rate limit exceeded');
   });
 
-  it('otelExporter="none": OTelBridge.setup() creates noop bridge, no spans recorded', async () => {
+  it('otelExporter="none": OTelBridge.setup() creates noop bridge, no spans recorded', () => {
     const noneConfig = makeConfig({ otelExporter: 'none' });
     const bridge = new OTelBridge(noneConfig);
     bridge.setup();
@@ -246,7 +247,7 @@ describe('OTelBridge', () => {
     }));
 
     const spans = exporter.getFinishedSpans();
-    const attrs = spans[0]!.attributes;
+    const attrs = spans[0].attributes;
     expect(attrs['gen_ai.request.top_p']).toBe(0.9);
     expect(attrs['gen_ai.request.frequency_penalty']).toBe(0.5);
     expect(attrs['gen_ai.request.presence_penalty']).toBe(0.3);
@@ -261,24 +262,7 @@ describe('OTelBridge', () => {
     bridge.recordSpan(makeCallInfo({ stop: 'STOP' }));
 
     const spans = exporter.getFinishedSpans();
-    expect(spans[0]!.attributes['gen_ai.request.stop_sequences']).toEqual(['STOP']);
-  });
-
-  it('sets framework context attributes', () => {
-    const config = makeConfig();
-    const bridge = new OTelBridge(config);
-    (bridge as unknown as Record<string, unknown>)['tracer'] = provider.getTracer('syrin-sdk');
-
-    bridge.recordSpan(makeCallInfo({
-      framework: 'langgraph',
-      langgraphGraphId: 'research-graph',
-      langgraphNodeName: 'search_node',
-    }));
-
-    const attrs = exporter.getFinishedSpans()[0]!.attributes;
-    expect(attrs['syrin.framework']).toBe('langgraph');
-    expect(attrs['langgraph.graph_id']).toBe('research-graph');
-    expect(attrs['langgraph.node_name']).toBe('search_node');
+    expect(spans[0].attributes['gen_ai.request.stop_sequences']).toEqual(['STOP']);
   });
 
   it('sets telemetry signal attributes', () => {
@@ -297,7 +281,7 @@ describe('OTelBridge', () => {
       repeatedToolCalls: 2,
     }));
 
-    const attrs = exporter.getFinishedSpans()[0]!.attributes;
+    const attrs = exporter.getFinishedSpans()[0].attributes;
     expect(attrs['syrin.call_index']).toBe(3);
     expect(attrs['syrin.context_utilization']).toBeCloseTo(0.45);
     expect(attrs['syrin.conversation_hash']).toBe('abc123def456');
@@ -315,16 +299,13 @@ describe('OTelBridge', () => {
 
     bridge.recordSpan(makeCallInfo({ finishReason: 'stop' }));
 
-    const attrs = exporter.getFinishedSpans()[0]!.attributes;
+    const attrs = exporter.getFinishedSpans()[0].attributes;
     const reasons = attrs['gen_ai.response.finish_reasons'];
     expect(Array.isArray(reasons)).toBe(true);
     expect(reasons).toContain('stop');
   });
 
   it('BaggageSpanProcessor.onStart copies baggage to span attributes', () => {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { propagation, ROOT_CONTEXT } = require('@opentelemetry/api') as typeof import('@opentelemetry/api');
-
     const bag = propagation.createBaggage({
       'syrin.session_id': { value: 'ses_abc123' },
       'syrin.agent_id': { value: 'my-agent' },
@@ -338,7 +319,7 @@ describe('OTelBridge', () => {
       end() {},
     };
 
-    processor.onStart(mockSpan as unknown as import('@opentelemetry/api').Span, ctx);
+    processor.onStart(mockSpan as unknown as Span, ctx);
 
     expect(capturedAttrs['syrin.session_id']).toBe('ses_abc123');
     expect(capturedAttrs['syrin.agent_id']).toBe('my-agent');

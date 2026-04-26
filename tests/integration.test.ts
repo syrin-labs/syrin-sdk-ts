@@ -2,7 +2,7 @@
  * Integration tests: Full lifecycle with msw
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeAll, afterAll } from 'vitest';
 import { http, HttpResponse } from 'msw';
 import { setupServer } from 'msw/node';
 import type { IngestPayload, SyrinEvent } from '@/types';
@@ -115,9 +115,9 @@ describe('Integration: init → call → event at mock backend', () => {
     await emitter.flush();
 
     expect(receivedPayloads).toHaveLength(1);
-    expect(receivedPayloads[0]!.events).toHaveLength(1);
-    expect(receivedPayloads[0]!.events[0]!.event_type).toBe('LLM_CALL');
-    expect(receivedPayloads[0]!.events[0]!.model).toBe('gpt-4o');
+    expect(receivedPayloads[0].events).toHaveLength(1);
+    expect(receivedPayloads[0].events[0].event_type).toBe('LLM_CALL');
+    expect(receivedPayloads[0].events[0].model).toBe('gpt-4o');
 
     await emitter.stop();
     unpatch();
@@ -138,7 +138,7 @@ describe('Integration: init → call → event at mock backend', () => {
     let callCount = 0;
 
     server.use(
-      http.post(`${BACKEND_URL}/api/v1/ingest`, async () => {
+      http.post(`${BACKEND_URL}/api/v1/ingest`, () => {
         callCount++;
         if (callCount === 1) {
           return HttpResponse.json({ ok: true, config_updates: { temperature: 0.1 } });
@@ -195,7 +195,7 @@ describe('Integration: init → call → event at mock backend', () => {
       });
     });
 
-    const secondCallParams = mockCreate.mock.calls[1]![0] as Record<string, unknown>;
+    const secondCallParams = mockCreate.mock.calls[1][0] as Record<string, unknown>;
     expect(secondCallParams['temperature']).toBe(0.1);
 
     await emitter.stop();
@@ -329,7 +329,7 @@ describe('Integration: init → call → event at mock backend', () => {
     await emitter.stop();
 
     expect(receivedPayloads.length).toBeGreaterThan(0);
-    expect(receivedPayloads[0]!.events).toHaveLength(1);
+    expect(receivedPayloads[0].events).toHaveLength(1);
 
     unpatch();
   });

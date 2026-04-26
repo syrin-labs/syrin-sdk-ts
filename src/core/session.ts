@@ -3,7 +3,7 @@
  */
 
 import { AsyncLocalStorage } from 'async_hooks';
-import type { SessionState, ContextInjection, SessionType } from '@/types.js';
+import type { SessionState, ContextInjection, SessionType, GovernanceAction } from '@/types.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
 
 /**
@@ -94,6 +94,8 @@ export class SessionStore {
         lastCheckpointId: undefined,
         pendingInjections: [],
         sessionType: undefined,
+        totalInputTokens: 0,
+        totalOutputTokens: 0,
       };
       this.sessions.set(sessionId, newSession);
       return newSession;
@@ -250,7 +252,7 @@ export class SessionStore {
   /**
    * Atomically pop all pending governance actions.
    */
-  popGovernanceActions(sessionId: string): import('../types.js').GovernanceAction[] {
+  popGovernanceActions(sessionId: string): GovernanceAction[] {
     const session = this.sessions.get(sessionId);
     if (!session) return [];
     const actions = [...session.pendingGovernance];
@@ -269,7 +271,7 @@ export class SessionStore {
     return messages;
   }
 
-  appendGovernanceAction(sessionId: string, action: import('../types.js').GovernanceAction): void {
+  appendGovernanceAction(sessionId: string, action: GovernanceAction): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.pendingGovernance.push(action);
@@ -308,13 +310,15 @@ export class SessionStore {
   }
 
   /**
-   * Record a completed call, updating cost and call count.
+   * Record a completed call, updating cost, call count, and token totals.
    */
-  recordCall(sessionId: string, costUsd: number): void {
+  recordCall(sessionId: string, costUsd: number, inputTokens = 0, outputTokens = 0): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.cumulativeCostUsd += costUsd;
     session.callCount += 1;
+    session.totalInputTokens += inputTokens;
+    session.totalOutputTokens += outputTokens;
   }
 
   /**

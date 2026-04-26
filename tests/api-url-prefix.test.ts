@@ -40,7 +40,6 @@ function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
     offline: false,
     batchSize: 50,
     idleFlushMs: 60_000,
-    toolValidation: false,
     agentId: 'test-agent',
     sessionId: 'ses_test',
     ...overrides,
@@ -55,6 +54,7 @@ describe('Emitter: URLs use /api/v1 prefix', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ ok: true }),
@@ -120,6 +120,7 @@ describe('Engine.register(): URL uses /api/v1 prefix', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ configDelta: {} }),
@@ -162,6 +163,7 @@ describe('Heartbeat: URL uses /api/v1 prefix', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     fetchSpy = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchSpy);
   });
@@ -214,6 +216,7 @@ describe('Config polling: URL uses /api/v1 prefix', () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ ok: true, overrides: {} }),
@@ -230,19 +233,18 @@ describe('Config polling: URL uses /api/v1 prefix', () => {
   it('polling calls GET /api/v1/agents/:id/overrides', async () => {
     const { init, shutdown } = await import('@/index.js');
 
-    const sdk = await init({
+    await init({
       apiKey: 'syrin_test',
       agentId: 'poll-agent',
       backendUrl: BASE_URL,
       offline: true, // skip ingest/health, test polling url separately below
-      configPollIntervalMs: 5_000,
       otelExporter: 'none',
     });
 
     // Override offline to test polling URL — simulate polling by calling fetch directly with the expected URL
     // Instead, verify that any poll calls use /api/v1
     const pollCalls = fetchSpy.mock.calls.filter(([url]: [string]) =>
-      (url as string).includes('/overrides')
+      (url).includes('/overrides')
     );
     // (In offline mode, no poll calls happen; we verify the URL by inspecting init source code via unit test below)
     await shutdown('default');
@@ -263,6 +265,7 @@ describe('CheckpointClient: URLs use /api/v1 prefix', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ ok: true }),
@@ -321,6 +324,7 @@ describe('CheckpointClient: POST payload uses snake_case keys', () => {
   let fetchSpy: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     fetchSpy = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({ ok: true }),

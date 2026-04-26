@@ -7,11 +7,13 @@
  *      the first queued event when a full batch hasn't triggered first.
  */
 
-import type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, ContextInjection } from '@/types.js';
+import type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, ContextInjection, GovernanceData, ExperimentAssignment } from '@/types.js';
 import type { SessionStore } from '@/core/session.js';
 import { SDK_VERSION } from '@/config/config.js';
 import { GovernanceResponse } from '@/core/governance.js';
+import { GovernanceCheckpointRestoredError } from '@/errors.js';
 import { fireConfigChange, fireAlert } from '@/observability/hooks.js';
+import { generateId, nowIso, stableHash } from '@/utils/helpers.js';
 
 const MAX_QUEUE_SIZE = 1000;
 
@@ -236,6 +238,26 @@ export class Emitter {
               try { cb(injection); } catch { /* fail-open */ }
             }
           }
+          // Emit a CONTEXT_INJECTION telemetry event for each injection received
+          const primarySid = batch[0].sessionId;
+          const session = this.sessionStore.getSession(primarySid);
+          for (const injection of incomingInjections) {
+            const injectionSource = _mapInjectionSource(injection);
+            const injectionType = _mapInjectionType(injection);
+            const contentHash = stableHash(injection.content);
+            const injEvent: SyrinEvent = {
+              event_id: generateId('evt_'),
+              event_type: 'CONTEXT_INJECTION',
+              timestamp: nowIso(),
+              session_id: primarySid,
+              agent_id: session?.agentId ?? this.config.agentId,
+              injection_source: injectionSource,
+              injection_type: injectionType,
+              content_hash: contentHash,
+              ...(this.config.captureContent ? { content: injection.content } : {}),
+            } as unknown as SyrinEvent;
+            this.emit(injEvent, primarySid);
+          }
           if (this.config.debug) {
             console.log(`[Syrin] Received ${incomingInjections.length} context injection(s).`);
           }
@@ -251,10 +273,18 @@ export class Emitter {
     }
   }
 
-  private _applyGovernance(sessionId: string, governanceData: import('../types.js').GovernanceData): void {
+  private _applyGovernance(sessionId: string, governanceData: GovernanceData): void {
     const gov = new GovernanceResponse(governanceData);
 
-    if (gov.loopDetected && this.config.debug) {
+    // Persist governance signals to session state so diagnose() can surface them
+    const session = this.sessionStore.getSession(sessionId);
+    if (session) {
+      if (gov.loopDetected) session.lastLoopDetected = true;
+      if (gov.driftScore != null) session.lastDriftScore = gov.driftScore;
+      if (gov.incidentId != null) session.lastIncidentId = gov.incidentId;
+    }
+
+    if (gov.loopDetected) {
       console.warn(`[Syrin] Backend detected loop for session ${sessionId} (drift_score=${gov.driftScore}, incident=${gov.incidentId})`);
     }
 
@@ -262,7 +292,7 @@ export class Emitter {
       const actionType = action.type;
       if (actionType === 'stop') {
         this.sessionStore.appendGovernanceAction(sessionId, action);
-        console.warn(`[Syrin] Backend sent STOP action for session ${sessionId} — reason: ${action['reason'] ?? '?'}`);
+        console.warn(`[Syrin] Backend sent STOP action for session ${sessionId} — reason: ${String(action['reason'] ?? '?')}`);
       } else if (actionType === 'inject_message') {
         this.sessionStore.appendInjectedMessage(sessionId, {
           role: (action['role'] as string) ?? 'system',
@@ -273,23 +303,86 @@ export class Emitter {
         }
       } else if (actionType === 'alert') {
         fireAlert(action as Record<string, unknown>);
-        console.info(`[Syrin][${action['level'] ?? 'info'}] alert for session ${sessionId}: ${action['message'] ?? ''}`);
-      } else if (actionType === 'checkpoint' || actionType === 'restore') {
+        console.info(`[Syrin][${String(action['level'] ?? 'info')}] alert for session ${sessionId}: ${String(action['message'] ?? '')}`);
+      } else if (actionType === 'checkpoint') {
         this.sessionStore.appendGovernanceAction(sessionId, action);
         if (this.config.debug) {
-          console.log(`[Syrin] ${actionType} action queued for session ${sessionId}`);
+          console.log(`[Syrin] checkpoint action queued for session ${sessionId}`);
         }
+      } else if (actionType === 'restore') {
+        const checkpointId = (action['checkpoint_id'] ?? action['checkpointId']) as string | undefined;
+        const reason = (action['reason'] as string | undefined) ?? 'Restored by Syrin governance';
+        console.info(`[Syrin] restore action received for session ${sessionId} (checkpoint=${checkpointId})`);
+        throw new GovernanceCheckpointRestoredError(checkpointId ?? 'unknown', reason);
+      } else if (actionType === 'config_override') {
+        // Backend explicitly overrides one or more config keys.
+        const fieldPath = (action['field_path'] ?? action['key']) as string | undefined;
+        const value = action['value'];
+        if (fieldPath != null && value !== undefined) {
+          const override = { [fieldPath]: value };
+          this.sessionStore.applyConfigUpdate(sessionId, override);
+          if (this.config.debug) {
+            console.log(`[Syrin] config_override applied for session ${sessionId}: ${fieldPath}=${JSON.stringify(value)}`);
+          }
+          // Inject correction_hint as a system message if present
+          const hint = action['correction_hint'] as string | undefined;
+          if (hint) {
+            this.sessionStore.appendInjectedMessage(sessionId, {
+              role: 'system',
+              content: `[Syrin Governance] ${hint}`,
+            });
+          }
+        } else if (this.config.debug) {
+          console.warn(`[Syrin] config_override missing field_path/key or value — ignoring`, action);
+        }
+      } else if (actionType === 'require_approval') {
+        const approvalId = action['approval_id'] as string | undefined;
+        const toolName = (action['tool_name'] as string | undefined) ?? 'unknown';
+        const reason = (action['reason'] as string | undefined) ?? 'Human approval required';
+
+        if (!approvalId) {
+          if (this.config.debug) {
+            console.warn('[Syrin] require_approval action missing approval_id — ignoring');
+          }
+          return;
+        }
+
+        // Inject a system message so the agent naturally informs the user
+        this.sessionStore.appendInjectedMessage(sessionId, {
+          role: 'system',
+          content:
+            `[Syrin Governance] The action '${toolName}' requires human approval ` +
+            `(reason: ${reason}). Approval ID: ${approvalId}. ` +
+            'Inform the user this action is pending approval. Do NOT retry the tool call.',
+        });
+        console.warn(`[Syrin] require_approval for session ${sessionId} — tool=${toolName} approval_id=${approvalId}`);
       }
     }
   }
 
-  private _applyExperiments(sessionId: string, assignments: import('../types.js').ExperimentAssignment[]): void {
+  private _applyExperiments(sessionId: string, assignments: ExperimentAssignment[]): void {
     for (const assignment of assignments) {
       if (!assignment.overrides || Object.keys(assignment.overrides).length === 0) continue;
       if (this.config.debug) {
         console.log(`[Syrin] Experiment variant assigned: ${assignment.variantName} (session=${sessionId})`);
       }
       this.sessionStore.mergeExperimentOverrides(sessionId, assignment.overrides);
+
+      // Emit EXPERIMENT_ASSIGNED telemetry event so backend can track variant distribution
+      const session = this.sessionStore.getSession(sessionId);
+      const expEvent = {
+        event_id: `evt_${Date.now()}_exp`,
+        event_type: 'EXPERIMENT_ASSIGNED' as const,
+        timestamp: new Date().toISOString(),
+        session_id: sessionId,
+        agent_id: session?.agentId ?? this.config.agentId,
+        experiment_id: assignment.experimentId,
+        variant_id: assignment.variantId,
+        variant_name: assignment.variantName,
+        overrides: assignment.overrides,
+      };
+      // Emit without infinite loop: add directly to queue without triggering experiment handling again
+      this.queue.push({ event: expEvent as unknown as SyrinEvent, sessionId });
     }
   }
 
@@ -308,4 +401,32 @@ export class Emitter {
   queueSize(): number {
     return this.queue.length;
   }
+}
+
+// ---------------------------------------------------------------------------
+// CONTEXT_INJECTION helpers
+// ---------------------------------------------------------------------------
+
+/** Map ContextInjection.injection_type to the telemetry event's injection_source field. */
+function _mapInjectionSource(
+  injection: ContextInjection
+): 'config' | 'governance' | 'operator' | 'experiment' {
+  const t = injection.injection_type;
+  if (t === 'governance_correction') return 'governance';
+  if (t === 'manual') return 'operator';
+  if (t === 'world_state' || t === 'constraint' || t === 'fact') return 'config';
+  if (t === 'custom') return 'operator';
+  return 'operator';
+}
+
+/** Map ContextInjection.injection_type to the telemetry event's injection_type field. */
+function _mapInjectionType(
+  injection: ContextInjection
+): 'system_prompt' | 'message' | 'context' {
+  const t = injection.injection_type;
+  if (t === 'governance_correction') return 'message';
+  if (t === 'manual') return 'message';
+  if (t === 'world_state' || t === 'constraint' || t === 'fact') return 'context';
+  if (t === 'custom') return 'message';
+  return 'message';
 }

@@ -51,7 +51,6 @@ function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
     offline: true,
     batchSize: 50,
     idleFlushMs: 60000,
-    toolValidation: false,
     agentId: 'test-agent',
     sessionId: 'ses_test',
     ...overrides,
@@ -265,7 +264,7 @@ describe('init() calls register()', () => {
 
   it('calls /agents/:agentId/register during init()', async () => {
     fetchSpy.mockImplementation((url: string) => {
-      if ((url as string).includes('/register')) {
+      if ((url).includes('/register')) {
         return Promise.resolve({
           ok: true,
           json: vi.fn().mockResolvedValue({ configDelta: {} }),
@@ -277,7 +276,7 @@ describe('init() calls register()', () => {
       });
     });
 
-    const { init, shutdown } = await import('@/index');
+    const { init } = await import('@/index');
     const sdk = await init({
       apiKey: 'syrin_test',
       agentId: 'init-agent',

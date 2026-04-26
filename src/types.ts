@@ -78,7 +78,8 @@ export interface SyrinConfig {
 
 export interface SyrinEvent {
   event_id: string;
-  event_type: 'LLM_CALL' | 'LLM_ERROR' | 'SESSION_STARTED' | 'SESSION_ENDED';
+  // eslint-disable-next-line @typescript-eslint/ban-types
+  event_type: 'LLM_CALL' | 'LLM_ERROR' | 'SESSION_STARTED' | 'SESSION_ENDED' | 'SESSION_CRASHED' | (string & {});
   timestamp: string;
   duration_ms: number;
   model: string;
@@ -126,10 +127,6 @@ export interface SyrinEvent {
   // Recovery tracking
   last_checkpoint_id?: string;
   governance_applied?: boolean;
-  // Framework context — set when a Tier 2 adapter (LangGraph, LangChain, etc.) is active
-  framework?: string;
-  graph_id?: string;
-  node_name?: string;
 }
 
 /** Snapshot of the active execution context (multi-agent). */
@@ -143,6 +140,9 @@ export interface RunContext {
 
 export type SessionType = 'production' | 'chat_test' | 'workflow_test' | 'simulation';
 
+/** Session end status for SESSION_SUMMARY events. */
+export type SessionEndStatus = 'completed' | 'stopped' | 'crashed' | 'timed_out';
+
 export interface IngestPayload {
   session_id: string;
   agent_id?: string;
@@ -152,7 +152,8 @@ export interface IngestPayload {
 }
 
 export interface GovernanceAction {
-  type: 'stop' | 'inject_message' | 'alert' | 'checkpoint' | 'restore' | string;
+  // eslint-disable-next-line @typescript-eslint/ban-types
+  type: 'stop' | 'inject_message' | 'alert' | 'checkpoint' | 'restore' | (string & {});
   [key: string]: unknown;
 }
 
@@ -204,6 +205,93 @@ export interface SessionState {
   pendingInjections: ContextInjection[];
   /** Session type tag set by AgentServer — forwarded to ingest payload. */
   sessionType?: SessionType;
+  /** Governance signals — populated from ingest response governance block. */
+  lastLoopDetected?: boolean;
+  lastDriftScore?: number;
+  lastIncidentId?: string;
+  /** Cumulative token counts for SESSION_SUMMARY emission. */
+  totalInputTokens: number;
+  totalOutputTokens: number;
+}
+
+/** SESSION_SUMMARY event — emitted at session close as a behavioural fingerprint. */
+export interface SessionSummaryEvent {
+  event_id: string;
+  event_type: 'SESSION_SUMMARY';
+  timestamp: string;
+  session_id: string;
+  agent_id?: string;
+  total_llm_calls: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost_usd: number;
+  tool_calls_count: number;
+  max_call_depth: number;
+  retry_count: number;
+  session_type?: SessionType;
+  end_status?: SessionEndStatus;
+  success_criteria_met?: string[];
+  success_criteria_failed?: string[];
+  duration_ms: number;
+}
+
+/** CONTEXT_INJECTION event — emitted when SDK injects context into the next LLM call. */
+export interface ContextInjectionEvent {
+  event_id: string;
+  event_type: 'CONTEXT_INJECTION';
+  timestamp: string;
+  session_id: string;
+  agent_id?: string;
+  /** Where the injection came from: 'config' | 'governance' | 'operator' | 'experiment'. */
+  injection_source: 'config' | 'governance' | 'operator' | 'experiment';
+  /** What was injected: 'system_prompt' | 'message' | 'context'. */
+  injection_type: 'system_prompt' | 'message' | 'context';
+  /** SHA-256[:16] fingerprint of the injected content. */
+  content_hash: string;
+  /** Full content (only set when captureContent=true). */
+  content?: string;
+}
+
+/** EXPERIMENT_ASSIGNED event — emitted when MAB variant is applied. */
+export interface ExperimentAssignedEvent {
+  event_id: string;
+  event_type: 'EXPERIMENT_ASSIGNED';
+  timestamp: string;
+  session_id: string;
+  agent_id?: string;
+  experiment_id: string;
+  variant_id: string;
+  variant_name: string;
+  overrides: Record<string, unknown>;
+}
+
+/** CUSTOM event — for sdk.emit(eventName, payload). */
+export interface CustomTelemetryEvent {
+  event_id: string;
+  event_type: 'CUSTOM';
+  timestamp: string;
+  session_id: string;
+  agent_id?: string;
+  /** The name the caller passed to sdk.emit(). */
+  custom_event_name: string;
+  /** Free-form key/value metadata. */
+  payload: Record<string, unknown>;
+}
+
+/** Diagnostic snapshot returned by sdk.diagnose(). */
+export interface SyrinDiagnostics {
+  connected: boolean;
+  agentRegistered: boolean;
+  eventsQueued: number;
+  configSource: 'remote' | 'local' | 'default';
+  lastConfigUpdate: string | undefined;
+  activeExperiments: string[];
+  governanceActive: boolean;
+  sseConnected: boolean;
+  /** Most recent backend drift score, if any. */
+  lastDriftScore?: number;
+  /** Backend incident ID of the last governance action, if any. */
+  lastIncidentId?: string;
 }
 
 export interface SyrinSDK {
@@ -234,10 +322,6 @@ export interface CallInfo {
   error?: Error;
   messages?: unknown[];
   responseText?: string;
-  // Framework context
-  framework?: string;
-  langgraphGraphId?: string;
-  langgraphNodeName?: string;
   // Telemetry signal attributes
   callIndex?: number;
   contextUtilization?: number;

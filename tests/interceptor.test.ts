@@ -170,7 +170,7 @@ describe('interceptor: patchWithModule', () => {
     });
 
     expect(mockCreate).toHaveBeenCalledOnce();
-    const calledParams = mockCreate.mock.calls[0]![0] as Record<string, unknown>;
+    const calledParams = mockCreate.mock.calls[0][0] as Record<string, unknown>;
     expect(calledParams['temperature']).toBe(0.3);
 
     const [event] = emitSpy.mock.calls[0] as [SyrinEvent, string];
@@ -217,7 +217,7 @@ describe('interceptor: patchWithModule', () => {
       });
     });
 
-    const calledParams = mockCreate.mock.calls[0]![0] as Record<string, unknown>;
+    const calledParams = mockCreate.mock.calls[0][0] as Record<string, unknown>;
     expect(calledParams['temperature']).toBeUndefined();
   });
 
@@ -240,7 +240,7 @@ describe('interceptor: patchWithModule', () => {
       });
     });
 
-    const calledParams = mockCreate.mock.calls[0]![0] as Record<string, unknown>;
+    const calledParams = mockCreate.mock.calls[0][0] as Record<string, unknown>;
     expect(calledParams['temperature']).toBeUndefined();
   });
 
@@ -263,7 +263,7 @@ describe('interceptor: patchWithModule', () => {
       });
     });
 
-    const calledParams = mockCreate.mock.calls[0]![0] as Record<string, unknown>;
+    const calledParams = mockCreate.mock.calls[0][0] as Record<string, unknown>;
     expect(calledParams['temperature']).toBe(1.0);
   });
 

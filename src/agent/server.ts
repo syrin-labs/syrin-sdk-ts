@@ -23,6 +23,33 @@ import type { SessionStore } from '@/core/session.js';
 import type { SessionType } from '@/types.js';
 import { generateId } from '@/utils/helpers.js';
 
+interface ExpressLikeRequest {
+  method?: string;
+  path?: string;
+  url?: string;
+  body?: unknown;
+}
+
+interface ExpressLikeResponse {
+  setHeader?(name: string, value: string): void;
+  status?(code: number): ExpressLikeResponse;
+  json?(body: unknown): void;
+  end?(body?: string): void;
+  body?: string;
+}
+
+interface FastifyLikeRequest {
+  body?: unknown;
+}
+
+interface FastifyLikeReply {
+  send(payload: unknown): unknown;
+}
+
+interface FastifyLikeInstance {
+  post(path: string, handler: (req: FastifyLikeRequest, reply: FastifyLikeReply) => Promise<void>): void;
+}
+
 export type AgentHandler = (
   payload: Record<string, unknown>,
   sessionId: string,
@@ -143,10 +170,8 @@ export class AgentServer {
    * app.use(server.express());           // global middleware
    * router.use('/agent', server.express()); // scoped under /agent prefix (routes become /chat, /run)
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  express(): (req: any, res: any, next?: () => void) => void { // eslint-disable-line @typescript-eslint/no-explicit-any
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return async (req: any, res: any, next?: () => void) => { // eslint-disable-line @typescript-eslint/no-explicit-any
+  express(): (req: ExpressLikeRequest, res: ExpressLikeResponse, next?: () => void) => Promise<void> {
+    return async (req: ExpressLikeRequest, res: ExpressLikeResponse, next?: () => void): Promise<void> => {
       if (req.method !== 'POST') { next?.(); return; }
 
       const path: string = req.path ?? req.url ?? '';
@@ -178,17 +203,19 @@ export class AgentServer {
    * @example
    * fastify.register(server.fastify());
    */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  fastify(): (fastify: any, opts: any, done: () => void) => void { // eslint-disable-line @typescript-eslint/no-explicit-any
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return (f: any, _opts: any, done: () => void) => { // eslint-disable-line @typescript-eslint/no-explicit-any
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      f.post('/agent/chat', async (request: any, reply: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
-        return reply.send(await this.handle('chat', request.body ?? {}));
+  fastify(): (fastify: FastifyLikeInstance, opts: Record<string, unknown>, done: () => void) => void {
+    return (f: FastifyLikeInstance, _opts: Record<string, unknown>, done: () => void): void => {
+      f.post('/agent/chat', async (request: FastifyLikeRequest, reply: FastifyLikeReply) => {
+        const body: Record<string, unknown> = typeof request.body === 'object' && request.body !== null
+          ? (request.body as Record<string, unknown>)
+          : {};
+        reply.send(await this.handle('chat', body));
       });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      f.post('/agent/run', async (request: any, reply: any) => { // eslint-disable-line @typescript-eslint/no-explicit-any
-        return reply.send(await this.handle('run', request.body ?? {}));
+      f.post('/agent/run', async (request: FastifyLikeRequest, reply: FastifyLikeReply) => {
+        const body: Record<string, unknown> = typeof request.body === 'object' && request.body !== null
+          ? (request.body as Record<string, unknown>)
+          : {};
+        reply.send(await this.handle('run', body));
       });
       done();
     };

@@ -48,8 +48,8 @@ interface FastifyReply {
 }
 
 interface FastifyInstance {
-  post(path: string, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<void>): void;
-  get(path: string, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<void>): void;
+  post(path: string, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<void> | void): void;
+  get(path: string, handler: (req: FastifyRequest, reply: FastifyReply) => Promise<void> | void): void;
 }
 
 export interface MultiAgentRouterOptions {
@@ -70,7 +70,7 @@ export class MultiAgentRouter {
     endpoint: 'run' | 'chat',
     rawBody: Record<string, unknown>,
   ): Promise<{ ok: boolean; session_id: string; agent_id?: string; result?: string; error?: string }> {
-    const { syrin_session_type, syrin_session_id, task, message, messages, ...rest } = rawBody as Record<string, unknown>;
+    const { syrin_session_type, syrin_session_id, task, message, messages, ...rest } = rawBody;
 
     const sessionType = (syrin_session_type as SessionType | undefined) ?? 'production';
     const sessionId = (syrin_session_id as string | undefined) ?? generateId('ses_');
@@ -117,8 +117,8 @@ export class MultiAgentRouter {
    * Returns Express / Connect middleware.
    * Handles POST /agent/:agentId/run, POST /agent/:agentId/chat, GET /agent/:agentId/health
    */
-  express(): (req: ExpressRequest, res: ExpressResponse, next?: () => void) => void {
-    return async (req: ExpressRequest, res: ExpressResponse, next?: () => void) => {
+  express(): (req: ExpressRequest, res: ExpressResponse, next?: () => void) => Promise<void> {
+    return async (req: ExpressRequest, res: ExpressResponse, next?: () => void): Promise<void> => {
       const path: string = req.path ?? req.url ?? '';
       const method: string = req.method ?? 'GET';
 
@@ -168,10 +168,10 @@ export class MultiAgentRouter {
         const agentId = request.params['agentId'];
         return reply.send(await this.handle(agentId, 'chat', request.body ?? {}));
       });
-      f.get('/agent/:agentId/health', async (request: FastifyRequest, reply: FastifyReply) => {
+      f.get('/agent/:agentId/health', (request: FastifyRequest, reply: FastifyReply): void => {
         const agentId = request.params['agentId'];
         const known = agentId in this.opts.agentFunctions;
-        return reply.send({ ok: known, agent_id: agentId, status: known ? 'online' : 'unknown' });
+        reply.send({ ok: known, agent_id: agentId, status: known ? 'online' : 'unknown' });
       });
       done();
     };

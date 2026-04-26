@@ -147,7 +147,7 @@ describe('Edge cases', () => {
 
     expect(emitSpy).toHaveBeenCalledTimes(50);
 
-    const events = emitSpy.mock.calls.map(([ev]) => ev as SyrinEvent);
+    const events = emitSpy.mock.calls.map(([ev]) => ev);
     expect(events.filter((e) => e.event_type === 'LLM_CALL')).toHaveLength(50);
   });
 

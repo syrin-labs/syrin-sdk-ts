@@ -10,7 +10,7 @@
  *  6. Handler rejects non-object bodies with 400
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('openai', () => {
   class MockOpenAI { constructor(_?: unknown) {} }
@@ -59,7 +59,7 @@ describe('mountConfigEndpoint()', () => {
     const fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue({}) });
     vi.stubGlobal('fetch', fetchSpy);
 
-    const { init, mountConfigEndpoint, withSession, getInstance } = await import('@/index');
+    const { init, mountConfigEndpoint, withSession } = await import('@/index');
     const sdk = await init({
       apiKey: 'syrin_test',
       agentId: 'cfg-agent',
@@ -74,7 +74,7 @@ describe('mountConfigEndpoint()', () => {
     const handler = mountConfigEndpoint();
     const req = makeReq({ 'llm.temperature': 0.1 });
     const res = makeRes();
-    await handler(req as never, res as never);
+    handler(req as never, res as never);
 
     expect(res.statusCode).toBe(200);
     expect((res.body as { ok: boolean }).ok).toBe(true);
@@ -95,7 +95,7 @@ describe('mountConfigEndpoint()', () => {
     const handler = mountConfigEndpoint();
     const req = makeReq({ 'llm.temperature': 0.5, 'llm.model': 'gpt-4o' });
     const res = makeRes();
-    await handler(req as never, res as never);
+    handler(req as never, res as never);
 
     const body = res.body as { ok: boolean; applied: number };
     expect(body.ok).toBe(true);
@@ -109,7 +109,7 @@ describe('mountConfigEndpoint()', () => {
     const handler = mountConfigEndpoint();
     const req = makeReq({ 'llm.temperature': 0.5 });
     const res = makeRes();
-    await handler(req as never, res as never);
+    handler(req as never, res as never);
 
     expect((res.body as { ok: boolean }).ok).toBe(false);
   });
@@ -125,7 +125,7 @@ describe('mountConfigEndpoint()', () => {
     const handler = mountConfigEndpoint();
     const req = makeReq('not an object');
     const res = makeRes();
-    await handler(req as never, res as never);
+    handler(req as never, res as never);
 
     expect(res.statusCode).toBe(400);
   });

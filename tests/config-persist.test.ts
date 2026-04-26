@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { mkdirSync, rmSync, existsSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, writeFileSync } from 'fs';
 
 // We test the module against a temporary directory
 const TEST_DIR = join(tmpdir(), `syrin-test-${Date.now()}`);
@@ -24,7 +24,7 @@ describe('ConfigPersist', () => {
 
   beforeEach(async () => {
     mkdirSync(TEST_DIR, { recursive: true });
-    const mod = await import('@/config/persist') as typeof import('@/config/persist');
+    const mod = await import('@/config/persist');
     load = (dir = TEST_DIR) => mod.load(dir);
     save = (overrides, dir = TEST_DIR) => mod.save(overrides, dir);
   });
@@ -57,8 +57,7 @@ describe('ConfigPersist', () => {
 
   // 4. load() returns {} for invalid JSON
   it('returns {} when the file contains invalid JSON', () => {
-    const { writeFileSync, mkdirSync: mkdir } = require('fs') as typeof import('fs');
-    mkdir(join(TEST_DIR, '.syrin'), { recursive: true });
+    mkdirSync(join(TEST_DIR, '.syrin'), { recursive: true });
     writeFileSync(join(TEST_DIR, '.syrin', 'syrin.config.json'), 'not json!!!', 'utf8');
 
     const result = load();

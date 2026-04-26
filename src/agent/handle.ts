@@ -8,6 +8,40 @@ import { agentStorage } from '@/agent/context.js';
 import { sessionStorage } from '@/core/session.js';
 import { generateId } from '@/utils/helpers.js';
 
+/** Minimal interface for an OpenAI-compatible tool call in a response message. */
+interface OpenAIToolCall {
+  id: string;
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+/** Minimal interface for an OpenAI-compatible response message. */
+interface OpenAIMessage {
+  content: string | null;
+  tool_calls?: OpenAIToolCall[];
+}
+
+/** Minimal interface for an OpenAI-compatible chat completion response. */
+interface OpenAIChatCompletion {
+  choices: Array<{ message: OpenAIMessage }>;
+}
+
+/** Minimal interface for an OpenAI-compatible chat completions API. */
+interface OpenAICompletionsClient {
+  chat: {
+    completions: {
+      create(params: Record<string, unknown>): Promise<OpenAIChatCompletion>;
+    };
+  };
+}
+
+/** Tool handler: either a function or a map of handlers by name. */
+type OnToolHandler =
+  | ((name: string, args: Record<string, unknown>) => unknown)
+  | Record<string, (args: Record<string, unknown>) => unknown>;
+
 export interface AgentFieldDecl {
   key: string;
   default: unknown;
@@ -130,11 +164,10 @@ export class AgentHandle {
    * Auto-emits HANDOFF when switching from a different agent.
    */
   async chat(options: {
-    client: any; // eslint-disable-line @typescript-eslint/no-explicit-any
+    client: OpenAICompletionsClient;
     messages: Array<{ role: string; content: string | null }>;
-    tools?: Array<Record<string, any>>; // eslint-disable-line @typescript-eslint/no-explicit-any
-    onTool?: ((name: string, args: Record<string, unknown>) => any) // eslint-disable-line @typescript-eslint/no-explicit-any
-      | Record<string, (args: Record<string, unknown>) => any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+    tools?: Array<Record<string, unknown>>;
+    onTool?: OnToolHandler;
     maxRounds?: number;
     maxTokens?: number;
   }): Promise<string> {
@@ -170,20 +203,20 @@ export class AgentHandle {
   }
 
   private async _runChat(
-    client: any, // eslint-disable-line @typescript-eslint/no-explicit-any
+    client: OpenAICompletionsClient,
     messages: Array<{ role: string; content: string | null }>,
-    tools: Array<Record<string, any>> | undefined, // eslint-disable-line @typescript-eslint/no-explicit-any
-    onTool: any, // eslint-disable-line @typescript-eslint/no-explicit-any
+    tools: Array<Record<string, unknown>> | undefined,
+    onTool: OnToolHandler | undefined,
     maxRounds: number,
     maxTokens: number,
   ): Promise<string> {
     const model = this.cfg('llm.model', 'gpt-4o-mini');
     const temperature = this.cfg('llm.temperature', 0.7);
 
-    let currentMessages: Array<Record<string, any>> = [...messages]; // eslint-disable-line @typescript-eslint/no-explicit-any
+    const currentMessages: Array<Record<string, unknown>> = [...messages];
 
     for (let round = 0; round <= maxRounds; round++) {
-      const params: Record<string, any> = { // eslint-disable-line @typescript-eslint/no-explicit-any
+      const params: Record<string, unknown> = {
         model,
         temperature,
         messages: currentMessages,
@@ -212,7 +245,7 @@ export class AgentHandle {
         const toolName = tc.function.name;
         let args: Record<string, unknown> = {};
         try {
-          args = JSON.parse(tc.function.arguments || '{}');
+          args = JSON.parse(tc.function.arguments || '{}') as Record<string, unknown>;
         } catch {
           // keep empty
         }
@@ -221,7 +254,7 @@ export class AgentHandle {
         let errorStr: string | undefined;
 
         try {
-          let result: any; // eslint-disable-line @typescript-eslint/no-explicit-any
+          let result: unknown;
           if (typeof onTool === 'function') {
             result = onTool(toolName, args);
           } else if (onTool && typeof onTool === 'object') {
@@ -249,7 +282,7 @@ export class AgentHandle {
 
         // Emit TOOL_RESULT
         if (this.sdk) {
-          (this.sdk as any).emit('TOOL_RESULT', { // eslint-disable-line @typescript-eslint/no-explicit-any
+          this.sdk.emit('TOOL_RESULT', {
             tool_call_id: tc.id,
             tool_name: toolName,
             result: resultStr,

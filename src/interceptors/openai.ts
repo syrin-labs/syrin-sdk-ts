@@ -86,7 +86,7 @@ export function patchWithModule(openaiModule: OpenAIModule, core: ICallTarget): 
 
   // Fallback: constructor proxy for bundled / mock SDKs
   const Wrapped = new Proxy(OpenAIClass, {
-    construct(Target, args: unknown[], newTarget) {
+    construct(Target, args: unknown[], newTarget): object {
       const inst = Reflect.construct(Target as new (...a: unknown[]) => unknown, args, newTarget) as {
         chat?: { completions?: CompletionsInstance };
       };
@@ -292,7 +292,7 @@ function _wrapStream(
   };
 
   return new Proxy(streamWithIter, {
-    get(target, prop: string | symbol) {
+    get(target, prop: string | symbol): unknown {
       if (prop === Symbol.asyncIterator) return wrapped;
       const val = target[prop];
       return typeof val === 'function' ? (val as (...a: unknown[]) => unknown).bind(target) : val;

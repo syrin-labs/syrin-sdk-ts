@@ -27,6 +27,7 @@ describe('refreshSchema()', () => {
 
   // 1 & 2. refreshSchema() triggers a POST to /register
   it('sends a second POST to /agents/:id/register when refreshSchema() is called', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue({}) });
     vi.stubGlobal('fetch', fetchSpy);
 
@@ -54,6 +55,7 @@ describe('refreshSchema()', () => {
 
   // 3. Module-level helper
   it('module-level refreshSchema() delegates to primary instance', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
     fetchSpy = vi.fn().mockResolvedValue({ ok: true, json: vi.fn().mockResolvedValue({}) });
     vi.stubGlobal('fetch', fetchSpy);
 

@@ -30,7 +30,6 @@ function makeCore(schemaDefaults?: Record<string, unknown>): SyrinCore {
     offline: true,
     batchSize: 50,
     idleFlushMs: 60_000,
-    toolValidation: false,
     agentId: 'test-agent',
     sessionId: 'ses_test',
     schemaDefaults,

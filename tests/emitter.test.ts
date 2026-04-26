@@ -92,7 +92,7 @@ describe('Emitter: batching and flushing', () => {
     expect(typeof capturedPayload!.sdk.version).toBe('string');
     expect(Array.isArray(capturedPayload!.events)).toBe(true);
     expect(capturedPayload!.events).toHaveLength(1);
-    expect(capturedPayload!.events[0]!.event_id).toBe(event.event_id);
+    expect(capturedPayload!.events[0].event_id).toBe(event.event_id);
   });
 
   it('batches multiple events in a single flush', async () => {
@@ -414,5 +414,75 @@ describe('Emitter: experiment assignment', () => {
     expect(logSpy).toHaveBeenCalledWith(
       expect.stringMatching(/Variant B.*exp-session-5|exp-session-5.*Variant B/)
     );
+  });
+
+  it('queues an EXPERIMENT_ASSIGNED event after flush with assignment', async () => {
+    server.use(
+      http.post('http://localhost:4399/api/v1/ingest', () => {
+        return HttpResponse.json({
+          ok: true,
+          experiments: [
+            {
+              experimentId: 'exp_emit_1',
+              variantId: 'var_emit_a',
+              variantName: 'Emit Variant A',
+              overrides: { temperature: 0.42 },
+            },
+          ],
+        });
+      })
+    );
+
+    const sessionId = 'exp-emit-session-1';
+    await sessionStore.getOrCreate(sessionId, 'agent-exp');
+
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    // After flush the EXPERIMENT_ASSIGNED event is in the queue (sent next flush)
+    expect(emitter.queueSize()).toBe(1);
+  });
+
+  it('queues one EXPERIMENT_ASSIGNED event per assignment with overrides', async () => {
+    server.use(
+      http.post('http://localhost:4399/api/v1/ingest', () => {
+        return HttpResponse.json({
+          ok: true,
+          experiments: [
+            { experimentId: 'e1', variantId: 'v1', variantName: 'V1', overrides: { temperature: 0.1 } },
+            { experimentId: 'e2', variantId: 'v2', variantName: 'V2', overrides: { max_tokens: 128 } },
+          ],
+        });
+      })
+    );
+
+    const sessionId = 'exp-emit-session-2';
+    await sessionStore.getOrCreate(sessionId, 'agent-exp');
+
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    expect(emitter.queueSize()).toBe(2);
+  });
+
+  it('does not queue EXPERIMENT_ASSIGNED for control (empty overrides)', async () => {
+    server.use(
+      http.post('http://localhost:4399/api/v1/ingest', () => {
+        return HttpResponse.json({
+          ok: true,
+          experiments: [
+            { experimentId: 'e_ctrl', variantId: 'v_ctrl', variantName: 'Control', overrides: {} },
+          ],
+        });
+      })
+    );
+
+    const sessionId = 'exp-emit-session-3';
+    await sessionStore.getOrCreate(sessionId, 'agent-exp');
+
+    emitter.emit(makeEvent(), sessionId);
+    await emitter.flush();
+
+    expect(emitter.queueSize()).toBe(0);
   });
 });

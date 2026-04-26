@@ -2,7 +2,7 @@
  * Tests: src/config-guard.ts
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   ConfigGuard,
   ConfigFuse,
@@ -261,7 +261,7 @@ describe('ConfigGuard — safeApply', () => {
     const store = makeStore();
     store.set('llm', 'temperature', 0.7);
     const registry = makeRegistry();
-    const snap = store.snapshot();
+    store.snapshot();
 
     // Intercept set to throw after we snapshot
     let throwOnSet = false;
@@ -351,12 +351,10 @@ describe('ConfigGuard — safeApplyBatch', () => {
     const results = guard.safeApplyBatch({
       'llm.temperature': 0.7,
       'llm.max_tokens': 1024,
-      'langgraph.recursion_limit': 50,
     });
     // Should produce results per namespace
     expect(results.length).toBeGreaterThan(0);
     const namespaces = results.map(r => r.namespace);
     expect(namespaces).toContain('llm');
-    expect(namespaces).toContain('langgraph');
   });
 });

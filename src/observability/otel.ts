@@ -12,6 +12,9 @@
 import type { Span, Tracer } from '@opentelemetry/api';
 import type { NodeTracerProvider, SpanProcessor } from '@opentelemetry/sdk-trace-node';
 import type { SyrinConfig, CallInfo } from '@/types.js';
+import type * as OtelApi from '@opentelemetry/api';
+import type * as OtelSdkTraceNode from '@opentelemetry/sdk-trace-node';
+import type * as OtelResources from '@opentelemetry/resources';
 
 // ---------------------------------------------------------------------------
 // BaggageSpanProcessor
@@ -24,10 +27,10 @@ import type { SyrinConfig, CallInfo } from '@/types.js';
 export class BaggageSpanProcessor {
   onStart(span: Span, parentContext?: unknown): void {
     // Dynamically load OTel API to avoid hard dep
-    let otelApi: typeof import('@opentelemetry/api') | undefined;
+    let otelApi: typeof OtelApi | undefined;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      otelApi = require('@opentelemetry/api') as typeof import('@opentelemetry/api');
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      otelApi = require('@opentelemetry/api') as typeof OtelApi;
     } catch {
       return;
     }
@@ -52,10 +55,10 @@ export class BaggageSpanProcessor {
  * Return an OTel context with W3C Baggage set for sessionId and agentId.
  */
 export function setBaggageContext(sessionId: string, agentId: string): unknown {
-  let otelApi: typeof import('@opentelemetry/api') | undefined;
+  let otelApi: typeof OtelApi | undefined;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    otelApi = require('@opentelemetry/api') as typeof import('@opentelemetry/api');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    otelApi = require('@opentelemetry/api') as typeof OtelApi;
   } catch {
     return undefined;
   }
@@ -79,8 +82,8 @@ function _ensureMetrics(): void {
   if (_metricsReady) return;
   _metricsReady = true;
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { metrics } = require('@opentelemetry/api') as typeof import('@opentelemetry/api');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { metrics } = require('@opentelemetry/api') as typeof OtelApi;
     const meter = metrics.getMeter('syrin', '0.1.0');
     _tokenUsageHist = meter.createHistogram('gen_ai.client.token.usage', {
       unit: '{token}',
@@ -159,8 +162,8 @@ export class OTelBridge {
   }
 
   private async _setupAsync(): Promise<void> {
-    let otelApi: typeof import('@opentelemetry/api');
-    let otelSdkTrace: typeof import('@opentelemetry/sdk-trace-node');
+    let otelApi: typeof OtelApi;
+    let otelSdkTrace: typeof OtelSdkTraceNode;
 
     try {
       otelApi = await import('@opentelemetry/api');
@@ -190,7 +193,7 @@ export class OTelBridge {
       this.config.agentId ||
       'unknown-service';
 
-    let otelResources: typeof import('@opentelemetry/resources') | undefined;
+    let otelResources: typeof OtelResources | undefined;
     try {
       otelResources = await import('@opentelemetry/resources');
     } catch {
@@ -242,10 +245,10 @@ export class OTelBridge {
       return;
     }
 
-    let otelApi: typeof import('@opentelemetry/api');
+    let otelApi: typeof OtelApi;
     try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      otelApi = require('@opentelemetry/api') as typeof import('@opentelemetry/api');
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      otelApi = require('@opentelemetry/api') as typeof OtelApi;
     } catch {
       return;
     }
@@ -307,17 +310,6 @@ export class OTelBridge {
 
         if (callInfo.agentId) {
           span.setAttribute('syrin.agent_id', callInfo.agentId);
-        }
-
-        // ---- Framework context attributes ----
-        if (callInfo.framework) {
-          span.setAttribute('syrin.framework', callInfo.framework);
-        }
-        if (callInfo.langgraphGraphId) {
-          span.setAttribute('langgraph.graph_id', callInfo.langgraphGraphId);
-        }
-        if (callInfo.langgraphNodeName) {
-          span.setAttribute('langgraph.node_name', callInfo.langgraphNodeName);
         }
 
         // ---- Telemetry signal attributes ----

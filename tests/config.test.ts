@@ -2,7 +2,7 @@
  * Tests: src/config.ts
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import { createConfig, fromEnv } from '@/config/config';
 import type { SyrinConfig } from '@/types';
 
@@ -25,7 +25,7 @@ describe('createConfig', () => {
   it('applies defaults for unspecified fields', () => {
     const config = createConfig(baseOptions);
 
-    expect(config.backendUrl).toBe('https://api.syrin.ai');
+    expect(config.backendUrl).toBe('https://app.syrin.ai');
     expect(config.otelExporter).toBe('none');
     expect(config.otelEndpoint).toBe('http://localhost:4318');
     expect(config.debug).toBe(false);
@@ -120,17 +120,17 @@ describe('createConfig', () => {
   it('strips trailing slash from backendUrl', () => {
     const config = createConfig({
       apiKey: 'syrin_test',
-      backendUrl: 'https://api.syrin.ai/',
+      backendUrl: 'https://app.syrin.ai/',
     });
-    expect(config.backendUrl).toBe('https://api.syrin.ai');
+    expect(config.backendUrl).toBe('https://app.syrin.ai');
   });
 
   it('strips multiple trailing slashes from backendUrl', () => {
     const config = createConfig({
       apiKey: 'syrin_test',
-      backendUrl: 'https://api.syrin.ai///',
+      backendUrl: 'https://app.syrin.ai///',
     });
-    expect(config.backendUrl).toBe('https://api.syrin.ai');
+    expect(config.backendUrl).toBe('https://app.syrin.ai');
   });
 
   it('accepts all valid otelExporter values', () => {

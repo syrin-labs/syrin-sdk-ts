@@ -46,7 +46,6 @@ function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
     offline: false,
     batchSize: 50,
     idleFlushMs: 60_000,
-    toolValidation: false,
     ...overrides,
   };
 }
@@ -601,8 +600,8 @@ describe('Context Injection', () => {
 
     const injections = store.popInjections(sessionId);
     expect(injections).toHaveLength(1);
-    expect(injections[0]!.id).toBe('inj_1');
-    expect(injections[0]!.content).toBe('The sky is blue');
+    expect(injections[0].id).toBe('inj_1');
+    expect(injections[0].content).toBe('The sky is blue');
   });
 
   it('stores injections in session state', async () => {
