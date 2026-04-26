@@ -69,12 +69,24 @@ export class MultiAgentRouter {
     agentId: string,
     endpoint: 'run' | 'chat',
     rawBody: Record<string, unknown>,
-  ): Promise<{ ok: boolean; session_id: string; result?: string; error?: string }> {
-    const { syrin_session_type, syrin_session_id, task, message, ...rest } = rawBody as Record<string, unknown>;
+  ): Promise<{ ok: boolean; session_id: string; agent_id?: string; result?: string; error?: string }> {
+    const { syrin_session_type, syrin_session_id, task, message, messages, ...rest } = rawBody as Record<string, unknown>;
 
     const sessionType = (syrin_session_type as SessionType | undefined) ?? 'production';
     const sessionId = (syrin_session_id as string | undefined) ?? generateId('ses_');
-    const taskStr = (task as string | undefined) ?? (message as string | undefined) ?? JSON.stringify(rest);
+
+    // For chat: extract last user message from messages array (mirrors Python SDK)
+    let taskStr = (task as string | undefined) ?? (message as string | undefined);
+    if (!taskStr && Array.isArray(messages) && messages.length > 0) {
+      const msgs = messages as Array<{ role?: string; content?: string }>;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === 'user' && msgs[i].content) {
+          taskStr = msgs[i].content;
+          break;
+        }
+      }
+    }
+    if (!taskStr) taskStr = JSON.stringify(rest);
 
     const fn = this.opts.agentFunctions[agentId];
     if (!fn) {
@@ -91,7 +103,7 @@ export class MultiAgentRouter {
           () => fn(taskStr, sessionId),
         )
       );
-      return { ok: true, session_id: sessionId, result };
+      return { ok: true, session_id: sessionId, agent_id: agentId, result };
     } catch (err) {
       return {
         ok: false,

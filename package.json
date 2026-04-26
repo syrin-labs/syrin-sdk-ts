@@ -1,6 +1,6 @@
 {
   "name": "@syrin/sdk",
-  "version": "0.2.0",
+  "version": "1.1.0",
   "description": "AI agent observability, remote configuration, and governance for TypeScript/Node.js",
   "type": "module",
   "main": "./dist/index.js",
