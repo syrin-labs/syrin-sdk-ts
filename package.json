@@ -26,7 +26,9 @@
     "mock-backend": "tsx mock-backend/server.ts",
     "lint": "eslint src tests --ext .ts",
     "lint:fix": "eslint src tests --ext .ts --fix",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "release:dry": "npm run build && npm publish --dry-run --access public",
+    "release": "npm run build && npm publish --access public"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.7.0",
