@@ -226,6 +226,42 @@ export class SyrinSDKInstance implements SyrinSDK {
   }
 
   // ---------------------------------------------------------------------------
+  // Structured logging
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Emit a custom log entry that appears on the Syrin dashboard timeline.
+   *
+   * Use this to surface application-level events alongside LLM calls —
+   * retrieval steps, business logic decisions, cost warnings, or debug
+   * checkpoints — giving a complete picture of what the agent was doing
+   * between LLM calls.
+   *
+   * @param message - The log message to display on the dashboard.
+   * @param level - Severity: `"debug"`, `"info"` (default), `"warning"`, or `"error"`.
+   * @param metadata - Optional key/value pairs for additional context.
+   * @param sessionId - Target session (defaults to current active session).
+   *
+   * @example
+   * sdk.log("Retrieved 42 documents from vector store",
+   *         "info", { collection: "kb", query: q });
+   * sdk.log("Cost budget at 80%", "warning",
+   *         { spent_usd: 0.80, budget_usd: 1.00 });
+   */
+  log(
+    message: string,
+    level: 'debug' | 'info' | 'warning' | 'error' = 'info',
+    metadata?: Record<string, unknown>,
+    sessionId?: string,
+  ): void {
+    this.emit(
+      'CUSTOM_LOG',
+      { message, level, metadata: metadata ?? {} },
+      sessionId,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
   // Session feedback namespace
   // ---------------------------------------------------------------------------
 
@@ -928,4 +964,33 @@ export function clearStaleSessions(olderThanMs = 3_600_000): number {
 
 export function configSnapshot(): Record<string, unknown> | null {
   return _primaryInstance?.configSnapshot() ?? null;
+}
+
+/**
+ * Emit a custom event on the current (or specified) session.
+ * Delegates to the default SDK instance.
+ */
+export function emit(
+  eventType: string,
+  payload?: Record<string, unknown>,
+  sessionId?: string,
+): void {
+  _primaryInstance?.emit(eventType, payload, sessionId);
+}
+
+/**
+ * Emit a CUSTOM_LOG event that appears on the Syrin dashboard timeline.
+ * Delegates to the default SDK instance.
+ *
+ * @example
+ * import { log } from '@syrin/sdk';
+ * log("Fetched 42 documents", "info", { collection: "kb" });
+ */
+export function log(
+  message: string,
+  level: 'debug' | 'info' | 'warning' | 'error' = 'info',
+  metadata?: Record<string, unknown>,
+  sessionId?: string,
+): void {
+  _primaryInstance?.log(message, level, metadata, sessionId);
 }
