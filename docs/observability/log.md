@@ -6,7 +6,7 @@ weight: 43
 
 ## Application Logs on the Dashboard Timeline
 
-`log()` emits a custom log entry that appears on the Syrin dashboard session timeline. Use it to surface application-level events alongside LLM calls — retrieval steps, business logic decisions, cost warnings, debug checkpoints — giving you a complete picture of what your agent was doing between LLM calls.
+`sdk.log()` emits a custom log entry that appears on the session timeline at [app.syrin.ai](https://app.syrin.ai). Use it to surface application-level events alongside LLM calls — retrieval steps, business logic decisions, cost warnings, debug checkpoints — giving you a complete picture of what your agent was doing between LLM calls.
 
 ### Function Signature
 

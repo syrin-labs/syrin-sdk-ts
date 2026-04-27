@@ -9,20 +9,27 @@ weight: 30
 `withSession()` is the primary way to open a session in the TypeScript SDK. Pass a session ID and an async function — every LLM call inside that function is automatically attributed to the session. No classes, no context managers, no decorators. Just a function call.
 
 ```typescript
-import { init, withSession } from '@syrin/sdk';
+import { init, withSession } from "@syrin/sdk";
 
-const sdk = await init({ apiKey: 'syrin_...', agentId: 'my-agent' });
+const sdk = await init({ apiKey: "syrin_...", agentId: "my-agent" });
 
-await withSession('u:alice:2026-04-24', async () => {
+await withSession("u:alice:2026-04-27", async () => {
   const response = await openai.chat.completions.create({
-    model: 'gpt-4o',
-    messages: [{ role: 'user', content: 'What is the capital of France?' }],
+    model: "gpt-4o",
+    messages: [{ role: "user", content: "What is the capital of France?" }],
   });
   console.log(response.choices[0].message.content);
+  // → Paris is the capital of France.
 });
+
+// Open app.syrin.ai → Sessions to see:
+//   Session: u:alice:2026-04-27
+//   ● SESSION_STARTED     14:32:00
+//   ● LLM_CALL            gpt-4o  in=14  out=8  $0.0001  423ms
+//   ● SESSION_ENDED       14:32:00
 ```
 
-Everything inside the callback — LLM calls, agent runs, workflow steps, emitted events — is tagged with `u:alice:2026-04-24` in the dashboard.
+Everything inside the callback — LLM calls, agent runs, workflow steps, emitted events — is tagged with `u:alice:2026-04-27` at [app.syrin.ai](https://app.syrin.ai).
 
 ---
 

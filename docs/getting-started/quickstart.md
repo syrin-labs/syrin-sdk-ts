@@ -1,220 +1,283 @@
 ---
 title: "Quickstart"
-description: "A complete working example: Syrin init() + OpenAI, session context, remote config, and live traces in the dashboard."
+description: "A complete working example: init(), withSession(), remote config, and a full dashboard walkthrough — from zero to observable in under 5 minutes."
 weight: 3
 ---
 
-## Zero to Observable in 90 Seconds
+## Zero to Observable in Under 5 Minutes
 
-This page walks through a complete, runnable example that covers all the basics: initialization, session context, remote config via `cfg()`, and viewing the trace in the Syrin dashboard.
+This guide walks through a complete, runnable example. By the end you will have:
+
+1. An instrumented agent sending live telemetry
+2. A session visible at [app.syrin.ai](https://app.syrin.ai)
+3. A config field you can change from the dashboard without redeploying
+
+---
 
 ### Prerequisites
 
 ```bash
 npm install @syrin/sdk openai
-export SYRIN_API_KEY="syrin_pk_..."
+export SYRIN_API_KEY="syrin_pk_..."   # from app.syrin.ai → Settings → API Keys
 export OPENAI_API_KEY="sk-..."
 ```
+
+Don't have an API key yet? [Sign up at app.syrin.ai](https://app.syrin.ai) — it takes 60 seconds.
 
 ---
 
 ### The Complete Example
 
+Save this as `travel-agent.ts` and run it with `npx tsx travel-agent.ts`:
+
 ```typescript
-import { init, withSession, shutdown } from "@syrin/sdk";
+import { init, shutdown } from "@syrin/sdk";
 import OpenAI from "openai";
 
 // ── 1. Initialize ─────────────────────────────────────────────────────────────
 //
-// init() validates your config early and returns the SDK handle.
-// From this point on, all OpenAI calls made anywhere in this process
-// are automatically instrumented — no changes to call sites needed.
-//
-// IMPORTANT: always await init(). Skipping it means the patch may not
-// complete before your first call, and telemetry will be silently missed.
+// Always await init(). It patches OpenAI's prototype asynchronously.
+// Skipping await means the first LLM call may not be instrumented.
 
 const sdk = await init({
-  apiKey: "syrin_pk_...",
-  agentId: "travel-assistant",         // how this agent appears in the dashboard
-  backendUrl: "https://app.syrin.ai",  // omit to use the default
-  captureContent: true,                // include prompts/completions in traces
+  apiKey: "syrin_pk_...",          // or set SYRIN_API_KEY env var
+  agentId: "travel-assistant",     // appears as the agent name in the dashboard
+  captureContent: true,            // include prompts/completions in session replay
 });
 
-// ── 2. Create your normal OpenAI client ───────────────────────────────────────
-//
-// Nothing about the OpenAI client changes. Syrin wraps the underlying
-// method at the library level — your baseURL, retries, and timeouts
-// are all preserved unchanged.
+// ── 2. Create your OpenAI client — nothing changes ───────────────────────────
 
 const openai = new OpenAI();
 
-// ── 3. Open a session for a user ──────────────────────────────────────────────
+// ── 3. Get an AgentHandle and declare config fields ──────────────────────────
 //
-// withSession() sets the active session ID via AsyncLocalStorage.
-// Every LLM call inside the callback is automatically grouped under
-// this session in the dashboard. Concurrent calls from different users
-// never cross-contaminate — each has its own AsyncLocalStorage context.
+// field() registers the field in the dashboard config panel immediately
+// (before any LLM calls). It returns `this` for chaining.
 
-await withSession("u:alice:today", async () => {
+const agent = sdk.agent("travel-assistant");
+agent
+  .field("llm.model",       "gpt-4o", { enum: ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo"], label: "LLM Model" })
+  .field("llm.temperature", 0.7,      { ge: 0, le: 2, label: "Creativity" })
+  .field("prompt.systemPrompt", "You are a helpful travel assistant. Be concise and friendly.", { multiline: true });
 
-  // ── 4. Use cfg() for remotely-configurable values ─────────────────────────
+// ── 4. Open a session for a user ──────────────────────────────────────────────
+//
+// withSession() sets the session ID via AsyncLocalStorage.
+// Every LLM call inside the callback is grouped under this session at app.syrin.ai.
+// The callback is async-safe: concurrent calls for different users never cross-contaminate.
+
+await sdk.withSession({ userId: "alice", window: "day" }, async (ctx) => {
+  console.log(`Session: ${ctx.sessionId}`);
+  // → Session: u:alice:2026-04-27
+
+  // ── 5. Read live config values with cfg() ─────────────────────────────────
   //
-  // agent.cfg(key, default) declares a field the dashboard can override.
-  // The first time it is called, the field appears in the agent's config
-  // panel. On subsequent runs, the live value from the backend is returned
-  // instead of the default — no code change, no redeploy.
+  // cfg(key, default) returns the live value from the backend if one exists,
+  // otherwise the default you provided. The first call registers the field.
 
-  const agent = sdk.agent("travel-assistant");
+  const model        = agent.cfg("llm.model",       "gpt-4o") as string;
+  const temperature  = agent.cfg("llm.temperature", 0.7)      as number;
+  const systemPrompt = agent.cfg("prompt.systemPrompt",
+    "You are a helpful travel assistant. Be concise and friendly.") as string;
 
-  const model = agent.cfg("llm.model", "gpt-4o");
-  const temperature = agent.cfg("llm.temperature", 0.7);
-  const systemPrompt = agent.cfg(
-    "prompt.system",
-    "You are a helpful travel assistant. Be concise and friendly."
-  );
+  console.log(`Model: ${model}, Temperature: ${temperature}`);
+  // → Model: gpt-4o, Temperature: 0.7
 
-  // ── 5. Your LLM call — completely unchanged ───────────────────────────────
+  // ── 6. Your LLM call — completely unchanged ───────────────────────────────
   const response = await openai.chat.completions.create({
     model,
     temperature,
     messages: [
       { role: "system", content: systemPrompt },
-      { role: "user", content: "What are the top 3 things to do in Tokyo?" },
+      { role: "user",   content: "What are the top 3 things to do in Tokyo?" },
     ],
   });
 
   const answer = response.choices[0].message.content!;
   console.log(answer);
+  // → 1. Visit the Tsukiji Outer Market for fresh sushi at sunrise.
+  //   2. Explore Shinjuku Gyoen — stunning in any season.
+  //   3. Take the Yamanote Line loop to discover neighborhoods at your own pace.
 
-  // ── 6. Emit custom lifecycle events ───────────────────────────────────────
+  // ── 7. Emit custom lifecycle events ───────────────────────────────────────
   //
-  // These appear on the session timeline in the dashboard.
-  // Built-in event types get first-class rendering: GUARDRAIL_INPUT,
-  // HANDOFF, BUDGET_ESTIMATION, CHECKPOINT, etc. Custom strings work too.
+  // These appear as labelled markers on the session timeline in the dashboard.
   sdk.emit("USER_REQUEST_PROCESSED", {
-    user: "alice",
     intent: "travel-planning",
-    response_length: answer.length,
+    destination: "Tokyo",
+    responseLength: answer.length,
   });
 
-  // ── 7. Submit feedback (optional) ─────────────────────────────────────────
+  // ── 8. Submit feedback on the session ─────────────────────────────────────
   //
-  // Rate the session after evaluating the response quality.
-  // Ratings appear on the session card in the dashboard and feed into
-  // aggregate quality metrics per agent.
-  const sessionId = "u:alice:today";
+  // Ratings appear on the session card and feed aggregate quality metrics per agent.
   if (answer.length > 100) {
-    await sdk.sessions.rate(sessionId, "positive", { reason: "Detailed response" });
+    ctx.feedback.positive({ reason: "Detailed response" });
   } else {
-    await sdk.sessions.rate(sessionId, "negative", { reason: "Response too short" });
+    ctx.feedback.negative({ reason: "Response too short" });
   }
 });
 
-// Session ends when withSession's callback resolves.
-// Events are batched and flushed automatically — no manual flush needed
-// for normal operation.
+console.log("Done. Open https://app.syrin.ai to see the session.");
+// → Done. Open https://app.syrin.ai to see the session.
+
+await shutdown();
 ```
 
-Open [app.syrin.ai](https://app.syrin.ai), navigate to **Sessions**, and you'll see Alice's session with the full trace.
+**Expected console output:**
+```
+Session: u:alice:2026-04-27
+Model: gpt-4o, Temperature: 0.7
+1. Visit the Tsukiji Outer Market for fresh sushi at sunrise.
+2. Explore Shinjuku Gyoen — stunning in any season.
+3. Take the Yamanote Line loop to discover neighborhoods at your own pace.
+Done. Open https://app.syrin.ai to see the session.
+```
 
 ---
 
 ### What You'll See in the Dashboard
 
-After running the example, the dashboard shows:
+Open [app.syrin.ai](https://app.syrin.ai) and navigate to **Sessions**. You'll see Alice's session with a timeline that looks like this:
 
-- **Session timeline** — `SESSION_STARTED`, `LLM_CALL`, `USER_REQUEST_PROCESSED`, `SESSION_ENDED` events in chronological order
-- **LLM call details** — model, tokens, cost, latency, context utilization, and whether a config override was active
-- **Config panel** — live controls for `llm.model`, `llm.temperature`, and `prompt.system` with their declared defaults
-- **Feedback** — thumbs up/down indicator on the session card
+```
+Session: u:alice:2026-04-27            [👍 positive]   Cost: $0.005   Tokens: 529
 
----
+  ● SESSION_STARTED              14:32:00.001   userId=alice  window=day
+  ● LLM_CALL                     14:32:01.241   gpt-4o  in=342 out=187  $0.005  1240ms
+      model: gpt-4o  temperature: 0.7  configApplied: true
+  ● USER_REQUEST_PROCESSED       14:32:01.250   intent=travel-planning  destination=Tokyo
+  ● SESSION_ENDED                14:32:01.252
+```
 
-### Changing Config from the Dashboard
-
-While your agent is running (or between runs):
-
-1. Go to **Agents → travel-assistant → Config**
-2. Change `llm.temperature` from `0.7` to `1.2`
-3. Run the script again — `agent.cfg("llm.temperature", 0.7)` returns `1.2`
-
-No code change. No redeploy. The field appears in the dashboard the first time `cfg()` is called and persists across restarts in `.syrin/syrin.config.json`.
+Click any event to expand it. The `LLM_CALL` event shows:
+- Full token counts, cost, and latency
+- Which config values were in effect (`configApplied: true`)
+- The full conversation (because `captureContent: true`)
 
 ---
 
-### Multi-User Pattern
+### The Config Panel at app.syrin.ai
 
-For a server handling many concurrent users, each `withSession` call gets its own AsyncLocalStorage context — they do not interfere with each other:
+Navigate to **Agents → travel-assistant → Config**. You'll see three controls registered by the `field()` calls above:
+
+```
+╔══ LLM ═════════════════════════════════════════════════════╗
+║  LLM Model      [gpt-4o ▾]  gpt-4o | gpt-4o-mini | gpt-4-turbo
+║  Creativity     ──●───────  0.7   (0.0 — 2.0)
+╠══ Prompt ══════════════════════════════════════════════════╣
+║  systemPrompt   ╔══════════════════════════════════════╗   ║
+║                 ║ You are a helpful travel assistant.  ║   ║
+║                 ║ Be concise and friendly.             ║   ║
+║                 ╚══════════════════════════════════════╝   ║
+╚════════════════════════════════════════════════════════════╝
+```
+
+---
+
+### Change Config Without Redeploying
+
+1. In the dashboard, go to **Agents → travel-assistant → Config**
+2. Drag the **Creativity** slider from `0.7` to `1.2` and click **Save**
+3. Run `travel-agent.ts` again
+
+**New output:**
+```
+Session: u:alice:2026-04-27
+Model: gpt-4o, Temperature: 1.2      ← updated from dashboard, no redeploy
+...
+```
+
+The `agent.cfg("llm.temperature", 0.7)` call now returns `1.2`. No code change, no redeploy.
+
+---
+
+### Express Server Pattern
+
+For a server handling many concurrent users:
 
 ```typescript
-import { init, withSession } from "@syrin/sdk";
+import { init, shutdown } from "@syrin/sdk";
 import OpenAI from "openai";
 import express from "express";
 
 const sdk = await init({
-  apiKey: "syrin_pk_...",
-  agentId: "travel-assistant",
+  apiKey: process.env.SYRIN_API_KEY!,
+  agentId: "travel-api",
 });
 
 const openai = new OpenAI();
+const agent  = sdk.agent("travel-api");
+agent
+  .field("llm.model", "gpt-4o")
+  .field("llm.temperature", 0.7, { ge: 0, le: 2 });
+
 const app = express();
 app.use(express.json());
 
 app.post("/chat", async (req, res) => {
-  const { userId, message } = req.body as { userId: string; message: string };
+  const { userId, messages } = req.body;
 
-  // Each request gets its own session scope. Concurrent requests for
-  // different users run in parallel without sharing state.
-  await withSession(`user:${userId}:${new Date().toISOString().slice(0, 10)}`, async () => {
-    const agent = sdk.agent("travel-assistant");
-    const model = agent.cfg("llm.model", "gpt-4o");
+  // Each userId gets its own session scope.
+  // Concurrent requests for different users run in parallel without sharing state.
+  const result = await sdk.withSession({ userId, window: "day" }, async (ctx) => {
+    const model = agent.cfg("llm.model", "gpt-4o") as string;
 
     const response = await openai.chat.completions.create({
       model,
-      messages: [{ role: "user", content: message }],
+      messages,
     });
 
-    res.json({ reply: response.choices[0].message.content });
+    return {
+      sessionId: ctx.sessionId,
+      content: response.choices[0].message.content,
+    };
   });
+
+  res.json(result);
 });
+
+// Example response:
+// { "sessionId": "u:alice:2026-04-27", "content": "The best time to visit Tokyo is..." }
 ```
 
-Each `userId` gets its own session; calls from different users never cross-contaminate.
+Each `userId` gets its own session at [app.syrin.ai](https://app.syrin.ai) — separate rows in the Sessions view with their own timelines and costs.
 
 ---
 
-### Adding Governance
-
-To let the backend stop a runaway agent:
+### Adding Governance: Let the Backend Stop Runaway Agents
 
 ```typescript
-import { init, withSession, GovernanceStopError } from "@syrin/sdk";
+import { init, GovernanceStopError } from "@syrin/sdk";
 import OpenAI from "openai";
 
 const sdk = await init({
   apiKey: "syrin_pk_...",
   agentId: "travel-assistant",
-  // No extra option needed — governance is always active.
-  // GovernanceStopError is raised when the backend sends a stop action.
+  // governance is always active — GovernanceStopError is thrown
+  // when the backend sends a stop action.
 });
 
 const openai = new OpenAI();
 
 try {
-  await withSession("u:bob:today", async () => {
-    // If the backend decides to stop this agent (cost overrun, loop
-    // detected, manual stop from dashboard), GovernanceStopError is raised
-    // on the next LLM call — not immediately when the signal arrives.
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [{ role: "user", content: "Plan a world tour" }],
-    });
-    console.log(response.choices[0].message.content);
+  await sdk.withSession({ userId: "bob", window: "day" }, async () => {
+    for (let i = 0; i < 100; i++) {   // a runaway loop
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o",
+        messages: [{ role: "user", content: "Keep going..." }],
+      });
+      // When the backend detects the loop, GovernanceStopError is thrown
+      // on the NEXT call.
+    }
   });
 } catch (err) {
   if (err instanceof GovernanceStopError) {
-    console.error(`Agent stopped by backend: ${err.reason}`);
-    // err.incidentId links to the incident in the dashboard
+    console.error(`Stopped: ${err.reason}`);
+    console.error(`Incident: ${err.incidentId}`);
+    // → Stopped: Loop detected — 12 identical conversation hashes in 30 seconds
+    // → Incident: inc_7f3a2b...
+    // Visit app.syrin.ai → Governance → Incidents to see the full report
   } else {
     throw err;
   }
@@ -223,34 +286,34 @@ try {
 
 ---
 
-### Offline Mode (for tests)
+### Offline Mode (for unit tests)
 
 ```typescript
 const sdk = await init({
   apiKey: "syrin_pk_...",
   agentId: "travel-assistant",
-  offline: true, // no network calls — ideal for unit tests
+  offline: true,   // no network calls — ideal for CI
 });
 
-// cfg() still returns defaults, withSession() still scopes calls,
-// but no events are sent and no config is fetched from the backend.
+// cfg() returns defaults, withSession() still scopes calls,
+// but nothing is sent to the backend and no config is fetched.
+const model = agent.cfg("llm.model", "gpt-4o");
+console.log(model);  // → "gpt-4o"
 ```
 
 ---
 
 ### Clean Shutdown
 
-In long-running servers, call `shutdown()` when the process exits to flush any buffered events:
+In servers that receive OS signals, flush buffered events explicitly:
 
 ```typescript
 import { init, shutdown } from "@syrin/sdk";
 
 const sdk = await init({ apiKey: "syrin_pk_...", agentId: "travel-assistant" });
 
-// Flush remaining events and stop background timers before the
-// process exits. Without this, the last batch of events may be lost.
 process.on("SIGTERM", async () => {
-  await shutdown();
+  await shutdown();   // flush remaining events
   process.exit(0);
 });
 
@@ -258,15 +321,18 @@ process.on("SIGINT", async () => {
   await shutdown();
   process.exit(0);
 });
-```
 
-The SDK also registers its own `beforeExit` handler for short-lived scripts, so scripts that run to completion and exit normally will flush automatically. The explicit `process.on("SIGTERM")` handler is mainly for servers receiving OS-level signals.
+// Short-lived scripts flush automatically via a `beforeExit` handler —
+// no explicit shutdown needed for scripts that run to completion.
+```
 
 ---
 
 ### Next Steps
 
-- [init() Reference](../init) — all parameters explained
-- [Remote Config](../cfg) — `cfg()` in depth, `ConfigStore`, `tunable`
-- [Sessions & Context](../sessions) — `withSession()`, `withAgent()`, `withWorkflow()`
-- [Governance](../governance) — stop, inject, checkpoint, restore
+- [Dashboard Guide](./dashboard-guide) — a full tour of app.syrin.ai: sessions, config, governance, cost
+- [init() Reference](../initialization/init) — all parameters explained
+- [Remote Config](../configuration/cfg) — `cfg()` in depth, field types, agent scoping
+- [Sessions](../sessions/with-session) — `withSession()`, `withAgent()`, `withWorkflow()`
+- [AgentHandle](../agents/agent-handle) — `field()`, `cfg()`, multi-agent patterns
+- [Governance](../control/governance) — stop, inject, checkpoint, restore

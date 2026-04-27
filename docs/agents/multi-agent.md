@@ -354,12 +354,70 @@ The dashboard shows each agent's section independently — you can tune the rese
 
 ---
 
+### Remote Tool Toggling
+
+Each agent can declare the tools it uses via `handle.tools()`. These appear as on/off switches in the dashboard (Agents → agent → Config → Tools section) and can be disabled at runtime without any code changes.
+
+```ts
+const researcher = sdk.agent("researcher");
+researcher
+  .field("llm.model", "gpt-4o-mini")
+  .field("llm.temperature", 0.3, { ge: 0, le: 1 })
+  .tools(["search_destinations", "get_weather", "check_flights", "find_hotels"]);
+
+const writer = sdk.agent("writer");
+writer
+  .field("llm.model", "gpt-4o")
+  .tools(["format_markdown", "generate_itinerary"]);
+```
+
+**Dashboard toggle → SDK filtering flow:**
+
+1. `tools()` registers tool names under the agent's schema section on startup.
+2. The dashboard shows each tool as a toggle switch per agent.
+3. Toggle a tool off and click Push — backend records `agents.researcher.tools.get_weather: false`.
+4. The SDK receives the update via SSE and marks that tool as disabled for that session.
+5. The next LLM call with `tools` has `get_weather` stripped automatically.
+
+```ts
+// SDK intercepts the tools parameter and strips any tool toggled off in the dashboard
+const resp = await client.chat.completions.create({
+  model: researcher.cfg("llm.model", "gpt-4o-mini") as string,
+  messages,
+  tools: ALL_RESEARCHER_TOOLS,  // full list — disabled tools are stripped before the call
+});
+```
+
+Tool states are per-session and per-agent — toggling `researcher`'s `get_weather` off does not affect `writer`'s tools or any other agent.
+
+---
+
 ### Observing Multi-Agent Systems in the Dashboard
 
-The Syrin dashboard provides:
+Open [app.syrin.ai → Sessions](https://app.syrin.ai) and click any multi-agent session to see the full handoff timeline:
+
+```
+Session: u:alice:2026-04-27   [workflow: research-write-edit-pipeline]
+
+  ● SESSION_STARTED       14:32:00.001
+  ● WORKFLOW_STARTED      14:32:00.002   workflow=research-write-edit-pipeline
+  ● AGENT_RUN_STARTED     14:32:00.003   agentId=researcher
+  ● LLM_CALL              14:32:01.243   gpt-4o-mini  in=82 out=384  $0.002
+  ● CHECKPOINT            14:32:01.250   research-done
+  ● HANDOFF               14:32:01.251   researcher → writer
+  ● AGENT_RUN_STARTED     14:32:01.252   agentId=writer
+  ● LLM_CALL              14:32:03.810   gpt-4o  in=512 out=621  $0.012
+  ● HANDOFF               14:32:03.821   writer → editor
+  ● AGENT_RUN_STARTED     14:32:03.822   agentId=editor
+  ● LLM_CALL              14:32:05.100   gpt-4o-mini  in=743 out=187  $0.004
+  ● WORKFLOW_ENDED        14:32:05.112   totalCost=$0.018
+  ● SESSION_ENDED         14:32:05.115
+```
+
+Navigate to [app.syrin.ai → Agents](https://app.syrin.ai) to see per-agent:
 
 - **Topology graph** — visual representation of your agent architecture
-- **Agent timeline** — per-agent event timeline (costs, calls, latencies)
-- **Handoff trace** — visualizes the handoff chain across agents
-- **Per-agent config** — independent config controls for each agent
+- **Per-agent config** — independent sliders for researcher, writer, and editor — completely separate controls
+- **Agent timeline** — per-agent cost, call count, and latency breakdown
+- **Handoff trace** — visualizes the handoff chain with timestamps
 - **Session replay** — see exactly which agent handled which part of the conversation

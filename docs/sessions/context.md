@@ -6,7 +6,7 @@ weight: 30
 
 ## Scope Every LLM Call to a Session and Agent
 
-The TypeScript SDK provides four `AsyncLocalStorage`-backed context functions. Each wraps your callback with the relevant scope — session ID, agent ID, workflow ID, or swarm ID — so the SDK can automatically resolve these fields for all events emitted inside.
+The TypeScript SDK provides four `AsyncLocalStorage`-backed context functions. Each wraps your callback with the relevant scope — session ID, agent ID, workflow ID, or swarm ID — so the SDK can automatically resolve these fields for all events emitted inside, and group them correctly on the session timeline at [app.syrin.ai](https://app.syrin.ai).
 
 ```typescript
 import { withSession, withAgent, withWorkflow, withSwarm } from '@syrin/sdk';

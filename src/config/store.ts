@@ -31,6 +31,9 @@ const BUILTIN_SECTIONS: Record<string, Record<string, FieldSchema>> = {
     presence_penalty:  { name: 'presence_penalty',   type: 'number',  default: null, ge: -2.0, le: 2.0 },
     stop:              { name: 'stop',               type: 'array',   default: null },
     stream:            { name: 'stream',             type: 'boolean', default: null },
+    // Remote tool-access controls — toggled from the dashboard
+    disabled_tools:    { name: 'disabled_tools',     type: 'array',   default: null, description: 'Tool names to block from the next LLM call (remote toggle)' },
+    enabled_tools:     { name: 'enabled_tools',      type: 'array',   default: null, description: 'Allowlist of tool names; all others are removed (remote toggle)' },
   },
 };
 

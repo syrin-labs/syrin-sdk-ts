@@ -8,6 +8,8 @@ weight: 40
 
 The moment you `await init()`, the SDK patches every OpenAI instance already loaded in your process. From that point on, every `chat.completions.create` call is automatically captured — model, tokens, cost, latency, streaming status, and optional prompt/completion content — without any changes to your existing code.
 
+Open **[app.syrin.ai → Sessions](https://app.syrin.ai)** after your first run to see the full session timeline in real time.
+
 ### How Auto-Instrumentation Works in Node.js
 
 `init()` calls `patchOpenAI()`, which lazily imports the `openai` npm package and patches `Completions.prototype.create` at the class prototype level. This means:

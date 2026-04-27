@@ -10,6 +10,8 @@ Governance lets the Syrin backend take action on your agent at runtime — stopp
 
 By default, all disruptive actions are disabled. You must explicitly allow each one.
 
+Every governance action fired creates an **incident** visible at [app.syrin.ai → Governance → Incidents](https://app.syrin.ai) with the full session replay, loop trace, cost at time of stop, and the exact reason string.
+
 ### How It Works
 
 After each LLM call, the SDK flushes events to the backend. The backend's governance engine analyses the session (cost, loop detection, drift score, policy rules) and may include governance actions in the ingest response:

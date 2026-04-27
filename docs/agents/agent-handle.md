@@ -61,6 +61,81 @@ researcher
 
 ---
 
+### `handle.tools(toolNames: string[])`
+
+Declare which tools this agent uses. The SDK registers them as toggleable boolean fields in the dashboard (Agents → researcher → Config → Tools section). When a tool is toggled off from the dashboard, the SDK automatically strips it from the `tools` parameter on the next LLM call — no code changes needed.
+
+```ts
+const researcher = sdk.agent("researcher");
+researcher
+  .field("llm.model", "gpt-4o-mini")
+  .field("llm.temperature", 0.3, { ge: 0, le: 1 })
+  .tools(["search_web", "get_weather", "fetch_page"]);  // registered as toggleable
+```
+
+Each name in the list appears as an on/off switch under the agent's Config tab. The default state is **on**; toggling off immediately disables the tool for that agent on the next call.
+
+**How it works end-to-end:**
+
+1. `tools()` registers tool names under `agents.<id>.sections.tools` in the schema sent on registration.
+2. The dashboard renders each tool as a toggle switch.
+3. When you toggle a tool off and click Push, the backend records `agents.<id>.tools.<name>: false`.
+4. The SDK receives the update via SSE (or the next `/ingest` response) and stores it in `session.agentToolStates[agentId][toolName] = false`.
+5. Before the next `tools` parameter is passed to the LLM, the SDK strips any tool whose state is `false`.
+
+**Usage example:**
+
+```ts
+import { init } from "@syrin/sdk";
+import OpenAI from "openai";
+
+const client = new OpenAI();
+const sdk = init({ apiKey: process.env.SYRIN_API_KEY!, agentId: "orchestrator" });
+
+const researcher = sdk.agent("researcher");
+researcher
+  .field("llm.model", "gpt-4o-mini")
+  .tools(["search_web", "get_weather"]);
+
+const tools = [
+  {
+    type: "function" as const,
+    function: {
+      name: "search_web",
+      description: "Search the web",
+      parameters: {
+        type: "object",
+        properties: { query: { type: "string" } },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
+      name: "get_weather",
+      description: "Get weather for a location",
+      parameters: {
+        type: "object",
+        properties: { city: { type: "string" } },
+        required: ["city"],
+      },
+    },
+  },
+];
+
+// SDK intercepts the tools= parameter and strips any tool toggled off in the dashboard
+const resp = await client.chat.completions.create({
+  model: researcher.cfg("llm.model", "gpt-4o-mini") as string,
+  messages: [{ role: "user", content: "What is the weather in Tokyo?" }],
+  tools,  // get_weather stripped here if toggled off
+});
+```
+
+Returns `this` for chaining.
+
+---
+
 ### `handle.cfg(key, default)`
 
 Read a config value scoped to this agent's namespace. Always reads from `agents.<id>.<key>`, regardless of any ambient session or agent context.

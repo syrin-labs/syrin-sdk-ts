@@ -6,7 +6,17 @@ weight: 61
 
 ## Because Your Agent Needs Performance Reviews Too
 
-Feedback lets you submit a positive or negative rating for a session — a simple thumbs-up / thumbs-down signal that tells the Syrin dashboard whether this session produced a good outcome. Ratings appear in the Sessions view and feed into aggregate quality metrics over time.
+Feedback lets you submit a positive or negative rating for a session — a simple thumbs-up / thumbs-down signal that tells the Syrin dashboard whether this session produced a good outcome. Ratings appear immediately at [app.syrin.ai → Sessions](https://app.syrin.ai) as a 👍 / 👎 indicator and feed into per-agent quality metrics over time.
+
+```
+Sessions
+
+  u:alice:2026-04-27   travel-assistant   👍  "Complete and accurate response"   $0.005
+  u:bob:2026-04-27     travel-assistant   👎  "Hallucinated hotel prices"         $0.021
+  u:carol:2026-04-27   travel-assistant       (no feedback yet)                  $0.009
+```
+
+Navigate to [app.syrin.ai → Agents → {agent-name}](https://app.syrin.ai) to see aggregate feedback rates, most common negative reasons, and a drilldown into every negative session with its full replay.
 
 ### Types
 

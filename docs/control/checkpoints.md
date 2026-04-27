@@ -8,6 +8,8 @@ weight: 62
 
 Checkpoints are in-memory snapshots of a session's conversation state. Save before a risky operation; restore if something goes wrong. The Syrin backend can also trigger checkpoints and restores autonomously via governance actions.
 
+Checkpoint events appear as ★ annotations on the session timeline at [app.syrin.ai → Sessions](https://app.syrin.ai), and backend-triggered checkpoints are recorded in the Governance panel.
+
 ### Manual Checkpoints
 
 #### `sdk.createCheckpoint()`

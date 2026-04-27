@@ -1,0 +1,72 @@
+{
+  "name": "Syrin SDK (TypeScript)",
+  "logo": { "light": "/logo/light.svg", "dark": "/logo/dark.svg" },
+  "favicon": "/favicon.svg",
+  "colors": { "primary": "#6366f1", "light": "#818cf8", "dark": "#4f46e5" },
+  "topbarLinks": [{ "name": "Dashboard", "url": "https://app.syrin.ai" }],
+  "topbarCtaButton": { "name": "Get API Key", "url": "https://app.syrin.ai" },
+  "navigation": [
+    {
+      "group": "Getting Started",
+      "pages": [
+        "sdk-ts/getting-started/introduction",
+        "sdk-ts/getting-started/installation",
+        "sdk-ts/getting-started/quickstart",
+        "sdk-ts/getting-started/dashboard-guide"
+      ]
+    },
+    {
+      "group": "Initialization",
+      "pages": [
+        "sdk-ts/initialization/init"
+      ]
+    },
+    {
+      "group": "Configuration",
+      "pages": [
+        "sdk-ts/configuration/cfg",
+        "sdk-ts/configuration/advanced"
+      ]
+    },
+    {
+      "group": "Sessions",
+      "pages": [
+        "sdk-ts/sessions/with-session",
+        "sdk-ts/sessions/context",
+        "sdk-ts/sessions/workflow"
+      ]
+    },
+    {
+      "group": "Observability",
+      "pages": [
+        "sdk-ts/observability/observability",
+        "sdk-ts/observability/emit",
+        "sdk-ts/observability/log"
+      ]
+    },
+    {
+      "group": "Agents",
+      "pages": [
+        "sdk-ts/agents/agent-handle",
+        "sdk-ts/agents/multi-agent",
+        "sdk-ts/agents/agent-server"
+      ]
+    },
+    {
+      "group": "Control",
+      "pages": [
+        "sdk-ts/control/governance",
+        "sdk-ts/control/checkpoints",
+        "sdk-ts/control/feedback"
+      ]
+    },
+    {
+      "group": "Reference",
+      "pages": [
+        "sdk-ts/reference/errors",
+        "sdk-ts/reference/testing"
+      ]
+    }
+  ],
+  "footerSocials": { "github": "https://github.com/syrin-ai/syrin-sdk" }
+}

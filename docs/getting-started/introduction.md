@@ -1,93 +1,110 @@
 ---
 title: "Introduction"
-description: "@syrin/sdk — observability, remote config, and governance for AI agents in TypeScript and Node.js. One import, one await."
+description: "@syrin/sdk — instant observability, live remote config, and backend governance for AI agents in TypeScript and Node.js. One import, one await init(), zero rewrites."
 weight: 1
 ---
 
-# @syrin/sdk
-
 ## Your AI Agent Just Got a Mission Control
 
-Syrin is the observability, remote configuration, and governance layer for production AI agents. It instruments your existing LLM calls without requiring you to rewrite them, streams every event to the Syrin dashboard in real-time, and lets you change model parameters, prompts, and agent behavior live — without a redeploy.
+Syrin instruments your AI agents and streams every LLM call, config change, and lifecycle event to a live dashboard at **[app.syrin.ai](https://app.syrin.ai)**. From that dashboard you can watch sessions in real time, tune model parameters without redeploying, and let the backend enforce safety rules your agent respects automatically.
 
-Think of it as Datadog meets LaunchDarkly, purpose-built for the LLM era.
-
-### What Syrin Does
-
-- **Auto-instrumentation** — wraps OpenAI calls transparently at the library level. Zero changes to your existing LLM code.
-- **Remote config** — the dashboard can push a new temperature, model name, or system prompt mid-run and your agent picks it up on the next call.
-- **Governance** — the backend can stop a runaway agent, inject corrective messages, or trigger checkpointing when it detects loops or cost overruns.
-- **Sessions** — group all LLM calls for a user into a single timeline, regardless of which process or replica handles each call.
-- **Multi-agent support** — orchestrators, pipelines, parallel swarms, and arbitrary graphs are all first-class concepts.
-
-### Initialization
-
-Pass all configuration as fields to `init()`. The function is async — you must `await` it:
-
-```typescript
-import { init } from "@syrin/sdk";
-
-const sdk = await init({
-  apiKey: "syrin_pk_...",
-  agentId: "travel-orchestrator",
-  backendUrl: "https://app.syrin.ai",
-  captureContent: true,
-});
-```
-
-`init()` validates your API key early, patches the OpenAI SDK in place, and returns the `SyrinSDKInstance` handle. From the moment `await` resolves, every OpenAI call made anywhere in the process is instrumented.
-
-> **Always await `init()`.** If you skip `await`, the patch may not complete before your first LLM call and telemetry will be silently missed.
-
-### 5-Minute Quickstart
-
-Install, set two environment variables, and add three lines to your agent:
-
-```bash
-npm install @syrin/sdk openai
-```
-
-```bash
-export SYRIN_API_KEY="syrin_pk_..."
-export SYRIN_AGENT_ID="my-first-agent"
-```
-
-```typescript
-import { init, withSession } from "@syrin/sdk";
-import OpenAI from "openai";
-
-// 1. Initialize Syrin — instruments OpenAI automatically
-const sdk = await init({ apiKey: "syrin_pk_...", agentId: "my-first-agent" });
-
-const openai = new OpenAI(); // your normal client, unmodified
-
-// 2. Optionally scope a session per user
-await withSession("u:alice:today", async () => {
-  // 3. Your existing LLM call — no changes needed
-  const response = await openai.chat.completions.create({
-    model: sdk.agent("my-first-agent").cfg("llm.model", "gpt-4o"),
-    messages: [{ role: "user", content: "Plan a trip to Tokyo" }],
-  });
-  console.log(response.choices[0].message.content);
-});
-
-// Events are flushed automatically at process exit
-```
-
-Open the dashboard at `https://app.syrin.ai` and watch Alice's session appear in real-time.
+Think of it as **Datadog meets LaunchDarkly, purpose-built for the LLM era**.
 
 ---
 
-### Key Concepts
+### What Syrin Does
 
-| Concept | What it is |
-|---------|------------|
-| **Agent** | A named AI service or component (e.g. `"travel-orchestrator"`) |
-| **Session** | A group of LLM calls for one user in one time window |
-| **withSession()** | Scopes all LLM calls inside to a single session ID via AsyncLocalStorage |
-| **cfg()** | A remotely-overridable value — declare a default, get the live value back |
-| **Governance** | Backend-driven rules that can stop, inject messages, or checkpoint your agent |
-| **emit()** | Send custom lifecycle events (guardrails, handoffs, budget warnings) |
+| Capability | What it means in practice |
+|------------|--------------------------|
+| **Auto-instrumentation** | Every `openai.chat.completions.create()` call is captured automatically — no changes to your existing code |
+| **Remote config** | Change `temperature`, `model`, or `systemPrompt` live from [app.syrin.ai](https://app.syrin.ai) — your agent picks it up on the next call without a redeploy |
+| **Sessions** | Group all LLM calls for one user into a single timeline, across any number of processes or replicas |
+| **Governance** | The backend can stop a runaway agent, inject a corrective message, or trigger a checkpoint when it detects loops or cost overruns |
+| **Multi-agent** | Orchestrators, pipelines, parallel swarms, and arbitrary graphs are all first-class concepts |
+| **OTel spans** | Every LLM call emits an OpenTelemetry span with `gen_ai.*` and `syrin.*` attributes, compatible with any OTLP-capable backend |
+
+---
+
+### Integration Is Three Lines
+
+```typescript
+import { init } from "@syrin/sdk";    // 1. import
+import OpenAI from "openai";
+
+const sdk = await init({              // 2. await init — patches OpenAI automatically
+  apiKey: "syrin_pk_...",
+  agentId: "my-agent",
+});
+
+const client = new OpenAI();          // 3. your unchanged OpenAI client
+
+// Everything below this point is fully observed
+const response = await client.chat.completions.create({
+  model: "gpt-4o",
+  messages: [{ role: "user", content: "Hello!" }],
+});
+console.log(response.choices[0].message.content);
+```
+
+After running this, open **[app.syrin.ai → Sessions](https://app.syrin.ai)** and watch the `LLM_CALL` event appear in real time.
+
+> **Always `await init()`** before any LLM calls. The SDK patches OpenAI asynchronously — skipping `await` means your first call may not be instrumented.
+
+---
+
+### What Gets Captured Per LLM Call
+
+Every call emits one structured event automatically:
+
+```json
+{
+  "event_type":     "LLM_CALL",
+  "model":          "gpt-4o",
+  "provider":       "openai",
+  "input_tokens":   342,
+  "output_tokens":  187,
+  "cost_usd":       0.00529,
+  "duration_ms":    1240,
+  "stream":         false,
+  "config_applied": true,
+  "session_id":     "u:alice:2026-04-27",
+  "agent_id":       "my-agent",
+  "context_utilization": 0.21,
+  "conversation_hash":   "a1b2c3d4",
+  "timestamp":      "2026-04-27T14:32:01.123Z"
+}
+```
+
+Prompt and completion text are **not** captured by default (PII-safe). Enable with `captureContent: true` for full session replay.
+
+---
+
+### What Auto-Instruments
+
+Out of the box, `init()` patches the following when they are installed in your dependencies:
+
+| Library | What is patched |
+|---------|----------------|
+| `openai` | `chat.completions.create` — sync, async, and streaming |
+| `@anthropic-ai/sdk` | `messages.create` and streaming variants |
+| `langchain` | All LLM and chain calls via callback hooks |
+| `@mastra/core` | Agent execution and tool call events |
+| `ai` (Vercel AI SDK) | `generateText`, `streamText`, `generateObject` |
+
+---
+
+### The Dashboard Is Where the Value Lives
+
+After any instrumented run, [app.syrin.ai](https://app.syrin.ai) gives you:
+
+- **Sessions** — every user session with a full event timeline, token counts, and cost
+- **Agents → Config** — live sliders, dropdowns, and text areas for every `cfg()` field you declared
+- **Governance** — policy status, incidents, loop detection scores, and drift metrics
+- **Cost breakdown** — total spend by model, by agent, by day
+- **Session replay** — full conversation replay when `captureContent: true`
+- **Config audit log** — who changed what, and when
+
+The dashboard is not a "nice to have" — it is the primary interface for operating your agents in production. **Visit [app.syrin.ai](https://app.syrin.ai) after every run** to see what your agent is doing.
 
 ---
 
@@ -97,58 +114,45 @@ Open the dashboard at `https://app.syrin.ai` and watch Alice's session appear in
 Your Agent Code
       │
       ▼
- await init()          ← patches OpenAI at the library level
+await init()              ← patches OpenAI / Anthropic / LangChain
       │
       ▼
- LLM call (unchanged)  ← intercepted automatically
+LLM call (unchanged)      ← intercepted transparently via prototype patch
       │
       ▼
- Syrin Emitter         ← batches events, sends to backend
+Syrin Emitter             ← batches events, retries on failure
       │
       ▼
- Syrin Backend         ← stores, analyses, streams to dashboard
+Syrin Backend             ← stores, analyses, streams to dashboard
       │
       ▼
- Syrin Dashboard       ← live session replay, config controls, governance
+app.syrin.ai              ← live session replay, config controls, governance
 ```
 
-The SDK never proxies your requests to the LLM — it wraps OpenAI's internal method directly, so latency impact is negligible and your `baseURL`, retry config, and timeout settings are all preserved.
+The SDK never proxies your LLM requests — it wraps OpenAI's prototype method directly, so your `baseURL`, retry config, and timeout settings are all preserved.
+
+The SDK is a **nerve system, not a brain**. All intelligence — loop detection, drift scoring, governance decisions — lives in the backend. The SDK collects and transmits; the backend decides and instructs.
 
 ---
 
-### What Gets Auto-Instrumented
+### Key Concepts at a Glance
 
-Out of the box, `init()` patches the following if it is installed:
-
-- **OpenAI** (`openai.chat.completions.create`, sync and streaming, including all `baseURL` variants for OpenRouter, Together AI, Groq, etc.)
-
-Anthropic and LangChain support is available via optional adapters — see `docs/adapters.md`. The SDK degrades gracefully if a peer dependency is not installed; it will never throw at import time because `openai` is absent.
-
----
-
-### What Gets Captured Per Call
-
-Each LLM call emits an event with:
-
-- `model` — the model name
-- `provider` — `"openai"`, `"openrouter"`, `"groq"`, etc. (auto-detected from `baseURL`)
-- `input_tokens` / `output_tokens` — token counts
-- `cost_usd` — estimated cost
-- `duration_ms` — end-to-end latency
-- `session_id` / `agent_id` / `workflow_id` — context identifiers
-- `stream` — whether the call used streaming
-- `config_applied` — whether a remote config override was active
-- `context_utilization` — fraction of the model's context window used
-- `conversation_hash` — SHA-256 fingerprint for loop detection
-- `system_prompt_hash` / `tool_set_hash` — mutation detection signals
-
-Prompt and completion text is **not** captured by default (PII-safe). Enable with `captureContent: true`.
+| Concept | One-liner |
+|---------|-----------|
+| `init()` | Start the SDK. Instruments every AI library in the process. Must be `await`-ed. |
+| `withSession()` | Open a session scope for a user. Groups all their LLM calls via AsyncLocalStorage. |
+| `agent.cfg(key, default)` | Declare a remotely-overridable value. Dashboard shows a live control for it. |
+| `sdk.emit(eventType, payload)` | Send a custom lifecycle event to the session timeline. |
+| `AgentHandle` | A named agent wrapper — scoped config, field declarations. |
+| `GovernanceStopError` | Thrown when the backend tells the agent to stop. |
+| `shutdown()` | Flush all buffered events before the process exits. |
 
 ---
 
 ### Next Steps
 
-- [Installation](./installation) — npm install, env vars, Node.js requirements
-- [Quickstart](./quickstart) — full working example with OpenAI
-- [init() Reference](../init) — every parameter documented
-- [Remote Config](../cfg) — `AgentHandle.cfg()` and `ConfigStore`
+- [Installation](./installation) — npm install, env vars, Node 18+ requirement
+- [Quickstart](./quickstart) — full working example with console output and dashboard walkthrough
+- [Dashboard Guide](./dashboard-guide) — everything you see at app.syrin.ai, explained
+- [init() Reference](../initialization/init) — all parameters
+- [Remote Config (cfg)](../configuration/cfg) — declare and tune any parameter live
