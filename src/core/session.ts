@@ -128,6 +128,23 @@ export class SessionStore {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     for (const [rawKey, value] of Object.entries(updates)) {
+      // Per-agent tool toggles: agents.{agentId}.tools.{toolName}: bool
+      if (rawKey.startsWith('agents.')) {
+        const after = rawKey.slice('agents.'.length); // "{agentId}.tools.{toolName}"
+        const marker = '.tools.';
+        const markerIdx = after.indexOf(marker);
+        if (markerIdx !== -1) {
+          const agentId = after.slice(0, markerIdx);
+          const toolName = after.slice(markerIdx + marker.length);
+          if (agentId && toolName) {
+            if (!session.agentToolStates) session.agentToolStates = {};
+            if (!session.agentToolStates[agentId]) session.agentToolStates[agentId] = {};
+            session.agentToolStates[agentId][toolName] = value == null ? true : Boolean(value);
+          }
+          continue;
+        }
+      }
+
       // Normalize qualified paths to bare keys:
       // "global.llm.temperature"                    → "temperature"
       // "agents.my-agent.llm.temperature"           → "temperature"

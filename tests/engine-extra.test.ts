@@ -72,7 +72,7 @@ function makeResult(overrides: Partial<NormalizedCallResult> = {}): NormalizedCa
 
 describe('SyrinCore._recordAndEmit — toolDefinitions included in LLM_CALL event', () => {
   it('includes tool_definitions in event when result has toolDefinitions', async () => {
-    const { core, sessionStore, emitSpy } = makeCore();
+    const { core, sessionStore, emitSpy } = makeCore({ captureContent: true });
     const sessionId = 'ses_td_1';
     await sessionStore.getOrCreate(sessionId);
 
@@ -243,7 +243,7 @@ describe('_runCtxFields — with active agentStorage context (lines 656-662)', (
 
 describe('SyrinCore._recordAndEmit — tool call with unparseable arguments', () => {
   it('emits TOOL_CALL event with _raw fallback for bad JSON args', async () => {
-    const { core, sessionStore, emitSpy } = makeCore();
+    const { core, sessionStore, emitSpy } = makeCore({ captureContent: true });
     const sessionId = 'ses_badargs_1';
     await sessionStore.getOrCreate(sessionId);
 

@@ -212,6 +212,8 @@ export interface SessionState {
   /** Cumulative token counts for SESSION_SUMMARY emission. */
   totalInputTokens: number;
   totalOutputTokens: number;
+  /** Per-agent tool on/off states: {agentId: {toolName: boolean}} */
+  agentToolStates?: Record<string, Record<string, boolean>>;
 }
 
 /** SESSION_SUMMARY event — emitted at session close as a behavioural fingerprint. */

@@ -92,6 +92,21 @@ export class AgentHandle {
   }
 
   /**
+   * Declare the tools this agent has access to.
+   * Each tool appears as an on/off toggle in the dashboard's Config tab.
+   * Toggling a tool off strips it from the tools= list before the next LLM call.
+   */
+  tools(toolNames: string[]): this {
+    const core = (this.sdk as unknown as { _core: Record<string, unknown> })._core;
+    if (core) {
+      if (!core['_agentToolNames']) core['_agentToolNames'] = {} as Record<string, string[]>;
+      const agentToolNames = core['_agentToolNames'] as Record<string, string[]>;
+      agentToolNames[this.agentId] = [...toolNames];
+    }
+    return this;
+  }
+
+  /**
    * Declare what outputs this agent produces.
    * Used by workflows to track data flow between agents.
    */

@@ -128,30 +128,35 @@ const client = new OpenAI({ apiKey: OPENAI_API_KEY });
 
 const agentHandles: Record<string, ReturnType<typeof sdk.agent>> = {
   'researcher-agent': sdk.agent('researcher-agent')
+    .tools(['search_destination_info', 'get_weather_forecast', 'get_travel_advisories'])
     .field('llm.model', 'gpt-4o-mini', { label: 'LLM Model', enum: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'] })
     .field('llm.temperature', 0.7, { label: 'Temperature', ge: 0.0, le: 1.0 })
     .field('llm.max_tokens', 2048, { label: 'Max Tokens', ge: 256, le: 8192 })
     .field('prompt.system_prompt', 'You are an expert travel researcher. Research the destination thoroughly.', { label: 'System Prompt', multiline: true }),
 
   'hotel-finder-agent': sdk.agent('hotel-finder-agent')
+    .tools(['search_hotels', 'check_availability', 'get_hotel_reviews'])
     .field('llm.model', 'gpt-4o-mini', { label: 'LLM Model', enum: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'] })
     .field('llm.temperature', 0.5, { label: 'Temperature', ge: 0.0, le: 1.0 })
     .field('llm.max_tokens', 2048, { label: 'Max Tokens', ge: 256, le: 8192 })
     .field('prompt.system_prompt', 'You are a hotel expert. Find the best accommodations.', { label: 'System Prompt', multiline: true }),
 
   'transport-agent': sdk.agent('transport-agent')
+    .tools(['search_flights', 'search_trains', 'get_taxi_rates'])
     .field('llm.model', 'gpt-4o-mini', { label: 'LLM Model', enum: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'] })
     .field('llm.temperature', 0.5, { label: 'Temperature', ge: 0.0, le: 1.0 })
     .field('llm.max_tokens', 2048, { label: 'Max Tokens', ge: 256, le: 8192 })
     .field('prompt.system_prompt', 'You are a transport specialist. Identify all transportation options.', { label: 'System Prompt', multiline: true }),
 
   'events-agent': sdk.agent('events-agent')
+    .tools(['search_events', 'get_museum_hours', 'search_restaurants'])
     .field('llm.model', 'gpt-4o-mini', { label: 'LLM Model', enum: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'] })
     .field('llm.temperature', 0.8, { label: 'Temperature', ge: 0.0, le: 1.0 })
     .field('llm.max_tokens', 2048, { label: 'Max Tokens', ge: 256, le: 8192 })
     .field('prompt.system_prompt', 'You are an events expert. Discover local events and activities.', { label: 'System Prompt', multiline: true }),
 
   'route-optimizer-agent': sdk.agent('route-optimizer-agent')
+    .tools(['get_distance_matrix', 'calculate_route'])
     .field('llm.model', 'gpt-4o-mini', { label: 'LLM Model', enum: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo'] })
     .field('llm.temperature', 0.3, { label: 'Temperature', ge: 0.0, le: 1.0 })
     .field('llm.max_tokens', 2048, { label: 'Max Tokens', ge: 256, le: 8192 })
@@ -172,21 +177,261 @@ try {
   console.warn(`Schema re-registration failed (non-fatal): ${e}`);
 }
 
+// ── OpenAI tool schemas ───────────────────────────────────────────────────────
+// Passed as tools= to each LLM call. The SDK intercepts and strips tools whose
+// dashboard toggle is OFF before forwarding to OpenAI.
+
+const AGENT_TOOL_DEFS: Record<string, Array<Record<string, unknown>>> = {
+  'researcher-agent': [
+    { type: 'function', function: {
+      name: 'search_destination_info',
+      description: 'Search for destination information: attractions, culture, local tips',
+      parameters: { type: 'object', properties: {
+        destination: { type: 'string' },
+        topics: { type: 'array', items: { type: 'string' } },
+      }, required: ['destination'] },
+    }},
+    { type: 'function', function: {
+      name: 'get_weather_forecast',
+      description: 'Get weather forecast for a destination during travel dates',
+      parameters: { type: 'object', properties: {
+        destination: { type: 'string' },
+        start_date: { type: 'string', description: 'ISO date YYYY-MM-DD' },
+        end_date:   { type: 'string', description: 'ISO date YYYY-MM-DD' },
+      }, required: ['destination', 'start_date', 'end_date'] },
+    }},
+    { type: 'function', function: {
+      name: 'get_travel_advisories',
+      description: 'Get safety ratings, travel advisories, and visa requirements',
+      parameters: { type: 'object', properties: {
+        destination: { type: 'string' },
+        nationality: { type: 'string' },
+      }, required: ['destination'] },
+    }},
+  ],
+  'hotel-finder-agent': [
+    { type: 'function', function: {
+      name: 'search_hotels',
+      description: 'Search available hotels matching budget and dates',
+      parameters: { type: 'object', properties: {
+        destination:      { type: 'string' },
+        check_in:         { type: 'string' },
+        check_out:        { type: 'string' },
+        budget_per_night: { type: 'number' },
+        guests:           { type: 'integer' },
+      }, required: ['destination', 'check_in', 'check_out'] },
+    }},
+    { type: 'function', function: {
+      name: 'check_availability',
+      description: 'Check real-time room availability for a specific hotel',
+      parameters: { type: 'object', properties: {
+        hotel_id: { type: 'string' },
+        check_in: { type: 'string' },
+        check_out: { type: 'string' },
+      }, required: ['hotel_id', 'check_in', 'check_out'] },
+    }},
+    { type: 'function', function: {
+      name: 'get_hotel_reviews',
+      description: 'Fetch guest reviews and ratings for a hotel',
+      parameters: { type: 'object', properties: {
+        hotel_id: { type: 'string' },
+        limit: { type: 'integer' },
+      }, required: ['hotel_id'] },
+    }},
+  ],
+  'transport-agent': [
+    { type: 'function', function: {
+      name: 'search_flights',
+      description: 'Search available flights between origin and destination',
+      parameters: { type: 'object', properties: {
+        origin:         { type: 'string' },
+        destination:    { type: 'string' },
+        departure_date: { type: 'string' },
+        return_date:    { type: 'string' },
+        passengers:     { type: 'integer' },
+      }, required: ['origin', 'destination', 'departure_date'] },
+    }},
+    { type: 'function', function: {
+      name: 'search_trains',
+      description: 'Search train connections between two cities',
+      parameters: { type: 'object', properties: {
+        origin:      { type: 'string' },
+        destination: { type: 'string' },
+        travel_date: { type: 'string' },
+      }, required: ['origin', 'destination', 'travel_date'] },
+    }},
+    { type: 'function', function: {
+      name: 'get_taxi_rates',
+      description: 'Get estimated taxi/rideshare rates for a city',
+      parameters: { type: 'object', properties: {
+        city:          { type: 'string' },
+        from_location: { type: 'string' },
+        to_location:   { type: 'string' },
+      }, required: ['city'] },
+    }},
+  ],
+  'events-agent': [
+    { type: 'function', function: {
+      name: 'search_events',
+      description: 'Find local events, concerts, and festivals during travel dates',
+      parameters: { type: 'object', properties: {
+        destination: { type: 'string' },
+        start_date:  { type: 'string' },
+        end_date:    { type: 'string' },
+        category:    { type: 'string', enum: ['music', 'sports', 'culture', 'food', 'all'] },
+      }, required: ['destination', 'start_date', 'end_date'] },
+    }},
+    { type: 'function', function: {
+      name: 'get_museum_hours',
+      description: 'Get opening hours, ticket prices, and booking info for museums',
+      parameters: { type: 'object', properties: {
+        museum_name: { type: 'string' },
+        city:        { type: 'string' },
+      }, required: ['museum_name', 'city'] },
+    }},
+    { type: 'function', function: {
+      name: 'search_restaurants',
+      description: 'Find top-rated restaurants by cuisine and budget',
+      parameters: { type: 'object', properties: {
+        city:    { type: 'string' },
+        cuisine: { type: 'string' },
+        budget:  { type: 'string', enum: ['budget', 'mid-range', 'fine-dining'] },
+        limit:   { type: 'integer' },
+      }, required: ['city'] },
+    }},
+  ],
+  'route-optimizer-agent': [
+    { type: 'function', function: {
+      name: 'get_distance_matrix',
+      description: 'Get travel times and distances between multiple locations',
+      parameters: { type: 'object', properties: {
+        locations: { type: 'array', items: { type: 'string' } },
+        mode:      { type: 'string', enum: ['walking', 'transit', 'driving'] },
+      }, required: ['locations'] },
+    }},
+    { type: 'function', function: {
+      name: 'calculate_route',
+      description: 'Calculate the optimal visiting order for a list of attractions',
+      parameters: { type: 'object', properties: {
+        start_location: { type: 'string' },
+        attractions:    { type: 'array', items: { type: 'string' } },
+        optimize_for:   { type: 'string', enum: ['time', 'distance', 'cost'] },
+      }, required: ['start_location', 'attractions'] },
+    }},
+  ],
+};
+
+// ── Simulated tool handlers ───────────────────────────────────────────────────
+// Return realistic-looking fake data so the demo works without real API keys.
+
+type ToolArgs = Record<string, unknown>;
+
+const TOOL_HANDLERS: Record<string, (args: ToolArgs) => string> = {
+  search_destination_info: (a) => JSON.stringify({
+    destination: a['destination'],
+    highlights: ['Historic city center', 'World-class museums', 'Local cuisine'],
+    best_neighborhoods: ['Old Town', 'Cultural Quarter', 'Waterfront'],
+    local_tips: ['Book museums in advance', 'Use public transit', 'Try street food'],
+    currency: 'EUR',
+  }),
+  get_weather_forecast: (a) => JSON.stringify({
+    destination: a['destination'],
+    forecast: [
+      { date: a['start_date'], condition: 'Partly cloudy', high_c: 18, low_c: 12 },
+      { date: a['end_date'],   condition: 'Sunny',         high_c: 22, low_c: 14 },
+    ],
+    summary: 'Mild spring weather, light layers recommended',
+  }),
+  get_travel_advisories: (a) => JSON.stringify({
+    destination: a['destination'],
+    safety_level: 'Low risk',
+    advisory: 'Normal precautions apply',
+    visa_required: false,
+    emergency_number: '112',
+  }),
+  search_hotels: (a) => JSON.stringify({
+    destination: a['destination'],
+    results: [
+      { name: 'Grand Hotel Central',   stars: 4, price_per_night: 140, rating: 4.5 },
+      { name: 'Boutique Old Town Inn', stars: 3, price_per_night:  90, rating: 4.7 },
+      { name: 'Modern City Suites',    stars: 4, price_per_night: 120, rating: 4.3 },
+    ],
+  }),
+  check_availability: () => JSON.stringify({ available: true, rooms_left: 3, price_per_night: 130 }),
+  get_hotel_reviews:  () => JSON.stringify({ average_rating: 4.5, reviews: [
+    { score: 5, comment: 'Excellent location, very clean' },
+    { score: 4, comment: 'Great staff, comfortable beds' },
+  ]}),
+  search_flights: () => JSON.stringify({ results: [
+    { airline: 'AirEuro',  departure: '08:00', arrival: '10:30', price: 210, duration: '2h30m' },
+    { airline: 'SkyLink',  departure: '14:00', arrival: '16:45', price: 175, duration: '2h45m' },
+  ]}),
+  search_trains: () => JSON.stringify({ results: [
+    { operator: 'EuroRail',   departure: '09:00', arrival: '11:45', price: 65, class: '2nd' },
+    { operator: 'HighSpeed',  departure: '12:00', arrival: '13:50', price: 95, class: '1st' },
+  ]}),
+  get_taxi_rates: () => JSON.stringify({ base_fare: 3.50, per_km: 1.80, airport_flat_rate: 45, currency: 'EUR' }),
+  search_events: (a) => JSON.stringify({ destination: a['destination'], events: [
+    { name: 'Jazz Festival', date: a['start_date'], venue: 'City Park',      price: 25 },
+    { name: 'Food Market',   date: a['start_date'], venue: 'Central Square', price: 0  },
+    { name: 'Art Exhibition',date: a['end_date'],   venue: 'National Gallery',price: 15 },
+  ]}),
+  get_museum_hours: (a) => JSON.stringify({
+    museum: a['museum_name'],
+    hours: 'Tue–Sun 10:00–18:00, closed Monday',
+    ticket_price: 18,
+    booking_required: true,
+  }),
+  search_restaurants: (a) => JSON.stringify({ city: a['city'], restaurants: [
+    { name: 'La Piazza',     cuisine: 'Italian', rating: 4.7, avg_price: 35 },
+    { name: 'Bistro Moderne',cuisine: 'French',  rating: 4.5, avg_price: 45 },
+    { name: 'Street Kitchen',cuisine: 'Local',   rating: 4.8, avg_price: 15 },
+  ]}),
+  get_distance_matrix: (a) => {
+    const locs = (a['locations'] as string[]) ?? [];
+    return JSON.stringify({
+      locations: locs,
+      matrix: locs.map((_, i) => locs.map((__, j) => i === j ? 0 : Math.abs(i - j) * 12)),
+      unit: 'minutes',
+    });
+  },
+  calculate_route: (a) => JSON.stringify({
+    start: a['start_location'],
+    optimized_order: a['attractions'],
+    total_travel_time: `${((a['attractions'] as string[])?.length ?? 0) * 25} minutes`,
+    tip: 'Start early to avoid crowds at popular sites',
+  }),
+};
+
 // ── Agent callable functions ──────────────────────────────────────────────────
 
 async function callAgent(agentId: string, prompt: string): Promise<string> {
   const handle = agentHandles[agentId];
   if (!handle) throw new Error(`Unknown agent: ${agentId}`);
 
-  return handle.run(async () => {
-    const model       = handle.cfg('llm.model', 'gpt-4o-mini');
-    const temperature = handle.cfg('llm.temperature', 0.7);
-    const maxTokens   = handle.cfg('llm.max_tokens', 2048);
+  const tools = AGENT_TOOL_DEFS[agentId];
+  if (tools) {
+    // handle.chat() owns the tool loop; the SDK patches the OpenAI call and strips
+    // any tool whose dashboard toggle is OFF before forwarding to OpenAI.
+    return handle.chat({
+      client,
+      messages: [{ role: 'user', content: prompt }],
+      tools,
+      onTool: TOOL_HANDLERS,
+      maxRounds: 5,
+      maxTokens: 2048,
+    });
+  }
 
+  // No tools (itinerary-creator-agent) — plain completion
+  return handle.run(async () => {
+    const model      = handle.cfg('llm.model', 'gpt-4o-mini');
+    const temperature = handle.cfg('llm.temperature', 0.7);
+    const maxTokens  = handle.cfg('llm.max_tokens', 4096);
     const response = await client.chat.completions.create({
-      model,
+      model:       model as string,
       temperature: temperature as number,
-      max_tokens: maxTokens as number,
+      max_tokens:  maxTokens  as number,
       messages: [{ role: 'user', content: prompt }],
     });
     return response.choices[0].message.content ?? '';

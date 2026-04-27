@@ -106,6 +106,8 @@ export class SyrinCore implements ICallTarget {
         { name: 'presence_penalty',  type: 'float', default: null, constraints: { ge: -2.0, le: 2.0 } },
         { name: 'seed',              type: 'int',   default: null },
         { name: 'n',                 type: 'int',   default: null, constraints: { ge: 1, le: 10 } },
+        { name: 'disabled_tools',    type: 'list',  default: null },
+        { name: 'enabled_tools',     type: 'list',  default: null },
       ],
       prompt: [
         { name: 'system_prompt', type: 'str', default: null, multiline: true },
@@ -177,6 +179,24 @@ export class SyrinCore implements ICallTarget {
         sections: Object.fromEntries(
           Object.entries(agentSections).map(([sec, v]) => [sec, v])
         ),
+      };
+    }
+
+    // Per-agent tools sections from AgentHandle.tools([...])
+    const agentToolNames = (this as unknown as { _agentToolNames?: Record<string, string[]> })._agentToolNames ?? {};
+    for (const [agentId, toolNames] of Object.entries(agentToolNames)) {
+      if (!toolNames.length) continue;
+      if (!agentsSections[agentId]) {
+        agentsSections[agentId] = { label: agentId, sections: {} };
+      }
+      const agentEntry = agentsSections[agentId] as { label: string; sections: Record<string, unknown> };
+      agentEntry.sections['tools'] = {
+        fields: toolNames.map(name => ({
+          name,
+          type: 'bool',
+          default: true,
+          description: `Toggle ${name} on or off remotely`,
+        })),
       };
     }
 
@@ -399,8 +419,17 @@ export class SyrinCore implements ICallTarget {
       configApplied = true;
     }
 
-    // Tool filtering
-    const disabledTools = effectiveConfig['disabled_tools'] as string[] | undefined;
+    // Per-agent tool states from AgentHandle.tools() + dashboard toggles
+    const agentToolStates = session.agentToolStates ?? {};
+    const perAgentStates = resolvedAgentId ? (agentToolStates[resolvedAgentId] ?? {}) : {};
+    const agentDisabled = Object.entries(perAgentStates)
+      .filter(([, enabled]) => !enabled)
+      .map(([name]) => name);
+
+    // Tool filtering — merge global disabled_tools with per-agent disabled tools
+    const disabledToolsRaw = effectiveConfig['disabled_tools'] as string[] | undefined;
+    const allDisabled = [...(disabledToolsRaw ?? []), ...agentDisabled];
+    const disabledTools = allDisabled.length > 0 ? allDisabled : undefined;
     const enabledTools  = effectiveConfig['enabled_tools']  as string[] | null | undefined;
     if ((disabledTools?.length || enabledTools !== undefined) && Array.isArray(modifiedRaw['tools'])) {
       const disabled = new Set<string>(disabledTools ?? []);
@@ -566,7 +595,9 @@ export class SyrinCore implements ICallTarget {
       governance_applied: governanceApplied,
       agent_id: agentId,
       ..._runCtxFields(),
-      ...(toolCalls?.length ? { tool_calls: toolCalls } : {}),
+      // tool_calls arguments are sensitive — only captured when captureContent is on
+      ...(this.config.captureContent && toolCalls?.length ? { tool_calls: toolCalls } : {}),
+      // tool_definitions are metadata (names + schemas only), always captured
       ...(toolDefinitions?.length ? { tool_definitions: toolDefinitions } : {}),
       call_index: updatedSession?.callIndex ?? 0,
       message_count: modifiedMessages.length,
@@ -601,12 +632,10 @@ export class SyrinCore implements ICallTarget {
     }
 
     // Auto-emit a TOOL_CALL event for each tool the model requested.
-    // This pairs with the TOOL_RESULT events the user emits after executing tools.
+    // arguments are only included when captureContent=true (may contain sensitive data).
     if (toolCalls?.length) {
       for (const tc of toolCalls) {
-        let parsedArgs: unknown;
-        try { parsedArgs = JSON.parse(tc.arguments); } catch { parsedArgs = { _raw: tc.arguments }; }
-        const tcEvent = {
+        const tcEvent: Record<string, unknown> = {
           event_id: generateId('evt_'),
           event_type: 'TOOL_CALL',
           timestamp: nowIso(),
@@ -614,10 +643,38 @@ export class SyrinCore implements ICallTarget {
           agent_id: agentId,
           tool_call_id: tc.id,
           tool_name: tc.name,
-          arguments: parsedArgs,
           ..._runCtxFields(),
         };
+        if (this.config.captureContent) {
+          let parsedArgs: unknown;
+          try { parsedArgs = JSON.parse(tc.arguments); } catch { parsedArgs = { _raw: tc.arguments }; }
+          tcEvent['arguments'] = parsedArgs;
+        }
         this._emitter.emit(tcEvent as unknown as SyrinEvent, sessionId);
+      }
+    }
+
+    // Emit TOOL_RESULT events for role="tool" messages in the current call.
+    // Tool results flow back as messages with role="tool" in the next LLM call —
+    // scanning them here lets the backend correlate inputs and outputs by tool_call_id.
+    if (this.config.captureContent) {
+      for (const m of modifiedMessages) {
+        if (m.role !== 'tool') continue;
+        const toolCallId = (m as unknown as Record<string, unknown>)['tool_call_id'] as string | undefined;
+        const content = m.content;
+        if (content == null) continue;
+        const resultStr = typeof content === 'string' ? content : JSON.stringify(content);
+        const trEvent = {
+          event_id: generateId('evt_'),
+          event_type: 'TOOL_RESULT',
+          timestamp: nowIso(),
+          session_id: sessionId,
+          agent_id: agentId,
+          tool_call_id: toolCallId ?? '',
+          tool_result: resultStr,
+          ..._runCtxFields(),
+        };
+        this._emitter.emit(trEvent as unknown as SyrinEvent, sessionId);
       }
     }
 
