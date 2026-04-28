@@ -14,6 +14,7 @@ import { GovernanceResponse } from '@/core/governance.js';
 import { GovernanceCheckpointRestoredError } from '@/errors.js';
 import { fireConfigChange, fireAlert } from '@/observability/hooks.js';
 import { generateId, nowIso, stableHash } from '@/utils/helpers.js';
+import { parseBilling, logBillingOnIngest } from '@/billing.js';
 
 const MAX_QUEUE_SIZE = 1000;
 
@@ -29,6 +30,8 @@ export class Emitter {
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private flushing = false;
   private flushPromise: Promise<void> | null = null;
+  /** Unix ms until which the emitter must not flush (rate-limit backoff). */
+  private retryAfterUntil = 0;
   /** Registered callbacks for context injections. */
   private injectionCallbacks: Set<(injection: ContextInjection) => void> = new Set();
 
@@ -56,13 +59,34 @@ export class Emitter {
   emit(event: SyrinEvent, sessionId: string): void {
     const queued: QueuedEvent = { event, sessionId };
 
-    // Enforce max queue size: drop oldest
+    // Enforce max queue size: drop the 2 oldest events (one becomes the sentinel slot,
+    // one makes room for the incoming event) so the queue never exceeds MAX_QUEUE_SIZE.
     if (this.queue.length >= MAX_QUEUE_SIZE) {
-      const excess = this.queue.length - MAX_QUEUE_SIZE + 1;
-      this.queue.splice(0, excess);
-      if (this.config.debug) {
-        console.warn(`[Syrin] Queue full, dropped ${excess} oldest event(s).`);
-      }
+      const [dropped] = this.queue.splice(0, 2); // remove 2; sentinel + new event take their slots
+      console.warn(
+        `[Syrin SDK] Event queue full (${MAX_QUEUE_SIZE}): dropped event ` +
+        `type=${dropped.event.event_type} id=${String(dropped.event.event_id)}. ` +
+        'Increase SYRIN_MAX_QUEUE_SIZE or reduce event rate.'
+      );
+      // Inject a sentinel so the backend receives an auditable record of the loss
+      const overflowEvent: SyrinEvent = {
+        event_id: generateId('evt_'),
+        event_type: 'QUEUE_OVERFLOW',
+        timestamp: nowIso(),
+        session_id: dropped.sessionId,
+        dropped_event_id: dropped.event.event_id,
+        dropped_event_type: dropped.event.event_type,
+        queue_size: MAX_QUEUE_SIZE,
+        model: '',
+        provider: '',
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: 0,
+        stream: false,
+        config_applied: false,
+        duration_ms: 0,
+      } as unknown as SyrinEvent;
+      this.queue.push({ event: overflowEvent, sessionId: dropped.sessionId });
     }
 
     this.queue.push(queued);
@@ -71,7 +95,7 @@ export class Emitter {
     if (this.queue.length >= this.config.batchSize) {
       this._cancelIdleTimer();
       this.flush().catch((err) => {
-        if (this.config.debug) console.warn('[Syrin] Batch-full flush error:', err);
+        console.warn('[Syrin SDK] Batch-full flush error:', err);
       });
     } else {
       this._scheduleIdleFlush();
@@ -81,7 +105,16 @@ export class Emitter {
   async flush(): Promise<void> {
     if (this.config.offline) {
       if (this.config.debug) {
-        console.log('[Syrin] Offline mode — skipping flush.');
+        console.log('[Syrin SDK] Offline mode — skipping flush.');
+      }
+      return;
+    }
+
+    // Respect Retry-After backoff from a prior 429 response
+    if (this.retryAfterUntil > 0 && Date.now() < this.retryAfterUntil) {
+      if (this.config.debug) {
+        const waitSec = ((this.retryAfterUntil - Date.now()) / 1000).toFixed(1);
+        console.log(`[Syrin SDK] Rate-limited — skipping flush for ${waitSec}s more.`);
       }
       return;
     }
@@ -108,7 +141,7 @@ export class Emitter {
     this.idleTimer = setTimeout(() => {
       this.idleTimer = null;
       this.flush().catch((err) => {
-        if (this.config.debug) console.warn('[Syrin] Idle flush error:', err);
+        if (this.config.debug) console.warn('[Syrin SDK] Idle flush error:', err);
       });
     }, this.config.idleFlushMs);
     // Allow Node.js to exit even if timer is pending
@@ -132,15 +165,15 @@ export class Emitter {
       });
       if (!response.ok) {
         console.warn(
-          `[Syrin] Backend health check failed (HTTP ${response.status}). ` +
+          `[Syrin SDK] Backend health check failed (HTTP ${response.status}). ` +
           'Check your backendUrl setting.'
         );
       } else if (this.config.debug) {
-        console.log('[Syrin] Backend health check OK.');
+        console.log('[Syrin SDK] Backend health check OK.');
       }
     } catch {
       console.warn(
-        `[Syrin] Syrin backend unreachable at ${this.config.backendUrl}. ` +
+        `[Syrin SDK] Syrin backend unreachable at ${this.config.backendUrl}. ` +
         'Events will be queued locally. Check your backendUrl setting.'
       );
     }
@@ -175,22 +208,52 @@ export class Emitter {
       });
 
       if (!response.ok) {
-        console.warn(
-          `[Syrin] Ingest failed (HTTP ${response.status}). Re-queuing events.`
-        );
-        this._requeue(batch);
+        if (response.status === 401 || response.status === 403) {
+          // Auth errors won't resolve themselves — drop the batch and warn loudly.
+          console.warn(
+            `[Syrin SDK] ⚠ Backend returned HTTP ${response.status} — check your API key and backend URL. ` +
+            `${batch.length} event(s) dropped. Correct the key and restart the process.`
+          );
+          // No requeue
+        } else if (response.status === 429) {
+          // Rate-limited — honour Retry-After if present, else back off 60 s
+          const retryAfterHeader = response.headers.get('Retry-After');
+          const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 60;
+          const backoffMs = (isNaN(retryAfterSec) ? 60 : retryAfterSec) * 1000;
+          this.retryAfterUntil = Date.now() + backoffMs;
+          console.warn(
+            `[Syrin SDK] Rate limit exceeded (HTTP 429). ` +
+            `Pausing ingest for ${(backoffMs / 1000).toFixed(0)}s. Events re-queued.`
+          );
+          this._requeue(batch);
+        } else if (response.status === 402) {
+          // Billing limit — drop and warn; retrying won't help until the plan is upgraded.
+          const body = await response.json().catch(() => ({} as Record<string, unknown>)) as Record<string, unknown>;
+          const code = String(body['code'] ?? 'PLAN_LIMIT_EXCEEDED');
+          console.warn(
+            `[Syrin SDK] ⚠ Billing limit reached (HTTP 402, code=${code}). ` +
+            `${batch.length} event(s) dropped. Upgrade at https://app.syrin.ai/billing`
+          );
+          // No requeue
+        } else {
+          // 5xx or unexpected — requeue for retry
+          console.warn(
+            `[Syrin SDK] Ingest failed (HTTP ${response.status}). Re-queuing ${batch.length} event(s).`
+          );
+          this._requeue(batch);
+        }
       } else {
         const data = (await response.json()) as IngestResponse;
 
         if (this.config.debug) {
           console.log(
-            `[Syrin] Flushed ${batch.length} event(s). Backend ok=${data.ok}`
+            `[Syrin SDK] Flushed ${batch.length} event(s). Backend ok=${data.ok}`
           );
         }
 
         if (data.config_updates && Object.keys(data.config_updates).length > 0) {
           if (this.config.debug) {
-            console.log('[Syrin] Received config_updates:', data.config_updates);
+            console.log('[Syrin SDK] Received config_updates:', data.config_updates);
           }
           const sessionIds = new Set(batch.map((q) => q.sessionId));
           for (const sid of sessionIds) {
@@ -201,7 +264,7 @@ export class Emitter {
 
         if (data.tool_validation_results && Object.keys(data.tool_validation_results).length > 0) {
           if (this.config.debug) {
-            console.log('[Syrin] Received tool_validation_results:', data.tool_validation_results);
+            console.log('[Syrin SDK] Received tool_validation_results:', data.tool_validation_results);
           }
           const sessionIds = new Set(batch.map((q) => q.sessionId));
           for (const sid of sessionIds) {
@@ -259,15 +322,21 @@ export class Emitter {
             this.emit(injEvent, primarySid);
           }
           if (this.config.debug) {
-            console.log(`[Syrin] Received ${incomingInjections.length} context injection(s).`);
+            console.log(`[Syrin SDK] Received ${incomingInjections.length} context injection(s).`);
           }
+        }
+
+        const billingData = (data as unknown as Record<string, unknown>)['billing'];
+        if (billingData) {
+          const billing = parseBilling(billingData);
+          if (billing) logBillingOnIngest(billing);
         }
       }
     } catch (err) {
       if (this.config.debug) {
-        console.warn('[Syrin] Ingest network error (detail):', err);
+        console.warn('[Syrin SDK] Ingest network error (detail):', err);
       } else {
-        console.warn('[Syrin] Failed to reach Syrin backend. Events re-queued.');
+        console.warn('[Syrin SDK] Failed to reach Syrin backend. Events re-queued.');
       }
       this._requeue(batch);
     }
@@ -285,34 +354,34 @@ export class Emitter {
     }
 
     if (gov.loopDetected) {
-      console.warn(`[Syrin] Backend detected loop for session ${sessionId} (drift_score=${gov.driftScore}, incident=${gov.incidentId})`);
+      console.warn(`[Syrin SDK] Backend detected loop for session ${sessionId} (drift_score=${gov.driftScore}, incident=${gov.incidentId})`);
     }
 
     for (const action of gov.actions) {
       const actionType = action.type;
       if (actionType === 'stop') {
         this.sessionStore.appendGovernanceAction(sessionId, action);
-        console.warn(`[Syrin] Backend sent STOP action for session ${sessionId} — reason: ${String(action['reason'] ?? '?')}`);
+        console.warn(`[Syrin SDK] Backend sent STOP action for session ${sessionId} — reason: ${String(action['reason'] ?? '?')}`);
       } else if (actionType === 'inject_message') {
         this.sessionStore.appendInjectedMessage(sessionId, {
           role: (action['role'] as string) ?? 'system',
           content: (action['content'] as string) ?? '',
         });
         if (this.config.debug) {
-          console.log(`[Syrin] inject_message queued for session ${sessionId}`);
+          console.log(`[Syrin SDK] inject_message queued for session ${sessionId}`);
         }
       } else if (actionType === 'alert') {
         fireAlert(action as Record<string, unknown>);
-        console.info(`[Syrin][${String(action['level'] ?? 'info')}] alert for session ${sessionId}: ${String(action['message'] ?? '')}`);
+        console.info(`[Syrin SDK][${String(action['level'] ?? 'info')}] alert for session ${sessionId}: ${String(action['message'] ?? '')}`);
       } else if (actionType === 'checkpoint') {
         this.sessionStore.appendGovernanceAction(sessionId, action);
         if (this.config.debug) {
-          console.log(`[Syrin] checkpoint action queued for session ${sessionId}`);
+          console.log(`[Syrin SDK] checkpoint action queued for session ${sessionId}`);
         }
       } else if (actionType === 'restore') {
         const checkpointId = (action['checkpoint_id'] ?? action['checkpointId']) as string | undefined;
         const reason = (action['reason'] as string | undefined) ?? 'Restored by Syrin governance';
-        console.info(`[Syrin] restore action received for session ${sessionId} (checkpoint=${checkpointId})`);
+        console.info(`[Syrin SDK] restore action received for session ${sessionId} (checkpoint=${checkpointId})`);
         throw new GovernanceCheckpointRestoredError(checkpointId ?? 'unknown', reason);
       } else if (actionType === 'config_override') {
         // Backend explicitly overrides one or more config keys.
@@ -322,7 +391,7 @@ export class Emitter {
           const override = { [fieldPath]: value };
           this.sessionStore.applyConfigUpdate(sessionId, override);
           if (this.config.debug) {
-            console.log(`[Syrin] config_override applied for session ${sessionId}: ${fieldPath}=${JSON.stringify(value)}`);
+            console.log(`[Syrin SDK] config_override applied for session ${sessionId}: ${fieldPath}=${JSON.stringify(value)}`);
           }
           // Inject correction_hint as a system message if present
           const hint = action['correction_hint'] as string | undefined;
@@ -333,7 +402,7 @@ export class Emitter {
             });
           }
         } else if (this.config.debug) {
-          console.warn(`[Syrin] config_override missing field_path/key or value — ignoring`, action);
+          console.warn(`[Syrin SDK] config_override missing field_path/key or value — ignoring`, action);
         }
       } else if (actionType === 'require_approval') {
         const approvalId = action['approval_id'] as string | undefined;
@@ -342,7 +411,7 @@ export class Emitter {
 
         if (!approvalId) {
           if (this.config.debug) {
-            console.warn('[Syrin] require_approval action missing approval_id — ignoring');
+            console.warn('[Syrin SDK] require_approval action missing approval_id — ignoring');
           }
           return;
         }
@@ -355,7 +424,7 @@ export class Emitter {
             `(reason: ${reason}). Approval ID: ${approvalId}. ` +
             'Inform the user this action is pending approval. Do NOT retry the tool call.',
         });
-        console.warn(`[Syrin] require_approval for session ${sessionId} — tool=${toolName} approval_id=${approvalId}`);
+        console.warn(`[Syrin SDK] require_approval for session ${sessionId} — tool=${toolName} approval_id=${approvalId}`);
       }
     }
   }
@@ -364,16 +433,18 @@ export class Emitter {
     for (const assignment of assignments) {
       if (!assignment.overrides || Object.keys(assignment.overrides).length === 0) continue;
       if (this.config.debug) {
-        console.log(`[Syrin] Experiment variant assigned: ${assignment.variantName} (session=${sessionId})`);
+        console.log(`[Syrin SDK] Experiment variant assigned: ${assignment.variantName} (session=${sessionId})`);
       }
       this.sessionStore.mergeExperimentOverrides(sessionId, assignment.overrides);
 
-      // Emit EXPERIMENT_ASSIGNED telemetry event so backend can track variant distribution
+      // Emit EXPERIMENT_ASSIGNED telemetry event so backend can track variant distribution.
+      // Use emit() so overflow sentinel logic applies; experiment events never trigger further
+      // experiment handling because they carry no `experiments` field in the response.
       const session = this.sessionStore.getSession(sessionId);
       const expEvent = {
-        event_id: `evt_${Date.now()}_exp`,
+        event_id: generateId('evt_'),
         event_type: 'EXPERIMENT_ASSIGNED' as const,
-        timestamp: new Date().toISOString(),
+        timestamp: nowIso(),
         session_id: sessionId,
         agent_id: session?.agentId ?? this.config.agentId,
         experiment_id: assignment.experimentId,
@@ -381,14 +452,28 @@ export class Emitter {
         variant_name: assignment.variantName,
         overrides: assignment.overrides,
       };
-      // Emit without infinite loop: add directly to queue without triggering experiment handling again
-      this.queue.push({ event: expEvent as unknown as SyrinEvent, sessionId });
+      this.emit(expEvent as unknown as SyrinEvent, sessionId);
     }
   }
 
   private _requeue(batch: QueuedEvent[]): void {
+    // Mirror Python: drop events that have failed 3+ times to prevent indefinite re-queuing
+    // when the backend is persistently unavailable.
+    const eligible: QueuedEvent[] = [];
+    for (const item of batch) {
+      const retries = ((item.event as unknown as Record<string, unknown>)['_syrin_retry'] as number | undefined) ?? 0;
+      if (retries >= 3) {
+        console.warn(
+          `[Syrin SDK] Dropping event type=${item.event.event_type} id=${String(item.event.event_id)} ` +
+          `after ${retries} failed delivery attempt(s).`
+        );
+        continue;
+      }
+      (item.event as unknown as Record<string, unknown>)['_syrin_retry'] = retries + 1;
+      eligible.push(item);
+    }
     const available = MAX_QUEUE_SIZE - this.queue.length;
-    const toRequeue = batch.slice(0, Math.max(0, available));
+    const toRequeue = eligible.slice(0, Math.max(0, available));
     this.queue.unshift(...toRequeue);
   }
 

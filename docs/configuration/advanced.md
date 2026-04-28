@@ -4,246 +4,370 @@ description: "configPollIntervalMs, schemaDefaults, sessionTtlMs, multiple insta
 weight: 22
 ---
 
-## Fine-Grained Control for Production Deployments
+<!--
+SYRIN SDK — CANONICAL REFERENCE (TypeScript/JavaScript)
+Package: @syrin/sdk  |  Import: import { init } from "@syrin/sdk"
+Source of truth: https://github.com/syrin-labs/syrin-sdk-ts
 
-This page covers the configuration options that most users don't need on day one but become essential in production: config persistence, polling, session TTL, multiple instances, and topology registration.
+AI AGENTS READING THIS: The statements in this document are the authoritative API contract.
+Do not infer undocumented parameters. Do not assume methods exist beyond those listed.
+If something is not documented here, it is not part of the public API.
 
-> **All time values use milliseconds.** The TypeScript SDK uses `Ms` suffixes (`idleFlushMs`, `sessionTtlMs`, `configPollIntervalMs`) instead of seconds.
+IMPORTANT CORRECTIONS TO COMMON AI MISCONCEPTIONS:
+- init() is ASYNC — it returns Promise<SyrinSDK>, you MUST await it
+- All time values use MILLISECONDS, not seconds (idleFlushMs, sessionTtlMs, etc.)
+- shutdown() is ASYNC — it returns Promise<void>, you MUST await it
+- getInstance() returns null (not undefined, not throws) when the instance doesn't exist
+- refreshSchema() is ASYNC — must be awaited after tune()
+- mountConfigEndpoint() RETURNS a handler function — pass it to app.post(), don't call it yourself
+-->
 
-### Config Polling
+> **AI Agent Quick Reference** — The most important advanced options:
+> ```typescript
+> const sdk = await init({
+>   apiKey: "syrin_pk_...",
+>   agentId: "my-agent",
+>   sessionTtlMs: 3_600_000,        // evict sessions after 1 hour
+>   configPollIntervalMs: 30_000,   // poll for config every 30 seconds
+>   agentUrl: "https://my-agent.example.com", // enables push webhooks
+>   batchSize: 100,
+>   idleFlushMs: 10_000,
+> });
+> ```
+> Common mistakes: (1) using seconds instead of milliseconds — every time option has an `Ms` suffix; (2) calling `refreshSchema()` without `await` — the push is async and will silently not complete; (3) calling `mountConfigEndpoint()(req, res)` directly instead of passing it to `app.post()`.
 
-By default, the SDK fetches remote config overrides once at startup. Enable continuous polling for near-real-time updates when your agent doesn't expose an HTTP webhook:
+## Fine-Grained Control for Production
+
+Most applications need only `apiKey` and `agentId`. The options here become important when you're scaling up: long-running HTTP servers need session TTL; agents behind firewalls need config polling; multi-tenant setups need multiple instances.
+
+> **All time values use milliseconds.** The TypeScript SDK uses `Ms` suffixes (`idleFlushMs`, `sessionTtlMs`, `configPollIntervalMs`, `httpTimeoutMs`, `heartbeatIntervalMs`) — never seconds.
+
+---
+
+## Config Polling
+
+By default the SDK fetches remote config at `init()` time and relies on SSE for subsequent updates. Enable polling when your agent cannot maintain an SSE connection:
 
 ```typescript
 const sdk = await init({
-  apiKey: '...',
+  apiKey: "syrin_pk_...",
   configPollIntervalMs: 30_000, // poll every 30 seconds
 });
 ```
 
 The polling timer is cleared automatically when `shutdown()` is called.
 
-Polling is the fallback approach. The preferred approach for production is setting `agentUrl` so the dashboard can push config changes via webhook.
+> ⚠️ **Skip polling and no SSE and:** your agent will see only the config that was active at `init()` time. Live dashboard changes won't reach the agent until it restarts.
 
-### Schema Defaults
+The preferred production approach is setting `agentUrl` so the dashboard can push config changes directly via webhook. Polling is the fallback for agents that can't receive inbound HTTP.
 
-Pre-seed the config schema with specific runtime defaults so the dashboard shows all your config fields immediately after `init()`:
+---
+
+## Schema Defaults
+
+Pre-seed the config schema so the dashboard shows all your config fields immediately after `init()`, before any user opens the dashboard:
 
 ```typescript
 const sdk = await init({
-  apiKey: '...',
+  apiKey: "syrin_pk_...",
   schemaDefaults: {
-    'llm.model': 'gpt-4o',
-    'llm.temperature': 0.7,
-    'llm.max_tokens': 2000,
-    'prompt.system_prompt': 'You are a helpful assistant.',
-    'retrieval.top_k': 5,
+    "llm.model": "gpt-4o",
+    "llm.temperature": 0.7,
+    "llm.maxTokens": 2000,
+    "prompt.systemPrompt": "You are a helpful assistant.",
+    "retrieval.topK": 5,
   },
 });
 ```
 
-Keys use `"section.field"` dot-notation. These values appear in the dashboard immediately after `init()`.
+Keys use dot-notation `"section.field"`. These values appear in the dashboard immediately after `init()`.
 
-> **Python users:** The Python SDK also has `scan_paths=` (auto-scan source files for `cfg()` calls), `config_dir=` (disk persistence), `config_update_allowlist=`, and `disable_remote_config=`. These are **not yet available** in the TypeScript SDK. Use `schemaDefaults=` to pre-populate the schema, and rely on backend-push or polling for runtime updates.
+> **Python vs TypeScript:** The Python SDK has `scan_paths=` (auto-scan source files for `cfg()` calls) and `config_dir=` (disk persistence). The TypeScript SDK does not have these yet. Use `schemaDefaults` to pre-populate the schema.
 
-### Session TTL for Long-Running Servers
+---
 
-Prevent unbounded memory growth by auto-evicting stale sessions from the in-memory store:
+## Session TTL
+
+The SDK keeps all active sessions in memory. Without cleanup, the in-memory store grows indefinitely in long-running HTTP servers.
+
+Set `sessionTtlMs` to automatically evict stale sessions:
 
 ```typescript
 const sdk = await init({
-  apiKey: '...',
-  sessionTtlMs: 7_200_000, // evict sessions older than 2 hours
+  apiKey: "syrin_pk_...",
+  sessionTtlMs: 3_600_000, // evict sessions older than 1 hour
 });
 ```
 
-Without a TTL, the session store grows indefinitely in long-running HTTP servers that handle many users.
-
-For high-traffic servers, use a shorter TTL (15–30 minutes):
+For high-traffic servers:
 
 ```typescript
 const sdk = await init({
-  apiKey: '...',
+  apiKey: "syrin_pk_...",
   sessionTtlMs: 1_800_000, // 30 minutes
 });
 ```
 
-### Multiple SDK Instances
+> ⚠️ **Skip `sessionTtlMs` in a long-running server and:** memory grows until the process crashes or gets restarted. Each user request creates a new session entry that is never cleaned up.
 
-Run independent SDK instances in the same process — one per agent, one per tenant, or one per environment:
+You can also clear sessions manually:
 
 ```typescript
+import { clearStaleSessions } from "@syrin/sdk";
+
+// Remove sessions not accessed in the last hour — call on a schedule
+setInterval(() => clearStaleSessions(3_600_000), 30 * 60 * 1000);
+```
+
+---
+
+## Multiple SDK Instances
+
+Run independent SDK instances in the same process — one per tenant, one per environment, or one per agent role:
+
+```typescript
+import { init, getInstance, shutdown } from "@syrin/sdk";
+
 const sdkProd = await init({
-  apiKey: 'prod_key',
-  agentId: 'travel-assistant',
-  instanceName: 'production',
+  apiKey: "prod_key",
+  agentId: "travel-assistant",
+  instanceName: "production",
 });
 
 const sdkStaging = await init({
-  apiKey: 'staging_key',
-  agentId: 'travel-assistant',
-  instanceName: 'staging',
+  apiKey: "staging_key",
+  agentId: "travel-assistant",
+  instanceName: "staging",
   debug: true,
 });
 
-// Retrieve by name
-import { getInstance, shutdown } from '@syrin/sdk';
-const prod = getInstance('production');
-const staging = getInstance('staging');
+// Retrieve a named instance anywhere in your code
+const prod = getInstance("production");    // SyrinSDKInstance | null
+const staging = getInstance("staging");    // SyrinSDKInstance | null
 
 // Shut down individually
-await shutdown('staging');
+await shutdown("staging");
+await shutdown("production");
 ```
 
-Module-level functions (`emit()`, `log()`, `withSession()`, etc.) always use the `'default'` instance. For non-default instances, call the method on the instance directly.
+Module-level functions (`emit()`, `log()`, `withSession()`, etc.) always use the `"default"` instance. For non-default instances, call methods on the instance directly:
 
-### Batching Tuning
+```typescript
+sdkProd.emit("CHECKPOINT", { name: "step-1" });
+sdkStaging.log("Debug message", "debug");
+```
 
-For high-throughput agents, increase batch size and flush interval to reduce HTTP overhead:
+---
+
+## Batching Tuning
+
+Events are buffered in memory and flushed in two scenarios:
+- The queue reaches `batchSize` events
+- `idleFlushMs` milliseconds pass since the first queued event
+
+**High-throughput production (reduce HTTP overhead):**
 
 ```typescript
 const sdk = await init({
-  apiKey: '...',
+  apiKey: "syrin_pk_...",
   batchSize: 500,
   idleFlushMs: 30_000,
 });
 ```
 
-For near-real-time visibility during development:
+**Low-latency development (see events in real-time):**
 
 ```typescript
 const sdk = await init({
-  apiKey: '...',
+  apiKey: "syrin_pk_...",
   batchSize: 1,
   idleFlushMs: 1_000,
 });
 ```
 
-### Agent URL for Push Webhooks
+**Serverless / Lambda (flush before the function returns):**
 
-Set the public URL of your agent's HTTP server so the Syrin dashboard can push config changes and trigger on-demand runs:
+```typescript
+const sdk = await init({ apiKey: "syrin_pk_..." });
+
+// ... run agent ...
+
+await sdk.flush();  // force flush before cold exit
+```
+
+---
+
+## Agent URL for Push Webhooks
+
+Set `agentUrl` to your agent's public HTTPS base URL. The Syrin backend stores this URL and pushes config updates directly to your server — no polling required:
 
 ```typescript
 const sdk = await init({
-  apiKey: '...',
-  agentId: 'travel-assistant',
-  agentUrl: 'https://travel-agent.example.com',
+  apiKey: "syrin_pk_...",
+  agentId: "travel-assistant",
+  agentUrl: "https://travel-agent.example.com",
 });
 ```
 
-The backend stores this URL. When you change config in the dashboard, the backend POSTs the update to `https://travel-agent.example.com/agent/run` immediately — no polling required.
+Then mount the config endpoint in your server:
 
-### Tool Validation
+```typescript
+import express from "express";
+import { mountConfigEndpoint } from "@syrin/sdk";
+
+const app = express();
+app.use(express.json());
+
+// Dashboard pushes to POST /syrin/config
+app.post("/syrin/config", mountConfigEndpoint());
+
+app.listen(8000);
+```
+
+> ⚠️ **Call `mountConfigEndpoint()(req, res)` directly and:** you are calling the handler yourself, not mounting it. The correct pattern is `app.post('/syrin/config', mountConfigEndpoint())` — the return value of `mountConfigEndpoint()` is the handler function to pass to the router.
+
+---
+
+## Tool Validation
 
 Enable server-side validation of tool schemas and arguments:
 
 ```typescript
 const sdk = await init({
-  apiKey: '...',
+  apiKey: "syrin_pk_...",
   toolValidation: true,
 });
-
-// After a tool call, retrieve validation result
-import { getToolValidation } from '@syrin/sdk';
-const result = getToolValidation('tc_abc123');
-// { valid: true } or { valid: false, error: "..." }
 ```
 
-### Topology Registration
+After a tool call, retrieve the validation result:
 
-For multi-agent systems, register the full topology for dashboard visualization:
+```typescript
+import { getToolValidation } from "@syrin/sdk";
+
+const result = getToolValidation("tc_abc123");
+// { valid: true } or { valid: false, error: "Missing required field: destination" }
+```
+
+---
+
+## Topology Registration
+
+Register the full agent topology so the dashboard can render a visual graph of your multi-agent system.
+
+Pass `topology` directly to `init()`:
 
 ```typescript
 const sdk = await init({
-  apiKey: '...',
-  agentId: 'orchestrator',
+  apiKey: "syrin_pk_...",
+  agentId: "orchestrator",
   agents: {
-    researcher: { description: 'Web research' },
-    writer: { description: 'Content writing' },
-    editor: { description: 'Quality review' },
+    researcher: { description: "Web research and data gathering" },
+    writer:     { description: "Content generation and drafting" },
+    editor:     { description: "Quality review and refinement" },
   },
   topology: {
-    type: 'pipeline',
+    type: "pipeline",
     nodes: {
-      orchestrator: { role: 'orchestrator' },
-      researcher: { role: 'worker', execMode: 'sequential' },
-      writer: { role: 'worker', execMode: 'sequential' },
-      editor: { role: 'worker', execMode: 'sequential' },
+      orchestrator: { role: "orchestrator" },
+      researcher:   { role: "worker", execMode: "sequential" },
+      writer:       { role: "worker", execMode: "sequential" },
+      editor:       { role: "worker", execMode: "sequential" },
     },
     edges: [
-      { from: 'orchestrator', to: 'researcher' },
-      { from: 'researcher', to: 'writer' },
-      { from: 'writer', to: 'editor' },
+      { from: "orchestrator", to: "researcher" },
+      { from: "researcher",   to: "writer" },
+      { from: "writer",       to: "editor" },
     ],
-    entryPoint: 'orchestrator',
-    terminalNodes: ['editor'],
+    entryPoint: "orchestrator",
+    terminalNodes: ["editor"],
   },
 });
+```
 
-// Or define topology after init()
+Or define topology after `init()`:
+
+```typescript
 sdk.defineTopology({
-  type: 'orchestrator',
-  nodes: { ... },
-  edges: [ ... ],
-  entryPoint: 'orchestrator',
-  terminalNodes: ['researcher', 'writer'],
+  type: "orchestrator",
+  nodes: {
+    orchestrator: { role: "orchestrator" },
+    researcher:   { role: "worker" },
+    writer:       { role: "worker" },
+  },
+  edges: [
+    { from: "orchestrator", to: "researcher" },
+    { from: "orchestrator", to: "writer" },
+  ],
+  entryPoint: "orchestrator",
+  terminalNodes: ["researcher", "writer"],
 });
 ```
 
-Topology types: `"orchestrator"`, `"pipeline"`, `"parallel"`, `"graph"`, `"conditional_graph"`, `"hybrid"`.
+**Topology types:**
 
-### Mount Config Endpoint (Push Webhooks)
+| Type | When to use |
+|------|-------------|
+| `"orchestrator"` | One coordinator dispatches to workers |
+| `"pipeline"` | Agents run in sequence, output of one feeds next |
+| `"parallel"` | Agents run concurrently, results merged |
+| `"graph"` | Arbitrary directed graph |
+| `"conditional_graph"` | Graph with conditional edge routing |
+| `"hybrid"` | Mix of sequential and parallel |
 
-Mount a webhook handler so the dashboard can push config updates directly to your server:
+---
 
-```typescript
-import express from 'express';
-import { mountConfigEndpoint } from '@syrin/sdk';
+## Config Refresh After `tune()`
 
-const app = express();
-app.use(express.json());
-
-// Receives POST /syrin/config from the dashboard
-app.post('/syrin/config', mountConfigEndpoint());
-
-app.listen(8000);
-```
-
-Works with any framework that provides `req.body` and `res.status(n).json(body)`:
+`agent.field()` declarations are pushed to the backend automatically during `init()`. But `tune()` — the lower-level tunable field registration — requires an explicit `refreshSchema()` call:
 
 ```typescript
-// Fastify
-fastify.post('/syrin/config', async (req, reply) => {
-  return mountConfigEndpoint()(req, reply);
-});
+import { init, tune, refreshSchema } from "@syrin/sdk";
 
-// Hono
-app.post('/syrin/config', (c) => {
-  return mountConfigEndpoint()(c.req, c.res);
-});
-```
-
-### Config Refresh After `tune()`
-
-After registering custom tunable fields with `tune()`, push the updated schema to the dashboard:
-
-```typescript
-import { tune, refreshSchema } from '@syrin/sdk';
-
-const sdk = await init({ apiKey: '...', agentId: 'my-agent' });
+const sdk = await init({ apiKey: "syrin_pk_...", agentId: "my-agent" });
 
 // Register a custom tunable field
-tune('retrieval.top_k', 5, { ge: 1, le: 20, description: 'Max documents to retrieve' });
+tune("retrieval.topK", 5, { ge: 1, le: 20, description: "Max documents to retrieve" });
 
 // Push the updated schema to the backend
 await refreshSchema();
+// → Dashboard now shows a slider for retrieval.topK
 ```
 
-### Onconflict / Re-init
+> ⚠️ **Skip `await` on `refreshSchema()` and:** the push may not complete before your code continues. The dashboard may not show the new field until the next heartbeat (30 seconds).
 
-Calling `init()` a second time with the same `instanceName` logs a warning and returns the existing instance. Call `shutdown()` first if you need a full re-initialize:
+---
+
+## Re-Initializing the SDK
+
+Calling `init()` a second time with the same `instanceName` logs a warning and returns the existing instance — it does not reinitialize. To fully reinitialize, call `shutdown()` first:
 
 ```typescript
+import { init, shutdown } from "@syrin/sdk";
+
+// Full reinit
 await shutdown();
-const sdk = await init({ apiKey: '...', agentId: 'my-agent' });
+const sdk = await init({ apiKey: "syrin_pk_...", agentId: "my-agent" });
 ```
+
+---
+
+## Complete Parameter Reference
+
+All `init()` options related to production configuration:
+
+| Option | Type | Default | Env Var | Description |
+|--------|------|---------|---------|-------------|
+| `sessionTtlMs` | `number` | none | `SYRIN_SESSION_TTL_MS` | Auto-evict sessions older than this |
+| `configPollIntervalMs` | `number` | none | `SYRIN_POLL_INTERVAL_MS` | Remote config poll interval |
+| `agentUrl` | `string` | none | `SYRIN_AGENT_URL` | Agent's public URL for push webhooks |
+| `batchSize` | `number` | `100` | `SYRIN_BATCH_SIZE` | Events per flush |
+| `idleFlushMs` | `number` | `10000` | `SYRIN_IDLE_FLUSH_MS` | Flush interval (ms) |
+| `httpTimeoutMs` | `number` | `10000` | `SYRIN_HTTP_TIMEOUT_MS` | HTTP timeout for `/ingest` |
+| `heartbeatIntervalMs` | `number` | `30000` | `SYRIN_HEARTBEAT_INTERVAL_MS` | Heartbeat interval |
+| `heartbeatTimeoutMs` | `number` | `5000` | `SYRIN_HEARTBEAT_TIMEOUT_MS` | Heartbeat POST timeout |
+| `pollTimeoutMs` | `number` | `10000` | `SYRIN_POLL_TIMEOUT_MS` | Config poll GET timeout |
+| `maxQueueSize` | `number` | `1000` | `SYRIN_MAX_QUEUE_SIZE` | Max in-memory events before oldest dropped |
+| `instanceName` | `string` | `"default"` | — | Name for multiple instances |
+| `toolValidation` | `boolean` | `false` | — | Enable server-side tool validation |
+| `schemaDefaults` | `Record<string, unknown>` | `{}` | — | Pre-seed config schema |
+| `topology` | `TopologyDefinition` | none | — | Multi-agent topology for dashboard |

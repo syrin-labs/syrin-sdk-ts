@@ -51,7 +51,7 @@ export async function patchOpenAI(core: ICallTarget): Promise<void> {
     patchWithModule(mod, core);
   } catch {
     if (core.config.debug) {
-      console.warn('[Syrin] openai not installed — skipping instrumentation');
+      console.warn('[Syrin SDK] openai not installed — skipping instrumentation');
     }
   }
 }
@@ -80,7 +80,7 @@ export function patchWithModule(openaiModule: OpenAIModule, core: ICallTarget): 
     _patchedProto = ActualCompletions.prototype as CompletionsInstance;
     _patchedProto.create = _makePatchedCreate(_originalProtoCreate, core);
     _patched = true;
-    if (core.config.debug) console.log('[Syrin] Patched Completions.prototype.create');
+    if (core.config.debug) console.log('[Syrin SDK] Patched Completions.prototype.create');
     return;
   }
 
@@ -108,7 +108,7 @@ export function patchWithModule(openaiModule: OpenAIModule, core: ICallTarget): 
   }
 
   _patched = true;
-  if (core.config.debug) console.log('[Syrin] Patched OpenAI via constructor proxy');
+  if (core.config.debug) console.log('[Syrin SDK] Patched OpenAI via constructor proxy');
 }
 
 export function unpatch(): void {

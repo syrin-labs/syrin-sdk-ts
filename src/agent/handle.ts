@@ -3,6 +3,7 @@
  */
 
 import type { SyrinSDKInstance } from '@/index';
+import type { SyrinCore } from '@/core/engine.js';
 import type { FieldSchema } from '@/config/store';
 import { agentStorage } from '@/agent/context.js';
 import { sessionStorage } from '@/core/session.js';
@@ -72,12 +73,11 @@ export class AgentHandle {
    * Returns self for chaining.
    */
   field<T>(key: string, defaultValue: T, opts?: Partial<FieldSchema> & { label?: string; ge?: number; le?: number; enum?: unknown[]; multiline?: boolean }): this {
-    const core = (this.sdk as unknown as { _core: Record<string, unknown> })._core;
+    const core = (this.sdk as unknown as { _core: SyrinCore })._core;
     if (core) {
-      if (!core['_agentFields']) core['_agentFields'] = {} as Record<string, AgentFieldDecl[]>;
-      const agentFields = core['_agentFields'] as Record<string, AgentFieldDecl[]>;
-      if (!agentFields[this.agentId]) agentFields[this.agentId] = [];
-      agentFields[this.agentId].push({
+      if (!core._agentFields) core._agentFields = {};
+      if (!core._agentFields[this.agentId]) core._agentFields[this.agentId] = [];
+      core._agentFields[this.agentId].push({
         key,
         default: defaultValue,
         label: opts?.['label'],
@@ -97,11 +97,10 @@ export class AgentHandle {
    * Toggling a tool off strips it from the tools= list before the next LLM call.
    */
   tools(toolNames: string[]): this {
-    const core = (this.sdk as unknown as { _core: Record<string, unknown> })._core;
+    const core = (this.sdk as unknown as { _core: SyrinCore })._core;
     if (core) {
-      if (!core['_agentToolNames']) core['_agentToolNames'] = {} as Record<string, string[]>;
-      const agentToolNames = core['_agentToolNames'] as Record<string, string[]>;
-      agentToolNames[this.agentId] = [...toolNames];
+      if (!core._agentToolNames) core._agentToolNames = {};
+      core._agentToolNames[this.agentId] = [...toolNames];
     }
     return this;
   }

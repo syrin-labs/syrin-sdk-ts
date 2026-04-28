@@ -16,9 +16,12 @@ import { SyrinCore } from '@/core/engine.js';
 import { Heartbeat } from '@/core/heartbeat.js';
 import { load as loadPersistedConfig, save as savePersistedConfig } from '@/config/persist.js';
 import { patchOpenAI, unpatch, isPatched } from '@/interceptors/openai.js';
+import { patchAnthropic, unpatch as unpatchAnthropic } from '@/interceptors/anthropic.js';
+import { patchGemini, unpatch as unpatchGemini } from '@/interceptors/gemini.js';
 import { clearHooks } from '@/observability/hooks.js';
 import { generateId, nowIso } from '@/utils/helpers.js';
-import type { SyrinConfig, SyrinSDK, SyrinEvent, ContextInjection, AgentTopology } from '@/types.js';
+import type { SyrinConfig, SyrinEvent, ContextInjection, AgentTopology } from '@/types.js';
+import type { BillingInfo } from '@/billing.js';
 import { AgentServer } from '@/agent/server.js';
 import type { AgentServerOptions } from '@/agent/server.js';
 import { MultiAgentRouter } from '@/agent/router.js';
@@ -30,9 +33,11 @@ import type { FeedbackRating, FeedbackOptions } from '@/feedback.js';
 import type { Checkpoint } from '@/core/checkpoint.js';
 import type { SyrinDiagnostics } from '@/types.js';
 import { SSEClient } from '@/observability/sse-client.js';
+import { setRegisteredEmitter, clearRegisteredEmitter } from '@/agent/emitter-registry.js';
 
 
-export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinSDK, SyrinDiagnostics, CallInfo, RunContext, GovernanceAction, GovernanceData, ContextInjection, SessionType } from '@/types.js';
+export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinDiagnostics, CallInfo, RunContext, GovernanceAction, GovernanceData, ContextInjection, SessionType } from '@/types.js';
+export type { BillingInfo, UsageSummary } from '@/billing.js';
 export { AgentServer } from '@/agent/server.js';
 export type { AgentHandler, AgentServerOptions } from '@/agent/server.js';
 export { MultiAgentRouter } from '@/agent/router.js';
@@ -51,16 +56,160 @@ export {
   GovernanceCheckpointRestoredError,
 } from '@/errors.js';
 export { getRunContext } from '@/agent/context.js';
+export { tool, memory, toolSpan, instrumentTool, ToolSpan, MemorySpan } from '@/agent/tool-context.js';
+import { tool as _tool, memory as _memory } from '@/agent/tool-context.js';
+export { TraceSpan } from '@/observability/trace-span.js';
 export { GovernanceStopError } from '@/core/governance.js';
 export type { Checkpoint } from '@/core/checkpoint.js';
 export { onConfigChange, onAlert } from '@/observability/hooks.js';
-export { SyrinCore } from '@/core/engine.js';
-export type { NormalizedCallParams, NormalizedCallResult, BeforeCallResult, SchemaField } from '@/core/call-types.js';
-export { ConfigStore } from '@/config/store.js';
-export type { FieldSchema } from '@/config/store.js';
 export { tunable, TunableField, tune, getTune, globalRegistry, TunableRegistry } from '@/tunable/tunable.js';
 export type { TuneOptions, TuneFieldDef } from '@/tunable/tunable.js';
 
+// ---------------------------------------------------------------------------
+// SyrinSDK — the public interface returned by init() and getInstance().
+// Users interact only with this type; internal implementation is hidden.
+// ---------------------------------------------------------------------------
+
+/**
+ * The Syrin SDK instance. All methods returned by {@link init} are defined here.
+ *
+ * @remarks
+ * This is the complete public API surface. No internal fields or implementation
+ * details are exposed.
+ */
+export interface SyrinSDK {
+  /** The active session ID for this instance. */
+  readonly sessionId: string;
+  /** Resolved SDK configuration (API key is masked in {@link configSnapshot}). */
+  readonly config: SyrinConfig;
+
+  // ── Config ────────────────────────────────────────────────────────────────
+  /** Apply local config overrides for a session (takes priority over remote config). */
+  configure(overrides: Record<string, unknown>, sessionId?: string): void;
+  /** Return the full effective config for a session (remote + local merged). */
+  activeConfig(sessionId?: string): Record<string, unknown>;
+  /** Return a sanitized config snapshot with the API key masked — safe to log. */
+  configSnapshot(): Record<string, unknown>;
+  /** Return the last tool validation result for a given tool call ID. */
+  getToolValidation(toolCallId: string, sessionId?: string): { valid: boolean; error?: string } | undefined;
+
+  // ── Checkpoints ───────────────────────────────────────────────────────────
+  /** Save a checkpoint of the current conversation state. */
+  createCheckpoint(
+    messages: Array<Record<string, unknown>>,
+    options?: { sessionId?: string; label?: string; metadata?: Record<string, unknown> }
+  ): Promise<Checkpoint>;
+  /** Restore messages from a saved checkpoint. */
+  restoreCheckpoint(checkpointId: string): Promise<Array<Record<string, unknown>> | undefined>;
+  /** List all checkpoints for a session (from local cache). */
+  listCheckpoints(sessionId?: string): Checkpoint[];
+
+  // ── Session management ────────────────────────────────────────────────────
+  /** Delete a session from the local store. */
+  deleteSession(sessionId: string): void;
+  /** Delete all sessions older than `olderThanMs` ms. Returns the count removed. */
+  clearStaleSessions(olderThanMs?: number): number;
+
+  // ── Session feedback ──────────────────────────────────────────────────────
+  /** Session feedback helpers: rate, rateBatch, withId, start. */
+  readonly sessions: {
+    rate(sessionId: string, rating: FeedbackRating, options?: FeedbackOptions): Promise<void>;
+    rateBatch(items: Array<{ sessionId: string; rating: FeedbackRating } & FeedbackOptions>): Promise<void>;
+    withId(sessionId: string): { rate(rating: FeedbackRating, options?: FeedbackOptions): Promise<void> };
+    start(options: { sessionId: string; agentId?: string; successCriteria?: string[] }): Promise<{ sessionId: string; feedback: import('@/feedback.js').SessionFeedback }>;
+  };
+
+  // ── Context injections ────────────────────────────────────────────────────
+  /** Register a callback that fires when the backend pushes context injections. */
+  onContextInjection(callback: (injection: ContextInjection) => void): () => void;
+  /** Return and clear all pending context injections for a session. */
+  getPendingInjections(sessionId?: string): ContextInjection[];
+
+  // ── Multi-agent ───────────────────────────────────────────────────────────
+  /** Create an AgentHandle scoped to a given agent ID. */
+  agent(agentId: string): AgentHandle;
+  /** Define or update the multi-agent topology after init(). */
+  defineTopology(topology: AgentTopology): void;
+
+  // ── Tool and memory observability ─────────────────────────────────────────
+  /**
+   * Track a tool call with name, args, result, and latency.
+   * Emits TOOL_CALL + TOOL_RESULT events automatically.
+   *
+   * @example
+   * const result = await sdk.tool("web_search", { query: "..." }, async (span) => {
+   *   const data = await search(...);
+   *   span.record(data);
+   *   return data;
+   * });
+   */
+  tool<T>(
+    name: string,
+    args: Record<string, unknown> | null | undefined,
+    fn: (span: import('@/agent/tool-context.js').ToolSpan) => Promise<T>
+  ): Promise<T>;
+  tool<T>(
+    name: string,
+    fn: (span: import('@/agent/tool-context.js').ToolSpan) => Promise<T>
+  ): Promise<T>;
+
+  /**
+   * Track a memory retrieval with store, query, result count, and latency.
+   * Emits a MEMORY_RETRIEVAL event automatically.
+   *
+   * @example
+   * const docs = await sdk.memory("pinecone", "user prefs", async (span) => {
+   *   const results = await vectorDb.query("user prefs", { topK: 5 });
+   *   span.record(results.length, true);
+   *   return results;
+   * });
+   */
+  memory<T>(
+    storeName: string,
+    query: string,
+    fn: (span: import('@/agent/tool-context.js').MemorySpan) => Promise<T>
+  ): Promise<T>;
+  memory<T>(
+    storeName: string,
+    fn: (span: import('@/agent/tool-context.js').MemorySpan) => Promise<T>
+  ): Promise<T>;
+
+  // ── Telemetry ─────────────────────────────────────────────────────────────
+  /**
+   * Emit a named lifecycle event to the Syrin dashboard.
+   * @param eventType - Built-ins: `GUARDRAIL_INPUT`, `GUARDRAIL_OUTPUT`, `HANDOFF`,
+   *   `CIRCUIT_BREAKER_OPEN`, `CIRCUIT_BREAKER_CLOSE`, `CHECKPOINT`, etc.
+   */
+  emit(eventType: string, payload?: Record<string, unknown>, sessionId?: string): void;
+  /** Emit a `CUSTOM_LOG` event that appears on the dashboard timeline. */
+  log(message: string, level?: 'debug' | 'info' | 'warning' | 'error', metadata?: Record<string, unknown>, sessionId?: string): void;
+  /** Emit a `CHECKPOINT` milestone event. */
+  checkpoint(label: string, metadata?: Record<string, unknown>, sessionId?: string): void;
+
+  // ── Diagnostics ───────────────────────────────────────────────────────────
+  /** Return a live diagnostic snapshot (no network calls). */
+  diagnose(): SyrinDiagnostics;
+  /** Return `true` if the Syrin backend is reachable. Never throws. */
+  healthCheck(): Promise<boolean>;
+  /** Return the last billing info received from the backend, or `null`. */
+  getBillingStatus(): BillingInfo | null;
+
+  // ── Server helpers ────────────────────────────────────────────────────────
+  /** Create an AgentServer for HTTP route mounting. */
+  createServer(options: AgentServerOptions): AgentServer;
+  /** Create a MultiAgentRouter for POST /agent/:agentId/run|chat routing. */
+  createAgentRouter(agentFunctions: Record<string, AgentRunFn>): MultiAgentRouter;
+
+  // ── Lifecycle ─────────────────────────────────────────────────────────────
+  /** Flush all queued events to the backend immediately. */
+  flush(): Promise<void>;
+  /** Re-push the agent schema to the backend (call after tune()). */
+  refreshSchema(): Promise<void>;
+  /** Flush events, stop heartbeat, uninstall patches, and release all resources. */
+  shutdown(): Promise<void>;
+}
+
+/** @internal — Use the {@link SyrinSDK} interface for all type annotations. */
 export class SyrinSDKInstance implements SyrinSDK {
   private _sessionId: string;
   private _config: SyrinConfig;
@@ -70,7 +219,9 @@ export class SyrinSDKInstance implements SyrinSDK {
   private _core: SyrinCore;
   private _heartbeat: Heartbeat;
   /** SSE client for real-time config delivery. Null when offline or no agentId. */
-  _sseClient: SSEClient | null = null;
+  private _sseClient: SSEClient | null = null;
+  /** Polling timer started as SSE fallback or explicit configPollIntervalMs. */
+  private _pollTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     config: SyrinConfig,
@@ -195,9 +346,9 @@ export class SyrinSDKInstance implements SyrinSDK {
    * ```
    */
   diagnose(): SyrinDiagnostics {
-    const eventsQueued = (this._emitter as unknown as { _queue?: unknown[] })._queue?.length ?? 0;
+    const eventsQueued = this._emitter.queueSize();
     const sseConnected = this._sseClient?.isConnected ?? false;
-    const agentRegistered = !!(this._core as unknown as { _registered?: boolean })._registered;
+    const agentRegistered = this._core._registered;
 
     let lastLoopDetected = false;
     let lastDriftScore: number | undefined;
@@ -355,7 +506,7 @@ export class SyrinSDKInstance implements SyrinSDK {
       );
       if (errors.length > 0) {
         const aggMsg = errors.map((e) => (e instanceof Error ? e.message : String(e))).join('; ');
-        throw new Error(`[Syrin] rateBatch encountered errors: ${aggMsg}`);
+        throw new Error(`[Syrin SDK] rateBatch encountered errors: ${aggMsg}`);
       }
     },
 
@@ -440,6 +591,36 @@ export class SyrinSDKInstance implements SyrinSDK {
   }
 
   /**
+   * Track a tool call with name, args, result, and latency.
+   * Delegates to the module-level tool() function.
+   */
+  tool<T>(
+    name: string,
+    argsOrFn: Record<string, unknown> | null | undefined | ((span: import('@/agent/tool-context.js').ToolSpan) => Promise<T>),
+    fn?: (span: import('@/agent/tool-context.js').ToolSpan) => Promise<T>,
+  ): Promise<T> {
+    if (typeof argsOrFn === 'function') {
+      return _tool(name, argsOrFn as (span: import('@/agent/tool-context.js').ToolSpan) => Promise<T>);
+    }
+    return _tool(name, argsOrFn, fn!);
+  }
+
+  /**
+   * Track a memory retrieval with store, query, result count, and latency.
+   * Delegates to the module-level memory() function.
+   */
+  memory<T>(
+    storeName: string,
+    queryOrFn: string | ((span: import('@/agent/tool-context.js').MemorySpan) => Promise<T>),
+    fn?: (span: import('@/agent/tool-context.js').MemorySpan) => Promise<T>,
+  ): Promise<T> {
+    if (typeof queryOrFn === 'function') {
+      return _memory(storeName, queryOrFn as (span: import('@/agent/tool-context.js').MemorySpan) => Promise<T>);
+    }
+    return _memory(storeName, queryOrFn, fn!);
+  }
+
+  /**
    * Define or update the multi-agent topology after init().
    *
    * @param topology - Dict with keys: type, nodes, edges, entryPoint, terminalNodes
@@ -463,7 +644,7 @@ export class SyrinSDKInstance implements SyrinSDK {
    * ```
    */
   defineTopology(topology: AgentTopology): void {
-    (this._core as unknown as { _explicitTopology: AgentTopology })._explicitTopology = topology;
+    this._core._explicitTopology = topology;
   }
 
   /**
@@ -504,6 +685,21 @@ export class SyrinSDKInstance implements SyrinSDK {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Return the last billing info received from the backend during registration.
+   * Returns null if no registration response has been received yet,
+   * or if the backend does not return billing data.
+   *
+   * @example
+   * const billing = sdk.getBillingStatus();
+   * if (billing?.exceeded.length) {
+   *   console.error('Usage limits exceeded — upgrade at https://app.syrin.ai/billing');
+   * }
+   */
+  getBillingStatus(): BillingInfo | null {
+    return this._core._lastBilling ?? null;
   }
 
   /**
@@ -548,12 +744,29 @@ export class SyrinSDKInstance implements SyrinSDK {
   }
 
   async shutdown(): Promise<void> {
+    if (this._pollTimer !== null) {
+      clearInterval(this._pollTimer);
+      this._pollTimer = null;
+    }
     this._sseClient?.stop();
     this._sseClient = null;
     await this._heartbeat.stop();
     await this._emitter.stop();
     this._core.uninstallAll();
     await this._otelBridge.shutdown();
+  }
+
+  // ── Internal accessors (module-level helpers only — not part of SyrinSDK interface) ──
+
+  /** @internal */ getEmitter(): Emitter { return this._emitter; }
+  /** @internal */ getSessionStore(): SessionStore { return this._sessionStore; }
+  /** @internal */ get _primarySessionId(): string { return this._sessionId; }
+  /** @internal */ setSseClient(client: SSEClient | null): void { this._sseClient = client; }
+  /** @internal */ setPollTimer(timer: ReturnType<typeof setInterval> | null): void { this._pollTimer = timer; }
+  /** @internal */ clearPollTimer(): ReturnType<typeof setInterval> | null {
+    const t = this._pollTimer;
+    if (t !== null) { clearInterval(t); this._pollTimer = null; }
+    return t;
   }
 }
 
@@ -566,7 +779,23 @@ const _instances = new Map<string, SyrinSDKInstance>();
 /** Primary (default) instance — used by module-level helpers */
 let _primaryInstance: SyrinSDKInstance | null = null;
 
+/** @internal — used by tool-context.ts / trace-span.ts to access emitter without circular import */
+export function _getPrimaryInstance(): SyrinSDKInstance | null {
+  return _primaryInstance;
+}
 
+
+/**
+ * Options for {@link init}.
+ *
+ * Only `apiKey` is required in most cases (can also be set via the
+ * `SYRIN_API_KEY` environment variable). All other options are optional.
+ *
+ * @example
+ * ```ts
+ * const sdk = await init({ apiKey: 'syrin_...', agentId: 'my-agent' });
+ * ```
+ */
 export interface SyrinInitOptions {
   apiKey?: string;
   agentId?: string;
@@ -626,13 +855,13 @@ export interface SyrinInitOptions {
  * Pass `instanceName` to support multiple named SDK instances.
  * Without `instanceName` (or `instanceName: 'default'`), behaves exactly as before.
  */
-export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInstance> {
+export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDK> {
   const name = options.instanceName ?? 'default';
 
   const existing = _instances.get(name);
   if (existing) {
     console.warn(
-      `[Syrin] Instance "${name}" already initialized. Call shutdown("${name}") first to reinitialize.`
+      `[Syrin SDK] Instance "${name}" already initialized. Call shutdown("${name}") first to reinitialize.`
     );
     // Tear down existing instance and reinitialize
     try { await existing.shutdown(); } catch { /* non-fatal */ }
@@ -642,23 +871,23 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // For 'default' instance, warn and tear down legacy singleton if present (backward compat)
   if (name === 'default' && _primaryInstance !== null) {
     console.warn(
-      '[Syrin] init() called more than once for the default instance. Reinitializing. Call shutdown() first to avoid this warning.'
+      '[Syrin SDK] init() called more than once for the default instance. Reinitializing. Call shutdown() first to avoid this warning.'
     );
     _teardown();
   }
 
   // Deprecation warnings for options that should not be user-visible
   if ('configPollIntervalMs' in options && options.configPollIntervalMs) {
-    console.warn('[Syrin] init() option "configPollIntervalMs" is deprecated — the SDK uses SSE for real-time config delivery and falls back to polling automatically. This option will be removed in a future release.');
+    console.warn('[Syrin SDK] init() option "configPollIntervalMs" is deprecated — the SDK uses SSE for real-time config delivery and falls back to polling automatically. This option will be removed in a future release.');
   }
   if ('schemaDefaults' in options && options.schemaDefaults) {
-    console.warn('[Syrin] init() option "schemaDefaults" is deprecated — use agent.field() to declare fields with defaults. This option will be removed in a future release.');
+    console.warn('[Syrin SDK] init() option "schemaDefaults" is deprecated — use agent.field() to declare fields with defaults. This option will be removed in a future release.');
   }
   if ('agentUrl' in options && options.agentUrl) {
-    console.warn('[Syrin] init() option "agentUrl" is deprecated — the SDK registers its own endpoint automatically. This option will be removed in a future release.');
+    console.warn('[Syrin SDK] init() option "agentUrl" is deprecated — the SDK registers its own endpoint automatically. This option will be removed in a future release.');
   }
   if ('toolValidation' in options && options.toolValidation !== undefined) {
-    console.warn('[Syrin] init() option "toolValidation" is deprecated — tool validation is always active when the backend supports it. This option will be removed in a future release.');
+    console.warn('[Syrin SDK] init() option "toolValidation" is deprecated — tool validation is always active when the backend supports it. This option will be removed in a future release.');
   }
 
   clearHooks();
@@ -696,12 +925,12 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
       // Already a dict — use as-is
       Object.assign(agentsDict, options.agents);
     }
-    (core as unknown as { _multiAgentDefs: Record<string, unknown> })._multiAgentDefs = agentsDict;
+    core._multiAgentDefs = agentsDict;
   }
 
   // Explicit topology definition for multi-agent systems
   if (options.topology) {
-    (core as unknown as { _explicitTopology: AgentTopology })._explicitTopology = options.topology;
+    core._explicitTopology = options.topology;
   }
 
   // Warn if OpenAI was imported before init() was called.
@@ -711,7 +940,7 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
     const mod = require.cache[require.resolve('openai')] as unknown;
     if (mod && !isPatched()) {
       console.warn(
-        '[Syrin] ⚠ openai was imported before init() — LLM calls made before this point were NOT instrumented. ' +
+        '[Syrin SDK] ⚠ openai was imported before init() — LLM calls made before this point were NOT instrumented. ' +
         'Move `await init(...)` to before you construct your OpenAI client to capture all telemetry.',
       );
     }
@@ -720,14 +949,16 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
   // Patch OpenAI directly (lazily imports openai; no-op if not installed)
   await patchOpenAI(core);
 
+  // Patch Anthropic if available (lazily imports @anthropic-ai/sdk; no-op if not installed)
+  await patchAnthropic(core);
+
+  // Patch Gemini if available (lazily imports @google/generative-ai and @google/genai; no-op if not installed)
+  await patchGemini(core);
+
   // Wire ConfigStore into core so config reads work
   const { ConfigStore } = await import('./config/store.js');
   const configStore = new ConfigStore();
-  (core as unknown as Record<string, unknown>)['_configStore'] = configStore;
-
-  // Wire global TunableRegistry into core
-  const { globalRegistry } = await import('./tunable/tunable.js');
-  (core as unknown as Record<string, unknown>)['_tunableRegistry'] = globalRegistry;
+  core._configStore = configStore;
 
   // Load persisted config from previous run (.syrin/syrin.config.json).
   // Parity with Python SDK — overrides survive restarts without waiting for polling.
@@ -758,6 +989,10 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
 
   const instance = new SyrinSDKInstance(config, sessionStore, emitter, otelBridge, core, heartbeat);
 
+  // Wire tool-context and trace-span emitter registry so they can emit events
+  // without a circular import back to index.ts.
+  setRegisteredEmitter({ emit: emitter.emit.bind(emitter), sessionId, agentId: config.agentId });
+
   // Start SSE client — real-time config delivery via GET /agents/{id}/stream.
   // Falls back to polling automatically after SSE_MAX_RECONNECT_ATTEMPTS failures.
   // No-op when offline=true or agentId is not set.
@@ -786,12 +1021,12 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
               }
             } catch { /* best-effort */ }
           })(); }, fallbackInterval);
-          (instance as unknown as { _pollTimer: ReturnType<typeof setInterval> })._pollTimer = pollTimer;
+          instance.setPollTimer(pollTimer);
         }
       },
     });
     sseClient.start();
-    instance._sseClient = sseClient;
+    instance.setSseClient(sseClient);
   }
 
   // Start config polling if requested (check both options and resolved config)
@@ -822,7 +1057,7 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
       }
     })(); }, pollIntervalMs);
 
-    (instance as unknown as { _pollTimer: ReturnType<typeof setInterval> })._pollTimer = pollTimer;
+    instance.setPollTimer(pollTimer);
   }
 
   // Register in named registry
@@ -833,7 +1068,7 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
 
   if (config.debug) {
     console.log(
-      `[Syrin] Initialized instance="${name}". sessionId=${sessionId} agentId=${config.agentId ?? 'none'} backend=${config.backendUrl}`
+      `[Syrin SDK] Initialized instance="${name}". sessionId=${sessionId} agentId=${config.agentId ?? 'none'} backend=${config.backendUrl}`
     );
   }
 
@@ -847,12 +1082,8 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInst
 
 function _teardown(): void {
   _setAutoRefreshCallback(null); // Stop auto-refresh on shutdown
+  clearRegisteredEmitter();
   if (_primaryInstance) {
-    const inst = _primaryInstance as unknown as { _pollTimer?: ReturnType<typeof setInterval> };
-    if (inst._pollTimer) {
-      clearInterval(inst._pollTimer);
-      inst._pollTimer = undefined;
-    }
     _primaryInstance.shutdown().catch(() => { /* ignore */ });
     _primaryInstance = null;
   }
@@ -860,6 +1091,8 @@ function _teardown(): void {
   if (isPatched()) {
     unpatch();
   }
+  unpatchAnthropic();
+  unpatchGemini();
 }
 
 // ---------------------------------------------------------------------------
@@ -905,7 +1138,7 @@ export function mountConfigEndpoint(instanceName = 'default') {
     const overrides = body as Record<string, unknown>;
 
     // Apply to global template (new sessions inherit) and all active sessions
-    const store = (inst as unknown as { _sessionStore: SessionStore })._sessionStore;
+    const store = inst.getSessionStore();
     store.setGlobalConfig(overrides);
     for (const sid of store.getSessionIds()) {
       store.applyConfigUpdate(sid, overrides);
@@ -936,7 +1169,7 @@ import type { RunContext } from '@/types.js';
 function _emitLifecycle(eventType: string, extra: Record<string, unknown> = {}): void {
   const inst = _primaryInstance;
   if (!inst) return;
-  const emitter = (inst as unknown as { _emitter: Emitter })._emitter;
+  const emitter = inst.getEmitter();
   const sid = sessionStorage.getStore() ?? inst.sessionId;
   emitter.emit({
     event_id: generateId('evt_'),
@@ -1004,17 +1237,13 @@ export async function shutdown(name = 'default'): Promise<void> {
   const inst = _instances.get(name);
   if (!inst) return;
 
-  const instWithTimer = inst as unknown as { _pollTimer?: ReturnType<typeof setInterval> };
-  if (instWithTimer._pollTimer) {
-    clearInterval(instWithTimer._pollTimer);
-    instWithTimer._pollTimer = undefined;
-  }
-
+  inst.clearPollTimer();
   await inst.shutdown();
   _instances.delete(name);
 
   if (name === 'default') {
     _primaryInstance = null;
+    clearRegisteredEmitter();
   }
 }
 
@@ -1029,7 +1258,7 @@ export async function withSession<T>(sessionId: string, fn: () => Promise<T>): P
   const inst = _primaryInstance;
   const agentId = inst?.config.agentId;
   const startTime = Date.now();
-  const emitter = inst ? (inst as unknown as { _emitter: Emitter })._emitter : null;
+  const emitter = inst ? inst.getEmitter() : null;
 
   if (emitter) {
     const startedEvent: SyrinEvent = {
@@ -1059,7 +1288,7 @@ export async function withSession<T>(sessionId: string, fn: () => Promise<T>): P
   } finally {
     if (emitter) {
       const durationMs = Date.now() - startTime;
-      const store = inst ? (inst as unknown as { _sessionStore: SessionStore })._sessionStore : null;
+      const store = inst ? inst.getSessionStore() : null;
       const session = store?.getSession(sessionId);
 
       const endedEvent: SyrinEvent = {
@@ -1111,13 +1340,13 @@ export async function withSession<T>(sessionId: string, fn: () => Promise<T>): P
  * Without arguments, returns the default (primary) instance or null.
  * Pass a name to get a specific named instance — throws if not found.
  */
-export function getInstance(name?: string): SyrinSDKInstance | null {
+export function getInstance(name?: string): SyrinSDK | null {
   if (name === undefined || name === 'default') {
     return _primaryInstance;
   }
   const inst = _instances.get(name);
   if (!inst) {
-    throw new Error(`[Syrin] No SDK instance named "${name}". Call init({ instanceName: "${name}" }) first.`);
+    throw new Error(`[Syrin SDK] No SDK instance named "${name}". Call init({ instanceName: "${name}" }) first.`);
   }
   return inst;
 }

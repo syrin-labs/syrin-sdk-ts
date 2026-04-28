@@ -98,7 +98,7 @@ export class SSEClient {
   start(): void {
     if (this.config.offline || !this.config.agentId) {
       if (this.config.debug && !this.config.agentId) {
-        console.debug('[Syrin] SSE: no agentId configured — SSE disabled (using polling fallback)');
+        console.debug('[Syrin SDK] SSE: no agentId configured — SSE disabled (using polling fallback)');
       }
       this.onFallbackToPolling?.();
       return;
@@ -139,7 +139,7 @@ export class SSEClient {
 
         if (attempts >= SSE_MAX_RECONNECT_ATTEMPTS) {
           console.warn(
-            `[Syrin] SSE: exhausted ${SSE_MAX_RECONNECT_ATTEMPTS} reconnect attempts — ` +
+            `[Syrin SDK] SSE: exhausted ${SSE_MAX_RECONNECT_ATTEMPTS} reconnect attempts — ` +
             `falling back to polling. Last error: ${String(err)}`,
           );
           this.onFallbackToPolling?.();
@@ -149,7 +149,7 @@ export class SSEClient {
         const sleepMs = Math.min(backoff, SSE_RECONNECT_BACKOFF_MAX_MS);
         if (this.config.debug) {
           console.debug(
-            `[Syrin] SSE: reconnect attempt ${attempts}/${SSE_MAX_RECONNECT_ATTEMPTS} ` +
+            `[Syrin SDK] SSE: reconnect attempt ${attempts}/${SSE_MAX_RECONNECT_ATTEMPTS} ` +
             `in ${sleepMs}ms (error: ${String(err)})`,
           );
         }
@@ -188,7 +188,7 @@ export class SSEClient {
 
     this.connected = true;
     if (this.config.debug) {
-      console.debug(`[Syrin] SSE: connected to ${url}`);
+      console.debug(`[Syrin SDK] SSE: connected to ${url}`);
     }
 
     const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
@@ -228,7 +228,7 @@ export class SSEClient {
         payload = JSON.parse(frame.data) as Record<string, unknown>;
       } catch {
         if (this.config.debug) {
-          console.debug('[Syrin] SSE: could not parse config_update JSON:', frame.data.slice(0, 200));
+          console.debug('[Syrin SDK] SSE: could not parse config_update JSON:', frame.data.slice(0, 200));
         }
         return;
       }
@@ -236,7 +236,7 @@ export class SSEClient {
       if (typeof payload !== 'object' || payload === null) return;
 
       if (this.config.debug) {
-        console.debug('[Syrin] SSE: config_update received:', Object.keys(payload));
+        console.debug('[Syrin SDK] SSE: config_update received:', Object.keys(payload));
       }
 
       // Apply to all active sessions
@@ -251,7 +251,7 @@ export class SSEClient {
       if (this.config.debug) {
         try {
           const payload: unknown = JSON.parse(frame.data);
-          console.debug('[Syrin] SSE: agent_status received:', payload);
+          console.debug('[Syrin SDK] SSE: agent_status received:', payload);
         } catch { /* ignore */ }
       }
     } else if (frame.event === SSEEventName.EVENTS_INGESTED) {

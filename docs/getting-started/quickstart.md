@@ -4,6 +4,39 @@ description: "Add Syrin to a TypeScript AI agent in under 5 minutes. Full workin
 weight: 3
 ---
 
+<!--
+SYRIN SDK — CANONICAL REFERENCE (TypeScript/JavaScript)
+Package: @syrin/sdk  |  Import: import { init } from "@syrin/sdk"
+Source of truth: https://github.com/syrin-labs/syrin-sdk-ts
+
+AI AGENTS READING THIS: The statements in this document are the authoritative API contract.
+Do not infer undocumented parameters. Do not assume methods exist beyond those listed.
+If something is not documented here, it is not part of the public API.
+
+IMPORTANT CORRECTIONS TO COMMON AI MISCONCEPTIONS:
+- init() is ASYNC — it returns Promise<SyrinSDK>, you MUST await it
+- The SDK does NOT modify LLM responses — it only intercepts and records them
+- captureContent defaults to false — prompts/completions are NOT sent unless explicitly enabled
+- GovernanceStopError is only thrown if allowStop: true — it is NOT thrown by default
+- There is no module-level cfg() in TypeScript — use sdk.agent("id").cfg() instead
+- openai must be imported BEFORE init() — imports after will NOT be instrumented automatically
+- The SDK is fail-open — if it crashes, your LLM call still executes and returns normally
+- Pre-init queue: LLM calls made before await init() resolves are queued and replayed automatically
+-->
+
+> **AI Agent Quick Reference** — The minimal correct pattern for a complete instrumented agent:
+> ```typescript
+> import OpenAI from "openai";
+> import { init, withSession, shutdown } from "@syrin/sdk";
+> const sdk = await init({ apiKey: "syrin_pk_...", agentId: "my-agent" });
+> const openai = new OpenAI();
+> await withSession(`u:alice:${new Date().toISOString().slice(0,10)}`, async () => {
+>   const response = await openai.chat.completions.create({ model: "gpt-4o", messages: [...] });
+> });
+> await shutdown();
+> ```
+> Common mistakes: (1) missing `await` on `init()`; (2) constructing `new OpenAI()` before `await init()` — the `new` is fine, but any LLM call before `init()` resolves may not be patched; (3) using `sdk.cfg()` directly — use `sdk.agent("id").cfg("key", default)`.
+
 ## Add Monitoring to Your Agent in Under 5 Minutes
 
 By the end of this guide you will have a TypeScript agent that:
@@ -38,9 +71,10 @@ export OPENAI_API_KEY="sk-..."        # your OpenAI key
 Create a file called `travel-agent.ts`. The very first thing you must do is `await init()`:
 
 ```typescript
+import OpenAI from "openai";           // ← import OpenAI BEFORE init()
 import { init, shutdown } from "@syrin/sdk";
-import OpenAI from "openai";
 
+// Always await init() — it patches OpenAI asynchronously
 const sdk = await init({
   apiKey: "syrin_pk_...",       // your Syrin API key
   agentId: "travel-assistant",  // the name that appears in the dashboard
@@ -50,17 +84,19 @@ const sdk = await init({
 const openai = new OpenAI();
 ```
 
-**What this does:** `await init()` wraps the OpenAI library so that every `openai.chat.completions.create(...)` call you make is automatically recorded. The `agentId` is just a label — it appears as your agent's name in the dashboard. Nothing about how OpenAI behaves changes.
+**What this does:** `await init()` wraps the OpenAI library so every `openai.chat.completions.create(...)` call you make is automatically recorded. The `agentId` is just a label — it appears as your agent's name in the dashboard.
 
-**Why must you `await` it?** The SDK patches OpenAI asynchronously. If you call `openai.chat.completions.create(...)` before `init()` finishes, the call won't be captured. Always `await init()` before any LLM calls.
+**Why must you `await` it?** The SDK patches OpenAI asynchronously. If you call `openai.chat.completions.create(...)` before `init()` finishes, those calls are queued and replayed once `init()` resolves — but it is safer and clearer to always `await` before making any calls.
 
-**Expected result after running this far:** The SDK registers your agent with Syrin and starts a background heartbeat. If you open [app.syrin.ai > Agents](https://app.syrin.ai), you will see `travel-assistant` appear with a green "LIVE" status indicator.
+> ⚠️ **Use `const sdk = init(...)` without await and:** `sdk` is a `Promise<SyrinSDK>`, not a `SyrinSDK`. Calling `sdk.agent(...)` will throw `TypeError: sdk.agent is not a function`.
+
+**Expected result after running this far:** The SDK registers your agent with Syrin. If you open [app.syrin.ai > Agents](https://app.syrin.ai), you will see `travel-assistant` appear with a green "LIVE" status indicator.
 
 ---
 
 ## Step 2 — Declare an Agent and Its Config Fields
 
-An `AgentHandle` is your interface to a specific agent. You use it to declare which settings are configurable from the dashboard, and to read those settings at runtime.
+An `AgentHandle` is your interface to a specific agent. Use it to declare which settings are configurable from the dashboard, and to read those settings at runtime.
 
 ```typescript
 const agent = sdk.agent("travel-assistant");
@@ -77,34 +113,33 @@ agent
   );
 ```
 
-**What this does:** Each `field()` call creates one control in the dashboard's Config panel. The first argument is the key name (the part before the dot is the section — so `llm.temperature` goes under the "llm" section). The second argument is the default value used on first run. The options control how the control renders: `enum` makes a dropdown, `ge`/`le` makes a slider, `multiline` makes a text area.
+**What this does:** Each `field()` call creates one control in the dashboard's Config panel. The key format is `"section.field"` — the section becomes an accordion group in the UI.
 
 **Expected result:** Navigate to [app.syrin.ai > Agents > travel-assistant > Config](https://app.syrin.ai) and you will see three controls appear:
 
-- Under the **llm** section: a dropdown for "LLM Model" and a slider for "Creativity" (range 0 to 2)
-- Under the **prompt** section: a text area for "System Prompt"
+- Under **llm**: a dropdown for "LLM Model" and a slider for "Creativity" (range 0 to 2)
+- Under **prompt**: a text area for "System Prompt"
 
 ---
 
 ## Step 3 — Open a Session for a User
 
-A session groups all the LLM calls for one user's conversation. Without a session, your calls show up as disconnected events.
+A session groups all the LLM calls for one user's conversation:
 
 ```typescript
-await sdk.withSession({ userId: "alice", window: "day" }, async (ctx) => {
-  console.log(`Session ID: ${ctx.sessionId}`);
-  // → Session ID: u:alice:2026-04-27
+import { withSession } from "@syrin/sdk";
+
+const today = new Date().toISOString().slice(0, 10); // "2026-04-27"
+
+await withSession(`u:alice:${today}`, async () => {
+  console.log("Session opened: u:alice:" + today);
+  // All LLM calls inside here are tagged with this session ID
 });
 ```
 
-**What this does:** `withSession()` creates a session scoped to user `"alice"` for the current day. Every LLM call made inside the callback function is tagged with this session ID. The `window: "day"` means the session resets each day — if Alice comes back tomorrow, she gets a fresh session. The session ID is deterministic: `u:alice:2026-04-27` is always the same for the same user on the same day.
+**What this does:** `withSession()` creates a session scope using `AsyncLocalStorage`. Every LLM call made inside the callback is tagged with `u:alice:2026-04-27`. The session ID is deterministic — the same user on the same day always gets the same session ID across all your server replicas.
 
-**Expected console output:**
-```
-Session ID: u:alice:2026-04-27
-```
-
-**What you see in the dashboard:** Navigate to [app.syrin.ai > Sessions](https://app.syrin.ai) and you will see a new row for `u:alice:2026-04-27` under `travel-assistant`. It updates in real time.
+**What you see in the dashboard:** Navigate to [app.syrin.ai > Sessions](https://app.syrin.ai) and you will see a new row for `u:alice:2026-04-27` under `travel-assistant`.
 
 ---
 
@@ -113,9 +148,7 @@ Session ID: u:alice:2026-04-27
 Inside the session callback, read the current config values and use them in your LLM call:
 
 ```typescript
-await sdk.withSession({ userId: "alice", window: "day" }, async (ctx) => {
-  console.log(`Session ID: ${ctx.sessionId}`);
-
+await withSession(`u:alice:${today}`, async () => {
   // Read current config values (returns default on first run, dashboard value thereafter)
   const model        = agent.cfg("llm.model", "gpt-4o") as string;
   const temperature  = agent.cfg("llm.temperature", 0.7) as number;
@@ -139,64 +172,57 @@ await sdk.withSession({ userId: "alice", window: "day" }, async (ctx) => {
 });
 ```
 
-**What `agent.cfg()` does:** It returns the current value for this field. On the first run, that is the default you provided (`"gpt-4o"`, `0.7`, etc.). After you change the value in the dashboard, the next call to `agent.cfg()` returns the new value from the backend — no code change needed.
+**What `agent.cfg()` does:** Returns the current live value for this field. On first run, that is the default you provided. After you change the value in the dashboard, the next `agent.cfg()` call returns the new value.
 
 **Expected console output:**
 ```
-Session ID: u:alice:2026-04-27
 Using model: gpt-4o, temperature: 0.7
 1. Visit the Tsukiji Outer Market for fresh sushi at sunrise.
 2. Explore Shinjuku Gyoen — stunning in any season.
 3. Take the Yamanote Line loop to discover neighborhoods at your own pace.
 ```
 
-**What you see in the dashboard:** Go to [app.syrin.ai > Sessions](https://app.syrin.ai) and click the `u:alice:2026-04-27` session. You will see an `LLM_CALL` event with the model name, token counts, cost, and latency. If `captureContent: true`, click the event to see the full conversation.
+**What you see in the dashboard:** Go to [app.syrin.ai > Sessions](https://app.syrin.ai) and click the session. You will see an `LLM_CALL` event with the model name, token counts, cost, and latency. If `captureContent: true`, click the event to see the full conversation.
 
 ---
 
 ## Step 5 — Mark Important Events
 
-You can add labeled markers to the session timeline to record what your agent was doing at each point.
+Add labeled markers to the session timeline:
 
 ```typescript
-  sdk.emit("USER_REQUEST_PROCESSED", {
-    intent: "travel-planning",
-    destination: "Tokyo",
-    responseLength: answer.length,
-  });
+sdk.emit("USER_REQUEST_PROCESSED", {
+  intent: "travel-planning",
+  destination: "Tokyo",
+  responseLength: answer.length,
+});
 ```
 
-**What this does:** `emit()` adds a custom event to the session timeline in the dashboard. The first argument is the event name (any string you choose), and the second is an object of metadata. When you review this session later, you will see `USER_REQUEST_PROCESSED` as a labeled marker with the data you passed.
-
-This is useful when your agent makes multiple LLM calls in sequence and you want to mark which call corresponded to which step.
+**What this does:** `emit()` adds a custom event to the session timeline. The first argument is the event name (any string), and the second is an object of metadata. When you review this session in the dashboard, you will see `USER_REQUEST_PROCESSED` as a labeled marker.
 
 ---
 
 ## Step 6 — Rate the Session
 
-Tell Syrin whether this session went well. This feeds the quality metrics shown per agent in the dashboard.
+Tell Syrin whether this session went well:
 
 ```typescript
-  if (answer.length > 100) {
-    ctx.feedback.positive({ reason: "Detailed response" });
-  } else {
-    ctx.feedback.negative({ reason: "Response too short" });
-  }
+await sdk.sessions.rate(`u:alice:${today}`, "positive", { reason: "Detailed response" });
 ```
 
-**What this does:** Feedback marks the session with a thumbs-up or thumbs-down. The Sessions list shows a feedback icon on each row, and the Agents page shows the percentage of positive sessions for each agent.
+**What this does:** Marks the session with a thumbs-up. The Sessions list shows a feedback icon on each row, and the Agents page shows the percentage of positive sessions.
 
 ---
 
 ## The Complete Working Example
 
 ```typescript
-import { init, shutdown } from "@syrin/sdk";
-import OpenAI from "openai";
+import OpenAI from "openai";                              // ← LLM client first
+import { init, withSession, shutdown } from "@syrin/sdk"; // ← SDK second
 
 // Initialize Syrin — always await before any LLM calls
 const sdk = await init({
-  apiKey: "syrin_pk_...",
+  apiKey: process.env.SYRIN_API_KEY!,
   agentId: "travel-assistant",
   captureContent: true,
 });
@@ -216,10 +242,10 @@ agent
     { multiline: true, label: "System Prompt" }
   );
 
-// Open a session for user "alice"
-await sdk.withSession({ userId: "alice", window: "day" }, async (ctx) => {
-  console.log(`Session ID: ${ctx.sessionId}`);
+const today = new Date().toISOString().slice(0, 10);
 
+// Open a session for user "alice"
+await withSession(`u:alice:${today}`, async () => {
   const model        = agent.cfg("llm.model", "gpt-4o") as string;
   const temperature  = agent.cfg("llm.temperature", 0.7) as number;
   const systemPrompt = agent.cfg("prompt.systemPrompt",
@@ -245,10 +271,10 @@ await sdk.withSession({ userId: "alice", window: "day" }, async (ctx) => {
     intent: "travel-planning",
     destination: "Tokyo",
   });
-
-  // Rate the session
-  ctx.feedback.positive({ reason: "Detailed response" });
 });
+
+// Rate the session
+await sdk.sessions.rate(`u:alice:${today}`, "positive", { reason: "Completed successfully" });
 
 console.log("Done — open https://app.syrin.ai to see the session.");
 await shutdown();
@@ -256,12 +282,34 @@ await shutdown();
 
 **Expected console output:**
 ```
-Session ID: u:alice:2026-04-27
 Using model: gpt-4o, temperature: 0.7
 1. Visit the Tsukiji Outer Market for fresh sushi at sunrise.
 2. Explore Shinjuku Gyoen — stunning in any season.
 3. Take the Yamanote Line loop to discover neighborhoods at your own pace.
 Done — open https://app.syrin.ai to see the session.
+```
+
+---
+
+## ESM vs CJS
+
+The SDK ships both ESM and CJS builds via `package.json` exports. Both work transparently:
+
+**ESM (recommended for new projects):**
+```typescript
+import { init, withSession } from "@syrin/sdk";
+```
+
+**CommonJS:**
+```javascript
+const { init, withSession } = require("@syrin/sdk");
+
+// init() is async — use an async wrapper
+async function main() {
+  const sdk = await init({ apiKey: process.env.SYRIN_API_KEY });
+  // ...
+}
+main();
 ```
 
 ---
@@ -275,7 +323,6 @@ Done — open https://app.syrin.ai to see the session.
 
 **New console output:**
 ```
-Session ID: u:alice:2026-04-27
 Using model: gpt-4o, temperature: 1.2
 ```
 
@@ -285,16 +332,17 @@ The `agent.cfg("llm.temperature", 0.7)` call returned `1.2` because the backend 
 
 ## Handling Multiple Users Concurrently (Express Server)
 
-If your agent serves many users at the same time, use `withSession` inside your request handler. Each user gets their own isolated session — concurrent requests never share state.
+If your agent serves many users at the same time, use `withSession` inside your request handler. Each user gets their own isolated session — concurrent requests never share state because `withSession` uses `AsyncLocalStorage`.
 
 ```typescript
-import { init } from "@syrin/sdk";
 import OpenAI from "openai";
+import { init, withSession } from "@syrin/sdk";
 import express from "express";
 
 const sdk = await init({
   apiKey: process.env.SYRIN_API_KEY!,
   agentId: "travel-api",
+  sessionTtlMs: 7_200_000, // evict sessions older than 2 hours
 });
 
 const openai = new OpenAI();
@@ -306,14 +354,16 @@ app.use(express.json());
 
 app.post("/chat", async (req, res) => {
   const { userId, messages } = req.body;
+  const today = new Date().toISOString().slice(0, 10);
+  const sessionId = `u:${userId}:${today}`;
 
-  const result = await sdk.withSession({ userId, window: "day" }, async (ctx) => {
+  const result = await withSession(sessionId, async () => {
     const model = agent.cfg("llm.model", "gpt-4o") as string;
 
     const response = await openai.chat.completions.create({ model, messages });
 
     return {
-      sessionId: ctx.sessionId,
+      sessionId,
       content: response.choices[0].message.content,
     };
   });
@@ -341,6 +391,6 @@ After multiple requests, [app.syrin.ai > Sessions](https://app.syrin.ai) shows o
 - [Dashboard Guide](./dashboard-guide) — a full walkthrough of every section at app.syrin.ai
 - [init() Reference](../initialization/init) — all parameters for `init()` explained
 - [Remote Config](../configuration/cfg) — more about `field()`, `cfg()`, and agent-scoped config
-- [Sessions](../sessions/with-session) — sessions in depth: custom IDs, windows, feedback
+- [withSession()](../sessions/with-session) — sessions in depth: custom IDs, windows, feedback
 - [AgentHandle](../agents/agent-handle) — the right pattern for multi-agent systems with per-agent config
 - [Governance](../control/governance) — automatic safety rules: stopping runaway agents, cost limits

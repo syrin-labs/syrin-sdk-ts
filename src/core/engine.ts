@@ -10,7 +10,7 @@
  *   - Checkpoint lifecycle (via CheckpointClient)
  */
 
-import type { SyrinConfig, SyrinEvent } from '@/types.js';
+import type { SyrinConfig, SyrinEvent, AgentTopology } from '@/types.js';
 import { SDK_VERSION } from '@/config/config.js';
 import type { SessionStore } from '@/core/session.js';
 import { sessionStorage } from '@/core/session.js';
@@ -27,6 +27,7 @@ import type {
 } from '@/core/call-types.js';
 import { agentStorage } from '@/agent/context.js';
 import { GovernanceStopError } from '@/core/governance.js';
+import { parseBilling, logBillingOnRegister, type BillingInfo } from '@/billing.js';
 
 import {
   generateId,
@@ -48,6 +49,24 @@ import { unpatch as unpatchOpenAI } from '@/interceptors/openai.js';
 // Re-export for convenience
 export type { BeforeCallResult, NormalizedCallParams, NormalizedCallResult } from '@/core/call-types.js';
 
+/** A single field declaration from AgentHandle.field(). */
+export interface AgentFieldDecl {
+  key: string;
+  default: unknown;
+  label?: string;
+  type?: string;
+  ge?: number;
+  le?: number;
+  enum?: unknown[];
+  multiline?: boolean;
+  description?: string;
+}
+
+/** Minimal interface for a ConfigStore as used by SyrinCore. */
+export interface ConfigStoreRef {
+  set(namespace: string, field: string, value: unknown): void;
+}
+
 export class SyrinCore implements ICallTarget {
 
   /**
@@ -57,8 +76,29 @@ export class SyrinCore implements ICallTarget {
    */
   isReady = true;
 
+  /** True after the first successful POST /agents/{id}/register call. */
+  _registered = false;
+
+  /** Last billing info received from the backend (registration response). */
+  _lastBilling: BillingInfo | null = null;
+
   /** Events captured before init() resolved — replayed on markReady(). */
   readonly preInitQueue: Array<{ event: SyrinEvent; sessionId: string }> = [];
+
+  /** Agent field declarations from AgentHandle.field() — keyed by agentId. */
+  _agentFields: Record<string, AgentFieldDecl[]> = {};
+
+  /** Agent tool names from AgentHandle.tools() — keyed by agentId. */
+  _agentToolNames: Record<string, string[]> = {};
+
+  /** Sub-agent definitions from init() options.agents. */
+  _multiAgentDefs: Record<string, unknown> = {};
+
+  /** Explicit agent topology from init() options.topology or sdk.defineTopology(). */
+  _explicitTopology: AgentTopology | null = null;
+
+  /** ConfigStore wired in from init() — used to apply configDelta on registration. */
+  _configStore: ConfigStoreRef | null = null;
 
   constructor(
     readonly config: SyrinConfig,
@@ -76,7 +116,7 @@ export class SyrinCore implements ICallTarget {
     this.isReady = true;
     if (this.preInitQueue.length > 0) {
       console.warn(
-        `[Syrin] ${this.preInitQueue.length} LLM event(s) were captured before init() resolved and are being replayed.`
+        `[Syrin SDK] ${this.preInitQueue.length} LLM event(s) were captured before init() resolved and are being replayed.`
       );
       for (const { event, sessionId } of this.preInitQueue) {
         emitter.emit(event, sessionId);
@@ -133,10 +173,7 @@ export class SyrinCore implements ICallTarget {
     }
 
     // Build per-agent sections from field declarations (via handle.field())
-    const agentFieldDecls = (this as unknown as { _agentFields?: Record<string, Array<{
-      key: string; default: unknown; label?: string; ge?: number; le?: number;
-      enum?: unknown[]; multiline?: boolean; description?: string;
-    }>> })._agentFields ?? {};
+    const agentFieldDecls = this._agentFields;
 
     const agentsSections: Record<string, unknown> = {};
     for (const [agentId, fields] of Object.entries(agentFieldDecls)) {
@@ -183,7 +220,7 @@ export class SyrinCore implements ICallTarget {
     }
 
     // Per-agent tools sections from AgentHandle.tools([...])
-    const agentToolNames = (this as unknown as { _agentToolNames?: Record<string, string[]> })._agentToolNames ?? {};
+    const agentToolNames = this._agentToolNames;
     for (const [agentId, toolNames] of Object.entries(agentToolNames)) {
       if (!toolNames.length) continue;
       if (!agentsSections[agentId]) {
@@ -210,8 +247,8 @@ export class SyrinCore implements ICallTarget {
     };
 
     // Handle explicit or auto-discovered topology for multi-agent systems
-    const multiAgentDefs = (this as unknown as { _multiAgentDefs?: Record<string, unknown> })._multiAgentDefs;
-    const explicitTopology = (this as unknown as { _explicitTopology?: Record<string, unknown> })._explicitTopology;
+    const multiAgentDefs = Object.keys(this._multiAgentDefs).length > 0 ? this._multiAgentDefs : undefined;
+    const explicitTopology = this._explicitTopology;
 
     if (multiAgentDefs && Object.keys(multiAgentDefs).length > 0) {
       const agentIds = Object.keys(multiAgentDefs);
@@ -275,18 +312,30 @@ export class SyrinCore implements ICallTarget {
         body: JSON.stringify(payload),
         signal: AbortSignal.timeout(5000),
       });
-      if (res.ok) {
-        const body = await res.json() as { configDelta?: Record<string, unknown> };
+      if (!res.ok) {
+        if (this.config.debug) {
+          console.warn(`[Syrin SDK] Registration returned HTTP ${res.status} — agent_registered will be false`);
+        }
+      } else {
+        this._registered = true;
+        const body = await res.json() as { configDelta?: Record<string, unknown>; billing?: unknown };
         const delta = body.configDelta ?? {};
-        const configStore = (this as unknown as { _configStore?: { set(ns: string, key: string, value: unknown): void } })._configStore;
-        if (configStore) {
+        if (this._configStore) {
           for (const [path, value] of Object.entries(delta)) {
             const dot = path.indexOf('.');
             if (dot !== -1) {
               const section = path.slice(0, dot);
               const key = path.slice(dot + 1);
-              configStore.set(section, key, value);
+              this._configStore.set(section, key, value);
             }
+          }
+        }
+        const billingData = body.billing;
+        if (billingData) {
+          const billing = parseBilling(billingData);
+          if (billing) {
+            this._lastBilling = billing;
+            logBillingOnRegister(billing);
           }
         }
       }
@@ -445,7 +494,7 @@ export class SyrinCore implements ICallTarget {
       } else {
         delete modifiedRaw['tools'];
         delete modifiedRaw['tool_choice'];
-        if (this.config.debug) console.log('[Syrin] All tools filtered out by remote config.');
+        if (this.config.debug) console.log('[Syrin SDK] All tools filtered out by remote config.');
       }
       configApplied = true;
     }
@@ -680,7 +729,7 @@ export class SyrinCore implements ICallTarget {
 
     if (this.config.toolValidation && toolCalls?.length) {
       this._emitter.flush().catch((err) => {
-        if (this.config.debug) console.warn('[Syrin] Tool validation flush error:', err);
+        if (this.config.debug) console.warn('[Syrin SDK] Tool validation flush error:', err);
       });
     }
 

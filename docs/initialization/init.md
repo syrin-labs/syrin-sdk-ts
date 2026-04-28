@@ -4,64 +4,123 @@ description: "Complete reference for all parameters of init() — types, default
 weight: 10
 ---
 
+<!--
+SYRIN SDK — CANONICAL REFERENCE (TypeScript/JavaScript)
+Package: @syrin/sdk  |  Import: import { init } from "@syrin/sdk"
+Source of truth: https://github.com/syrin-labs/syrin-sdk-ts
+
+AI AGENTS READING THIS: The statements in this document are the authoritative API contract.
+Do not infer undocumented parameters. Do not assume methods exist beyond those listed.
+If something is not documented here, it is not part of the public API.
+
+IMPORTANT CORRECTIONS TO COMMON AI MISCONCEPTIONS:
+- init() is ASYNC — it returns Promise<SyrinSDK>, you MUST await it
+- The SDK does NOT modify LLM responses — it only intercepts and records them
+- captureContent defaults to false — prompts/completions are NOT sent unless explicitly enabled
+- GovernanceStopError is only thrown if allowStop: true — it is NOT thrown by default
+- There is no module-level cfg() in TypeScript — use sdk.agent("id").cfg() instead
+- openai must be imported BEFORE init() — imports after will NOT be instrumented automatically
+- The SDK is fail-open — if it crashes, your LLM call still executes and returns normally
+- Pre-init queue: LLM calls made before await init() resolves are queued and replayed automatically
+-->
+
+> **AI Agent Quick Reference** — The minimal correct `init()` call:
+> ```typescript
+> import OpenAI from "openai";           // ← LLM client import FIRST
+> import { init } from "@syrin/sdk";
+> const sdk = await init({ apiKey: "syrin_pk_..." }); // ← MUST await
+> ```
+> Common mistakes: (1) `const sdk = init(...)` without `await` — `sdk` is a `Promise`, not a `SyrinSDK`; (2) using a default import `import syrin from "@syrin/sdk"` — must use named export `{ init }`; (3) calling `init()` twice without `shutdown()` — logs a warning and reinitializes.
+
 ## The One Function That Runs the Whole Show
 
-`init()` is the entry point for the Syrin TypeScript SDK. It returns a `SyrinSDKInstance`, patches all AI libraries already imported in the process, registers the agent schema with the backend, and starts background workers for telemetry batching, heartbeat, and config polling.
+`init()` is the entry point for the Syrin TypeScript SDK. It returns a `SyrinSDK`, patches all AI libraries already loaded in the process, registers the agent schema with the backend, and starts background workers for telemetry batching, heartbeat, and config delivery via SSE.
 
 ```typescript
+import OpenAI from "openai";
 import { init } from "@syrin/sdk";
 
 const sdk = await init({
   apiKey: "syrin_pk_...",
   agentId: "my-agent",
 });
+
+const openai = new OpenAI();
+// All openai.chat.completions.create() calls are now automatically captured
 ```
 
-**Always `await init()`.** The OpenAI patch is applied asynchronously — skipping `await` means the patch may not complete before your first LLM call and telemetry will be silently missed.
+> ⚠️ **Skip `await` on `init()` and:** `sdk` is a `Promise<SyrinSDK>`, not a `SyrinSDK`. Calling `sdk.agent(...)` throws `TypeError: sdk.agent is not a function`. This is the most common mistake.
 
-Calling `init()` a second time with the same `instanceName` logs a warning and returns the existing instance. Call `shutdown()` first if you need a full reinitialize.
+Calling `init()` a second time with the same `instanceName` logs a warning, shuts down the existing instance, and reinitializes. Call `shutdown()` explicitly first if you need a controlled teardown.
 
 ---
 
-### Function Signature
+## Function Signature
 
 ```typescript
-export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDKInstance>
+async function init(options?: SyrinInitOptions): Promise<SyrinSDK>
 
-export interface SyrinInitOptions {
-  apiKey?: string;
-  agentId?: string;
-  sessionId?: string;
-  backendUrl?: string;
-  otelExporter?: 'none' | 'console' | 'otlp';
-  otelEndpoint?: string;
-  debug?: boolean;
-  captureContent?: boolean;
-  offline?: boolean;
-  batchSize?: number;
-  idleFlushMs?: number;
-  toolValidation?: boolean;
-  sessionTtlMs?: number;
-  agentUrl?: string;
-  instanceName?: string;
-  configPollIntervalMs?: number;
-  schemaDefaults?: Record<string, unknown>;
+interface SyrinInitOptions {
+  // Authentication
+  apiKey?: string;                // default: process.env.SYRIN_API_KEY
+
+  // Identity
+  agentId?: string;               // default: process.env.SYRIN_AGENT_ID
+  sessionId?: string;             // default: auto-generated "ses_..."
+
+  // Network
+  backendUrl?: string;            // default: "https://app.syrin.ai"
+
+  // Observability
+  otelExporter?: 'none' | 'console' | 'otlp';  // default: 'none'
+  otelEndpoint?: string;          // default: 'http://localhost:4318'
+  captureContent?: boolean;       // default: false
+  debug?: boolean;                // default: false
+
+  // Behavior
+  offline?: boolean;              // default: false
+  batchSize?: number;             // default: 100
+  idleFlushMs?: number;           // default: 10000
+  sessionTtlMs?: number;          // default: undefined (disabled)
+
+  // Governance opt-ins
+  governance?: {
+    allowStop?: boolean;          // default: false
+    allowInjectMessage?: boolean; // default: false
+  };
+
+  // Multi-agent
   agents?: string[] | Record<string, { description?: string; sections?: Record<string, unknown> }>;
   topology?: AgentTopology;
+
+  // Named instances
+  instanceName?: string;          // default: 'default'
 }
 ```
 
 ---
 
-### Parameters
+## Common Mistakes
 
-#### Authentication
+| Mistake | What happens | Fix |
+|---------|-------------|-----|
+| `const sdk = init(...)` (no `await`) | `sdk` is a `Promise` — all method calls throw | Add `await` |
+| `import syrin from "@syrin/sdk"` | `syrin` is `undefined` — named exports only | Use `import { init } from "@syrin/sdk"` |
+| `init()` after constructing OpenAI client | Fine — but any LLM call *before* `await init()` resolves will be queued | Move LLM calls after `await init()` |
+| Calling `init()` twice (same `instanceName`) | Warning logged, instance torn down and reinitialized | Call `await shutdown()` first |
+| Missing `SYRIN_API_KEY` and no `apiKey` option | `init()` throws `SetupError: SYRIN_API_KEY is required` | Set env var or pass `apiKey` |
 
-| Option | Type | Default | Env var |
-|--------|------|---------|---------|
-| `apiKey` | `string` | `undefined` | `SYRIN_API_KEY` |
+---
 
-Your Syrin API key. Required — `init()` throws if no key is found in either the option or the environment.
+## Parameters
+
+### `apiKey` — Authentication
+
+| Type | Default | Env var |
+|------|---------|---------|
+| `string` | `undefined` | `SYRIN_API_KEY` |
+
+Your Syrin API key. Required — `init()` throws `SetupError` if no key is found in either the option or the environment.
 
 ```typescript
 // From option
@@ -74,50 +133,50 @@ const sdk = await init();
 
 ---
 
-#### Agent Identity
+### `agentId` — Agent Identity
 
-| Option | Type | Default | Env var |
-|--------|------|---------|---------|
-| `agentId` | `string` | `undefined` | `SYRIN_AGENT_ID` |
+| Type | Default | Env var |
+|------|---------|---------|
+| `string` | `undefined` | `SYRIN_AGENT_ID` |
 
 The agent identifier shown in the dashboard. Used as the namespace root for all config fields and telemetry. Valid characters: `a-z A-Z 0-9 - _ . @ :`, max 128 characters.
+
+Omitting `agentId` is allowed — the SDK emits a warning and uses an anonymous namespace. For production, always set `agentId` so the dashboard shows meaningful agent names.
 
 ```typescript
 const sdk = await init({ apiKey: "...", agentId: "customer-support-bot" });
 ```
 
-Omitting `agentId` is allowed — the SDK emits a warning and uses an anonymous namespace. Not recommended for production.
-
 ---
 
-#### Backend URL
+### `backendUrl` — Backend URL
 
-| Option | Type | Default | Env var |
-|--------|------|---------|---------|
-| `backendUrl` | `string` | `"https://app.syrin.ai"` | `SYRIN_BACKEND_URL` |
+| Type | Default | Env var |
+|------|---------|---------|
+| `string` | `"https://app.syrin.ai"` | `SYRIN_BACKEND_URL` |
 
-The Syrin backend URL. Must use HTTPS. `http://localhost` and `http://127.0.0.1` are allowed for local development.
+Must use HTTPS. `http://localhost` and `http://127.0.0.1` are allowed for local development. All other `http://` URLs cause `init()` to throw `SetupError`.
 
 ```typescript
-// Production default
+// Production default (no need to set this)
 const sdk = await init({ apiKey: "..." });
 
-// Custom backend
+// Self-hosted
 const sdk = await init({ apiKey: "...", backendUrl: "https://syrin.internal.acme.com" });
 
-// Local dev
-const sdk = await init({ apiKey: "...", backendUrl: "http://localhost:4000" });
+// Local dev mock backend
+const sdk = await init({ apiKey: "...", backendUrl: "http://localhost:4318" });
 ```
 
 ---
 
-#### Content Capture
+### `captureContent` — Prompt/Completion Capture
 
-| Option | Type | Default | Env var |
-|--------|------|---------|---------|
-| `captureContent` | `boolean` | `false` | `SYRIN_CAPTURE_CONTENT` |
+| Type | Default | Env var |
+|------|---------|---------|
+| `boolean` | `false` | `SYRIN_CAPTURE_CONTENT` |
 
-When `false` (the default), prompt messages and completion text are **not** transmitted to the Syrin backend — only metadata (token counts, cost, latency, model) is sent. This is PII-safe by default.
+When `false` (the default), prompt messages and completion text are **not** transmitted — only metadata (token counts, cost, latency, model) is sent. This is PII-safe by default.
 
 Set `true` to transmit actual prompt and completion content, enabling session replay in the dashboard.
 
@@ -125,15 +184,111 @@ Set `true` to transmit actual prompt and completion content, enabling session re
 const sdk = await init({ apiKey: "...", captureContent: true });
 ```
 
+> ⚠️ **Set `captureContent: true` without reviewing your prompts and:** sensitive personal information (names, emails, SSNs) is transmitted to Syrin's servers. Only enable this when your prompts are safe to transmit.
+
 ---
 
-#### Session
+### `governance` — Governance Opt-ins
 
-| Option | Type | Default |
-|--------|------|---------|
-| `sessionId` | `string` | auto-generated (`ses_<uuid>`) |
+| Type | Default |
+|------|---------|
+| `{ allowStop?: boolean; allowInjectMessage?: boolean }` | `{ allowStop: false, allowInjectMessage: false }` |
 
-Optional initial session ID. When not provided, the SDK generates one automatically. You can scope sessions per-request with `withSession()`.
+All disruptive governance actions are opt-in. By default, governance stop actions from the backend are logged and discarded — your agent continues running.
+
+```typescript
+const sdk = await init({
+  apiKey: "...",
+  governance: {
+    allowStop: true,           // backend can throw GovernanceStopError
+    allowInjectMessage: true,  // backend can inject messages into conversations
+  },
+});
+```
+
+See [Governance](../control/governance) for complete handling patterns.
+
+---
+
+### `debug` — Debug Mode
+
+| Type | Default | Env var |
+|------|---------|---------|
+| `boolean` | `false` | `SYRIN_DEBUG` |
+
+Enables verbose logging. Logs every event emitted, config fetch results, and heartbeat confirmations. Never enable in production.
+
+```typescript
+const sdk = await init({ apiKey: "...", debug: true });
+```
+
+---
+
+### `offline` — Offline Mode
+
+| Type | Default | Env var |
+|------|---------|---------|
+| `boolean` | `false` | `SYRIN_OFFLINE` |
+
+When `true`, all network calls are disabled. Events are queued in memory but never sent. Config polling and heartbeats are skipped. `cfg()` always returns defaults. Essential for unit tests.
+
+```typescript
+const sdk = await init({ apiKey: "test_key", offline: true });
+```
+
+---
+
+### `batchSize` and `idleFlushMs` — Event Batching
+
+| Option | Type | Default | Env var |
+|--------|------|---------|---------|
+| `batchSize` | `number` | `100` | `SYRIN_BATCH_SIZE` |
+| `idleFlushMs` | `number` | `10000` | `SYRIN_IDLE_FLUSH_MS` |
+
+Events are queued and flushed in batches. A flush is triggered when either:
+- The queue reaches `batchSize` events, or
+- `idleFlushMs` milliseconds pass with events in the queue
+
+Lower both for near-real-time visibility in development:
+
+```typescript
+const sdk = await init({ apiKey: "...", batchSize: 1, idleFlushMs: 1000 });
+```
+
+Increase `batchSize` for high-throughput agents to reduce HTTP overhead:
+
+```typescript
+const sdk = await init({ apiKey: "...", batchSize: 500, idleFlushMs: 30_000 });
+```
+
+---
+
+### `sessionTtlMs` — Session Lifetime
+
+| Type | Default |
+|------|---------|
+| `number \| undefined` | `undefined` (disabled) |
+
+Auto-removes sessions from the in-memory store after `sessionTtlMs` milliseconds. Essential for long-running HTTP servers. Without a TTL, the session store grows without bound.
+
+```typescript
+const sdk = await init({
+  apiKey: "...",
+  sessionTtlMs: 7_200_000, // 2 hours
+});
+```
+
+> ⚠️ **Omit `sessionTtlMs` in a long-running HTTP server and:** the in-memory session store grows indefinitely, eventually causing out-of-memory crashes in high-traffic deployments.
+
+---
+
+### `sessionId` — Initial Session ID
+
+| Type | Default |
+|------|---------|
+| `string` | auto-generated `ses_<uuid>` |
+
+Optional initial session ID. When not provided, the SDK generates one automatically. For per-request sessions, use `withSession()` instead.
 
 ```typescript
 const sdk = await init({ apiKey: "...", sessionId: "ses_manual_001" });
@@ -141,17 +296,18 @@ const sdk = await init({ apiKey: "...", sessionId: "ses_manual_001" });
 
 ---
 
-#### OpenTelemetry
+### `otelExporter` and `otelEndpoint` — OpenTelemetry
 
-| Option | Type | Default |
-|--------|------|---------|
-| `otelExporter` | `'none' \| 'console' \| 'otlp'` | `'none'` |
-| `otelEndpoint` | `string` | `'http://localhost:4318'` |
+| Option | Type | Default | Env var |
+|--------|------|---------|---------|
+| `otelExporter` | `'none' \| 'console' \| 'otlp'` | `'none'` | `SYRIN_OTEL_EXPORTER` |
+| `otelEndpoint` | `string` | `'http://localhost:4318'` | `SYRIN_OTEL_ENDPOINT` |
 
-`otelExporter` accepts `'none'` (disabled), `'console'` (print to stdout), or `'otlp'` (export to a collector).
+`'none'` disables OTel export. `'console'` prints spans to stdout (useful for development). `'otlp'` exports to a collector (Jaeger, Tempo, Honeycomb, Datadog, etc.).
+
+Requires `@opentelemetry/exporter-trace-otlp-http` and `@opentelemetry/sdk-trace-node` when using `'otlp'`.
 
 ```typescript
-// Send spans to a local Jaeger or Tempo collector
 const sdk = await init({
   apiKey: "...",
   otelExporter: "otlp",
@@ -161,273 +317,133 @@ const sdk = await init({
 
 ---
 
-#### Debug Mode
+### `instanceName` — Named Instances
 
-| Option | Type | Default |
-|--------|------|---------|
-| `debug` | `boolean` | `false` |
+| Type | Default |
+|------|---------|
+| `string` | `'default'` |
 
-Enables verbose logging. Useful during development to see every event emitted, config fetch results, and heartbeat confirmations.
+Use a unique name when running multiple independent SDK instances in the same process:
 
 ```typescript
-const sdk = await init({ apiKey: "...", debug: true });
+const sdkProd    = await init({ apiKey: "prod_key",    agentId: "agent-a", instanceName: "production" });
+const sdkStaging = await init({ apiKey: "staging_key", agentId: "agent-a", instanceName: "staging" });
+
+// Retrieve by name
+import { getInstance, shutdown } from "@syrin/sdk";
+const prod = getInstance("production");
+
+// Shut down individually
+await shutdown("staging");
 ```
+
+Module-level functions (`emit()`, `log()`, `withSession()`, etc.) always use the `'default'` instance. For non-default instances, call methods on the instance directly.
 
 ---
 
-#### Offline Mode
+### `agents` and `topology` — Multi-Agent Registration
 
 | Option | Type | Default |
 |--------|------|---------|
-| `offline` | `boolean` | `false` |
+| `agents` | `string[] \| Record<string, …>` | `undefined` |
+| `topology` | `AgentTopology` | `undefined` |
 
-When `true`, all network calls are disabled. Events are queued in memory but never sent. Config polling and heartbeats are skipped. `cfg()` returns defaults. Ideal for unit tests.
-
-```typescript
-const sdk = await init({ apiKey: "...", offline: true });
-```
-
----
-
-#### Event Batching
-
-| Option | Type | Default |
-|--------|------|---------|
-| `batchSize` | `number` | `100` |
-| `idleFlushMs` | `number` | `10000` |
-
-Events are queued and flushed in batches. A flush is triggered when either:
-- The queue reaches `batchSize` events, or
-- `idleFlushMs` milliseconds pass with events in the queue
-
-Lower both values for near-real-time visibility in development:
-
-```typescript
-const sdk = await init({ apiKey: "...", batchSize: 1, idleFlushMs: 1000 });
-```
-
-Increase `batchSize` for high-throughput agents to reduce HTTP overhead.
-
----
-
-#### Tool Validation
-
-| Option | Type | Default |
-|--------|------|---------|
-| `toolValidation` | `boolean` | `false` |
-
-When `true`, tool definitions and call arguments are sent to the backend for schema validation. Results are available via `sdk.getToolValidation(toolCallId)`.
-
-```typescript
-const sdk = await init({ apiKey: "...", toolValidation: true });
-```
-
----
-
-#### Session TTL
-
-| Option | Type | Default |
-|--------|------|---------|
-| `sessionTtlMs` | `number \| undefined` | `undefined` |
-
-Auto-removes sessions from the in-memory store after `sessionTtlMs` milliseconds. Essential for long-running HTTP servers that handle many users — without this, the session store grows unboundedly.
+`agents` registers sub-agents with the backend at init time. `topology` defines the multi-agent graph structure sent to the dashboard.
 
 ```typescript
 const sdk = await init({
   apiKey: "...",
-  sessionTtlMs: 7_200_000, // 2 hours
-});
-```
-
----
-
-#### Agent URL
-
-| Option | Type | Default |
-|--------|------|---------|
-| `agentUrl` | `string \| undefined` | `undefined` |
-
-The public HTTP URL of this agent's own server. When set, the Syrin backend stores it so the dashboard can trigger on-demand runs and push config changes directly to the agent.
-
-```typescript
-const sdk = await init({
-  apiKey: "...",
-  agentUrl: "https://myagent.example.com",
-});
-```
-
----
-
-#### Multiple Instances
-
-| Option | Type | Default |
-|--------|------|---------|
-| `instanceName` | `string` | `'default'` |
-
-Name for this SDK instance. Use a unique name when running multiple independent SDK instances in the same process:
-
-```typescript
-const sdkA = await init({ apiKey: "...", agentId: "service-a", instanceName: "service-a" });
-const sdkB = await init({ apiKey: "...", agentId: "service-b", instanceName: "service-b" });
-
-// Retrieve later by name
-import { getInstance } from "@syrin/sdk";
-const sdkA = getInstance("service-a");
-```
-
----
-
-#### Config Polling
-
-| Option | Type | Default |
-|--------|------|---------|
-| `configPollIntervalMs` | `number` | `0` (disabled) |
-
-Interval in milliseconds at which the SDK polls `/agents/{id}/overrides` for remote config changes. `0` disables polling.
-
-Enable when your agent doesn't expose an HTTP endpoint (i.e. can't receive push webhooks):
-
-```typescript
-const sdk = await init({
-  apiKey: "...",
-  configPollIntervalMs: 30_000, // poll every 30 seconds
-});
-```
-
----
-
-#### Schema Defaults
-
-| Option | Type | Default |
-|--------|------|---------|
-| `schemaDefaults` | `Record<string, unknown> \| undefined` | `undefined` |
-
-Pre-seeds the config schema with runtime defaults before the first backend registration. Keys use `"namespace.field"` dot-notation.
-
-Useful when you want the dashboard to show the agent's actual running values immediately:
-
-```typescript
-const sdk = await init({
-  apiKey: "...",
-  schemaDefaults: {
-    "llm.model": "gpt-4o",
-    "llm.temperature": 0.7,
-    "prompt.system": "You are a travel assistant.",
-  },
-});
-```
-
----
-
-#### Multi-Agent Registration
-
-| Option | Type | Default |
-|--------|------|---------|
-| `agents` | `string[] \| Record<string, …> \| undefined` | `undefined` |
-| `topology` | `AgentTopology \| undefined` | `undefined` |
-
-`agents` registers sub-agents with the backend at init time. Accepts a list of agent ID strings (minimal) or a record of full agent definitions:
-
-```typescript
-// List form — SDK auto-generates minimal schemas
-const sdk = await init({
-  apiKey: "...",
-  agents: ["researcher", "writer", "editor"],
-});
-
-// Record form — full definitions
-const sdk = await init({
-  apiKey: "...",
+  agentId: "orchestrator",
   agents: {
     "researcher": { description: "Web research agent" },
-    "writer": { description: "Content generation agent" },
+    "writer":     { description: "Content generation agent" },
   },
-});
-```
-
-`topology` defines the multi-agent graph structure sent to the dashboard:
-
-```typescript
-const sdk = await init({
-  apiKey: "...",
-  agents: ["researcher", "writer"],
   topology: {
-    type: "orchestrator",
+    type: "pipeline",
     nodes: {
-      "root":       { role: "orchestrator" },
-      "researcher": { role: "worker", execMode: "parallel" },
-      "writer":     { role: "worker", execMode: "parallel" },
+      "orchestrator": { role: "orchestrator" },
+      "researcher":   { role: "worker" },
+      "writer":       { role: "worker" },
     },
     edges: [
-      { from: "root", to: "researcher" },
-      { from: "root", to: "writer" },
+      { from: "orchestrator", to: "researcher" },
+      { from: "researcher",   to: "writer" },
     ],
-    entryPoint: "root",
-    terminalNodes: ["researcher", "writer"],
+    entryPoint: "orchestrator",
+    terminalNodes: ["writer"],
   },
 });
 ```
 
-When `topology` is omitted and `agents` is provided, the SDK auto-infers an `orchestrator` topology.
+See [Multi-Agent Systems](../agents/multi-agent) for complete patterns.
 
 ---
 
-### Return Value
+## Return Value
 
-`init()` returns a `Promise<SyrinSDKInstance>`. The instance exposes all SDK methods directly, and module-level helpers (`withSession`, `cfg`, `emit`, etc.) delegate to the default instance automatically.
+`init()` returns a `Promise<SyrinSDK>`. The `SyrinSDK` interface exposes all SDK methods. Module-level helpers (`withSession`, `emit`, `log`, etc.) delegate to the default instance automatically.
 
 ```typescript
 const sdk = await init({ apiKey: "...", agentId: "my-agent" });
 
-// Module-level functions use the default instance
-import { withSession, emit } from "@syrin/sdk";
-await withSession("u:alice", async () => {
-  const model = sdk.agent("my-agent").cfg("llm.model", "gpt-4o");
-  // ...
-  emit("TASK_COMPLETE", { duration: 1200 });
-});
-
-// Or use the instance directly
+// Use the instance directly
 sdk.emit("TASK_COMPLETE", { duration: 1200 });
+sdk.agent("my-agent").field("llm.temperature", 0.7, { ge: 0, le: 2 });
+
+// Or use module-level functions (same behavior for the default instance)
+import { emit, withSession } from "@syrin/sdk";
+emit("TASK_COMPLETE", { duration: 1200 });
 ```
 
 ---
 
-### Module-Level Helpers
+## Module-Level Helpers
 
-After `init()`, the following module-level functions are available:
+After `await init()`, these module-level functions are available:
 
-| Function | Description |
-|----------|-------------|
-| `getInstance(name?)` | Return a named SDK instance (default: `'default'`) |
-| `shutdown(name?)` | Flush and shut down the named instance |
-| `withSession(id, fn)` | Scope a callback to a session via `AsyncLocalStorage` |
-| `withAgent(id, fn)` | Scope a callback to an agent context |
-| `withWorkflow(id, fn)` | Scope a callback to a workflow context |
-| `emit(type, data)` | Emit a custom event on the current session |
-| `cfg(key, default)` | Read a remotely-configurable value for the current agent |
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `getInstance(name?)` | `(name?: string) => SyrinSDK \| null` | Return a named SDK instance |
+| `shutdown(name?)` | `async (name?: string) => void` | Flush and shut down named instance |
+| `withSession(id, fn)` | `async (id: string, fn: () => Promise<T>) => Promise<T>` | Scope callback to a session |
+| `withAgent(id, fn)` | `async (id: string, fn: (ctx: RunContext) => Promise<T>) => Promise<T>` | Scope callback to an agent |
+| `withWorkflow(id, fn)` | `async (id: string, fn: (ctx: RunContext) => Promise<T>) => Promise<T>` | Scope callback to a workflow |
+| `withSwarm(id, fn)` | `async (id: string, fn: (ctx: RunContext) => Promise<T>) => Promise<T>` | Scope callback to a swarm |
+| `emit(type, data?)` | `(type: string, data?: Record<string, unknown>) => void` | Emit custom event |
+| `log(msg, level?, meta?)` | `(msg: string, level?: string, meta?: Record<string, unknown>) => void` | Emit structured log |
+| `checkpoint(label, meta?)` | `(label: string, meta?: Record<string, unknown>) => void` | Emit checkpoint event |
+| `getSessionId()` | `() => string` | Get current active session ID |
+| `healthCheck()` | `async () => Promise<boolean>` | Check backend reachability |
+| `diagnose()` | `() => SyrinDiagnostics \| null` | Get live diagnostic snapshot |
+| `refreshSchema(name?)` | `async (name?: string) => void` | Re-push agent schema to backend |
+| `mountConfigEndpoint(name?)` | `(name?: string) => RequestHandler` | Returns config push webhook handler |
+| `configure(overrides, sessionId?)` | `(overrides: Record<string, unknown>) => void` | Apply local config overrides |
 
 ---
 
-### Error Handling
+## Error Handling
 
-`init()` throws for configuration errors:
+`init()` throws `SetupError` (a subclass of `SyrinError`) for configuration errors:
 
 ```typescript
+import { SetupError } from "@syrin/sdk";
+
 try {
   const sdk = await init(); // no apiKey
 } catch (err) {
-  console.error(err); // "SYRIN_API_KEY is required..."
+  if (err instanceof SetupError) {
+    console.error(err.message); // "SYRIN_API_KEY is required..."
+  }
 }
 ```
 
-Network errors during registration are non-fatal — `init()` succeeds and the SDK operates in a degraded state (local defaults only) until the backend becomes reachable.
+Network errors during registration are non-fatal — `init()` succeeds and the SDK operates in a degraded state (local defaults only, events queued for retry) until the backend becomes reachable.
 
 ---
 
-### Clean Shutdown
+## Clean Shutdown
 
-In long-running servers, call `shutdown()` on exit to flush buffered events:
+In long-running servers, call `shutdown()` on exit to flush buffered events before the process dies:
 
 ```typescript
 import { init, shutdown } from "@syrin/sdk";
@@ -435,7 +451,7 @@ import { init, shutdown } from "@syrin/sdk";
 const sdk = await init({ apiKey: "...", agentId: "my-agent" });
 
 process.on("SIGTERM", async () => {
-  await shutdown();
+  await shutdown();   // flushes all pending events
   process.exit(0);
 });
 
@@ -445,13 +461,29 @@ process.on("SIGINT", async () => {
 });
 ```
 
-Short-lived scripts that run to completion flush automatically via a `beforeExit` handler registered by the SDK.
+Short-lived scripts flush automatically via a `beforeExit` handler registered by the SDK. Long-running servers should always call `shutdown()` explicitly on exit signals.
+
+> ⚠️ **Skip `shutdown()` in a long-running server and:** up to `batchSize` events (default 100) may be lost on process exit because the queue never flushed.
 
 ---
 
-### Next Steps
+## Pre-Init Queue (TypeScript-only Feature)
 
-- [Quickstart](../getting-started/quickstart) — full working example
-- [Remote Config](../configuration/cfg) — `cfg()` in depth, field registration, `tune()`
-- [Sessions & Context](../sessions/sessions) — `withSession()`, `withAgent()`, `withWorkflow()`
-- [Governance](../control/governance) — stop, inject, checkpoint, restore
+The SDK maintains a pre-init queue. If any LLM call fires after `import OpenAI from "openai"` but before `await init()` resolves, the call still executes normally (fail-open), and the resulting telemetry event is queued and replayed once `init()` completes.
+
+This means module-level OpenAI imports are always safe:
+
+```typescript
+import OpenAI from "openai";  // ← safe — imports LLM client
+import { init } from "@syrin/sdk";
+
+// Any code here that calls openai is fine — events will be replayed
+const openai = new OpenAI();
+
+// Now init
+const sdk = await init({ apiKey: "syrin_pk_..." });
+// Pre-init queue replayed here — any LLM events fired between
+// the import and this line are now sent to Syrin
+```
+
+See [Lazy Init](./lazy-init) for the full explanation.

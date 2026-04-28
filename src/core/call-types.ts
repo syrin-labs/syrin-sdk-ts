@@ -56,7 +56,7 @@ export interface BeforeCallResult {
 
 export interface SchemaField {
   name: string;
-  type: 'str' | 'float' | 'int' | 'bool';
+  type: 'str' | 'float' | 'int' | 'bool' | 'list';
   default?: unknown;
   multiline?: boolean;
   constraints?: { ge?: number; le?: number; gt?: number; lt?: number; enum?: unknown[] };

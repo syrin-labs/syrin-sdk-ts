@@ -94,7 +94,7 @@ export function normalizeBackendUrl(url: string): string {
 
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     throw new Error(
-      `[Syrin] Invalid backendUrl: '${url}' — must include protocol (http:// or https://).`,
+      `[Syrin SDK] Invalid backendUrl: '${url}' — must include protocol (http:// or https://).`,
     );
   }
 
@@ -102,7 +102,7 @@ export function normalizeBackendUrl(url: string): string {
     url.startsWith('http://localhost') || url.startsWith('http://127.0.0.1');
   if (!url.startsWith('https://') && !isLocal) {
     throw new Error(
-      `[Syrin] backendUrl must use HTTPS (got: '${url}'). ` +
+      `[Syrin SDK] backendUrl must use HTTPS (got: '${url}'). ` +
       'Use http://localhost or http://127.0.0.1 for local development.',
     );
   }
@@ -130,14 +130,14 @@ export function createConfig(
 
   if (!merged.apiKey) {
     throw new Error(
-      '[Syrin] apiKey is required. Set SYRIN_API_KEY env var or pass apiKey to init().',
+      '[Syrin SDK] apiKey is required. Set SYRIN_API_KEY env var or pass apiKey to init().',
     );
   }
 
   const validExporters = ['none', 'console', 'otlp'];
   if (merged.otelExporter && !validExporters.includes(merged.otelExporter)) {
     throw new Error(
-      `[Syrin] Invalid otelExporter: "${merged.otelExporter}". Must be one of: ${validExporters.join(', ')}`,
+      `[Syrin SDK] Invalid otelExporter: "${merged.otelExporter}". Must be one of: ${validExporters.join(', ')}`,
     );
   }
 

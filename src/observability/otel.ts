@@ -156,7 +156,7 @@ export class OTelBridge {
     // Dynamically load OTel to avoid hard dependency
     this._setupAsync().catch((err) => {
       if (this.config.debug) {
-        console.warn('[Syrin] Failed to initialize OTel:', err);
+        console.warn('[Syrin SDK] Failed to initialize OTel:', err);
       }
     });
   }
@@ -170,7 +170,7 @@ export class OTelBridge {
       otelSdkTrace = await import('@opentelemetry/sdk-trace-node');
     } catch {
       if (this.config.debug) {
-        console.warn('[Syrin] @opentelemetry packages not available. OTel spans will not be emitted.');
+        console.warn('[Syrin SDK] @opentelemetry packages not available. OTel spans will not be emitted.');
       }
       return;
     }
@@ -223,7 +223,7 @@ export class OTelBridge {
         provider.addSpanProcessor(new BatchSpanProcessor(exporter));
       } catch (err) {
         if (this.config.debug) {
-          console.warn('[Syrin] Failed to load OTLP exporter:', err);
+          console.warn('[Syrin SDK] Failed to load OTLP exporter:', err);
         }
       }
     }
@@ -236,7 +236,7 @@ export class OTelBridge {
     this.tracer = otelApi.trace.getTracer('syrin-sdk', '0.1.0');
 
     if (this.config.debug) {
-      console.log(`[Syrin] OTel initialized with exporter: ${this.config.otelExporter}`);
+      console.log(`[Syrin SDK] OTel initialized with exporter: ${this.config.otelExporter}`);
     }
   }
 

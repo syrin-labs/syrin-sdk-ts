@@ -153,7 +153,7 @@ export class CheckpointClient {
       } catch {
         // Backend unavailable — local cache is the source of truth for this session
         if (this._config.debug) {
-          console.warn(`[Syrin] Could not persist checkpoint ${cp.checkpointId} to backend. Using local cache.`);
+          console.warn(`[Syrin SDK] Could not persist checkpoint ${cp.checkpointId} to backend. Using local cache.`);
         }
       }
     }
@@ -213,7 +213,7 @@ export class CheckpointClient {
       }
     } catch {
       if (this._config.debug) {
-        console.warn(`[Syrin] Could not fetch checkpoint ${checkpointId} from backend.`);
+        console.warn(`[Syrin SDK] Could not fetch checkpoint ${checkpointId} from backend.`);
       }
     }
 

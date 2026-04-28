@@ -1,42 +1,64 @@
 ---
 title: "Sessions & Windows"
-description: "WindowType constants, deterministic session IDs, session TTL, and session lifecycle events in the TypeScript SDK."
+description: "Session IDs, window types, lifecycle events, session TTL, and session metadata in the TypeScript SDK."
 weight: 32
 ---
 
+<!--
+SYRIN SDK — CANONICAL REFERENCE (TypeScript/JavaScript)
+Package: @syrin/sdk  |  Import: import { init } from "@syrin/sdk"
+Source of truth: https://github.com/syrin-labs/syrin-sdk-ts
+
+AI AGENTS READING THIS: The statements in this document are the authoritative API contract.
+Do not infer undocumented parameters. Do not assume methods exist beyond those listed.
+If something is not documented here, it is not part of the public API.
+
+IMPORTANT CORRECTIONS TO COMMON AI MISCONCEPTIONS:
+- init() is ASYNC — it returns Promise<SyrinSDK>, you MUST await it
+- The TypeScript SDK does NOT have a WindowType enum — use plain strings
+- SESSION_CRASHED is NOT emitted automatically — emit it manually if needed
+- SESSION_ENDED IS emitted automatically in withSession() finally block
+- clearStaleSessions() is SYNCHRONOUS — it reads from the in-memory store
+- getSessionId() reads from AsyncLocalStorage — returns the innermost active session
+-->
+
+> **AI Agent Quick Reference** — Open a daily session and get the session ID:
+> ```typescript
+> import { init, withSession, getSessionId } from "@syrin/sdk";
+> const sdk = await init({ apiKey: "syrin_pk_..." }); // ← await
+> const sessionId = `u:${userId}:${new Date().toISOString().slice(0, 10)}`;
+> await withSession(sessionId, async () => {
+>   const id = getSessionId(); // "u:alice:2026-04-24"
+>   await client.chat.completions.create({ ... });
+> });
+> ```
+> Common mistakes: (1) expecting a `WindowType` enum — TypeScript SDK doesn't have one, build the string yourself; (2) expecting `SESSION_CRASHED` to fire automatically on error — it does not in TypeScript; (3) not calling `clearStaleSessions()` in long-running servers — the session store grows indefinitely without it.
+
 ## Sessions: Where Your LLM Calls Go to Live Together
 
-A session is a named group of LLM calls, log entries, and lifecycle events that belong together — typically one user's interaction with your agent in a given time window. Sessions give the dashboard its timeline view: you see every call Alice made today, in order, with costs and latencies.
-
-### What is a Session?
-
-Every LLM call that Syrin instruments must belong to a session. A session has:
-- A **session ID** — either auto-generated, user-specified, or deterministically computed from a user ID + time window
-- A **start event** (`SESSION_STARTED`) emitted when the session opens
-- An **end event** (`SESSION_ENDED`) emitted when it closes
-- All telemetry events (LLM calls, logs, lifecycle events) stamped with the session ID
+A session is a named group of LLM calls, log entries, and lifecycle events that belong together — typically one user's interaction with your agent in a given time window. Sessions give the dashboard its timeline view: everything Alice did today, in order, with costs and latencies.
 
 ---
 
-### Session ID Formats
+## Session ID Formats
 
 | Source | Example |
 |--------|---------|
 | Auto-generated | `ses_a1b2c3d4e5f6` |
-| Manual | `"ses_order_12345"` |
-| `userId` + `DAY` | `"u:alice:2026-04-24"` |
-| `userId` + `HOUR` | `"u:alice:2026-04-24T14"` |
-| `userId` + `WEEK` | `"u:alice:2026-W17"` |
-| `userId` + `MONTH` | `"u:alice:2026-04"` |
-| `userId` + `FOREVER` | `"u:alice"` |
+| Manual | `"order-12345-chat"` |
+| User + DAY | `"u:alice:2026-04-24"` |
+| User + HOUR | `"u:alice:2026-04-24T14"` |
+| User + WEEK | `"u:alice:2026-W17"` |
+| User + MONTH | `"u:alice:2026-04"` |
+| User + FOREVER | `"u:alice"` |
 
-Deterministic session IDs are computed at call time using UTC timestamps. The same user on the same day always gets the same session ID, making it safe to call from any replica without coordination.
+Deterministic session IDs are computed from UTC timestamps. The same user on the same day always gets the same session ID — safe to call from any replica without coordination.
 
 ---
 
-### Window Types
+## Window Types
 
-The TypeScript SDK does not expose a `WindowType` enum — windows are plain strings. Pass one of the accepted string values directly when computing your session ID.
+The TypeScript SDK has no `WindowType` enum. Pass plain strings when computing session IDs:
 
 | String | Alias | Reset Period | Session ID Example |
 |--------|-------|--------------|-------------------|
@@ -46,254 +68,129 @@ The TypeScript SDK does not expose a `WindowType` enum — windows are plain str
 | `"month"` | `"monthly"` | 1st of month 00:00 UTC | `u:alice:2026-04` |
 | `"forever"` | `"persistent"` | Never | `u:alice` |
 
----
+### When to use each window
 
-### Choosing a Window
-
-| Window | When to use |
-|--------|-------------|
+| Window | Use when |
+|--------|----------|
 | `"day"` | Most agents — one session per user per day is a natural conversation boundary |
-| `"hour"` | High-frequency agents, chatbots with many quick interactions |
-| `"week"` | Low-frequency agents — weekly report generation, batch jobs |
+| `"hour"` | High-frequency chatbots with many quick interactions |
+| `"week"` | Low-frequency agents, weekly report generation |
 | `"month"` | Monthly billing or review workflows |
-| `"forever"` | User profiles, persistent assistants, long-lived agents |
+| `"forever"` | User profiles, persistent assistants |
 
-The `"day"` window is the right default for most agents. You almost never need to change it.
+The `"day"` window is the right default for most agents.
 
 ---
 
-### Computing Deterministic Session IDs
-
-The TypeScript SDK does not automatically compute deterministic session IDs from a `userId` + `window` pair. You build the string yourself — it is just string interpolation. The ID is deterministic by construction.
+## Computing Deterministic Session IDs
 
 ```typescript
-import { withSession } from '@syrin/sdk';
+import { withSession } from "@syrin/sdk";
 
-function sessionIdForUser(userId: string, window: string = 'day'): string {
+function sessionIdForUser(userId: string, window: string = "day"): string {
   const now = new Date();
   switch (window) {
-    case 'day':
-    case 'daily':
-      // "u:alice:2026-04-24"
+    case "day":
+    case "daily":
       return `u:${userId}:${now.toISOString().slice(0, 10)}`;
-    case 'hour':
-    case 'hourly':
-      // "u:alice:2026-04-24T14"
+    case "hour":
+    case "hourly":
       return `u:${userId}:${now.toISOString().slice(0, 13)}`;
-    case 'week':
-    case 'weekly': {
-      // "u:alice:2026-W17" — ISO week number
+    case "week":
+    case "weekly": {
       const startOfYear = new Date(Date.UTC(now.getUTCFullYear(), 0, 1));
       const weekNum = Math.ceil(
         ((now.getTime() - startOfYear.getTime()) / 86_400_000 + startOfYear.getUTCDay() + 1) / 7
       );
-      return `u:${userId}:${now.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
+      return `u:${userId}:${now.getUTCFullYear()}-W${String(weekNum).padStart(2, "0")}`;
     }
-    case 'month':
-    case 'monthly':
-      // "u:alice:2026-04"
+    case "month":
+    case "monthly":
       return `u:${userId}:${now.toISOString().slice(0, 7)}`;
-    case 'forever':
-    case 'persistent':
-      // "u:alice"
+    case "forever":
+    case "persistent":
       return `u:${userId}`;
     default:
       throw new Error(`Unknown window: ${window}`);
   }
 }
 
-// Usage
-const sessionId = sessionIdForUser('alice', 'day');  // "u:alice:2026-04-24"
+const sessionId = sessionIdForUser("alice", "day");  // "u:alice:2026-04-24"
 
 await withSession(sessionId, async () => {
-  const response = await openai.chat.completions.create({ ... });
-});
-```
-
-For most teams, extracting this into a shared utility and calling it from every request handler is sufficient.
-
----
-
-### Creating Sessions
-
-#### Via `withSession()` with a computed ID
-
-```typescript
-import { init, withSession } from '@syrin/sdk';
-
-const sdk = await init({ apiKey: 'syrin_...', agentId: 'my-agent' });
-
-// Daily session — most common pattern
-const sessionId = `u:alice:${new Date().toISOString().slice(0, 10)}`;
-
-await withSession(sessionId, async () => {
-  const response = await openai.chat.completions.create({ ... });
-});
-```
-
-#### Via explicit session ID
-
-```typescript
-// Use your own ID for easy correlation with your data model
-await withSession('order-12345-chat', async () => {
-  const response = await openai.chat.completions.create({ ... });
-});
-```
-
-#### Via `sdk.sessions.start()` with success criteria
-
-```typescript
-const { sessionId, feedback } = await sdk.sessions.start({
-  sessionId: `u:alice:${new Date().toISOString().slice(0, 10)}`,
-  successCriteria: [
-    "User's destination identified",
-    'At least 3 hotel options presented',
-    'Flights checked and presented',
-    'Total trip cost estimated',
-  ],
-});
-
-await withSession(sessionId, async () => {
-  const result = await runTravelAgent(userRequest);
-  if (allCriteriaMet(result)) {
-    await feedback.rate('positive');
-  } else {
-    await feedback.rate('negative', { reason: 'Some criteria not met' });
-  }
+  await client.chat.completions.create({ ... });
 });
 ```
 
 ---
 
-### Session Lifecycle Events
-
-Every opened session emits lifecycle events visible on the dashboard timeline:
+## Session Lifecycle Events
 
 | Event | When |
 |-------|------|
-| `SESSION_STARTED` | `withSession()` block entered |
-| `SESSION_ENDED` | `withSession()` block exited (normal or error) |
+| `SESSION_STARTED` | Emitted automatically when `withSession()` block is entered |
+| `SESSION_ENDED` | Always emitted in `finally` branch of `withSession()` |
 | `SESSION_CRITERIA` | When `successCriteria` is provided to `sdk.sessions.start()` |
-
-> **Note:** The TypeScript SDK does not emit `SESSION_CRASHED`. Errors thrown inside a `withSession()` block propagate to the caller normally — `SESSION_ENDED` is always emitted in the `finally` branch regardless of whether an error occurred. Use `sdk.emit('SESSION_CRASHED', { ... })` explicitly if you need to surface a crash event on the dashboard.
+| `SESSION_CRASHED` | **Not automatic** — emit manually if you want crash visibility |
 
 ```typescript
-// If you want explicit crash visibility:
+// To surface crash events on the dashboard:
 await withSession(sessionId, async () => {
   try {
     await runAgent();
   } catch (err) {
-    sdk.emit('SESSION_CRASHED', {
-      exception_type: err instanceof Error ? err.constructor.name : 'Error',
+    sdk.emit("SESSION_CRASHED", {
+      exception_type:    err instanceof Error ? err.constructor.name : "Error",
       exception_message: err instanceof Error ? err.message.slice(0, 500) : String(err),
     });
-    throw err;  // re-throw so the caller knows
+    throw err;  // re-throw so the caller handles it
   }
 });
 ```
 
 ---
 
-### Session TTL (Long-Running Servers)
+## Session TTL (Long-Running Servers)
 
-The SDK keeps all sessions in an in-memory `SessionStore`. Without cleanup, this store grows without bound in long-running HTTP servers. There is no background cleanup thread — call `clearStaleSessions` manually on a schedule:
+The SDK keeps all sessions in an in-memory `SessionStore`. Without cleanup, the store grows indefinitely in long-running HTTP servers.
+
+**Option 1: Pass `sessionTtlMs` to `init()`** — auto-eviction on the next access:
 
 ```typescript
-import { clearStaleSessions } from '@syrin/sdk';
+const sdk = await init({
+  apiKey: "syrin_pk_...",
+  sessionTtlMs: 3_600_000,  // evict sessions older than 1 hour
+});
+```
 
-// Remove sessions older than 1 hour — call this periodically
+**Option 2: Call `clearStaleSessions()` on a schedule:**
+
+```typescript
+import { clearStaleSessions } from "@syrin/sdk";
+
 setInterval(() => {
   const removed = clearStaleSessions(60 * 60 * 1000);  // 1 hour in ms
-  if (removed > 0) {
-    console.log(`[Syrin] Cleared ${removed} stale sessions`);
-  }
+  if (removed > 0) console.log(`[Syrin] Cleared ${removed} stale sessions`);
 }, 30 * 60 * 1000);  // run every 30 minutes
 ```
 
 Or via the SDK instance:
 
 ```typescript
-const sdk = await init({ ... });
 setInterval(() => sdk.clearStaleSessions(3_600_000), 1_800_000);
 ```
 
-`clearStaleSessions` returns the number of sessions removed. Sessions are identified as stale based on their `startedAt` timestamp.
+`clearStaleSessions` is synchronous and returns the number of sessions removed.
 
 ---
 
-### Session Metadata
-
-Attach arbitrary metadata to the `SESSION_STARTED` event by emitting it manually:
+## Getting the Current Session ID
 
 ```typescript
-await withSession(sessionId, async () => {
-  // Emit extra metadata alongside SESSION_STARTED
-  sdk.emit('SESSION_STARTED', {
-    plan: 'premium',
-    ab_variant: 'control',
-    region: 'us-east-1',
-    app_version: '2.3.1',
-  }, sessionId);
-
-  const response = await openai.chat.completions.create({ ... });
-});
-```
-
-All metadata fields are visible in the dashboard session detail panel.
-
----
-
-### Success Criteria
-
-Record expected outcomes for a session — useful for automated quality measurement:
-
-```typescript
-const { sessionId, feedback } = await sdk.sessions.start({
-  sessionId: `u:alice:${new Date().toISOString().slice(0, 10)}`,
-  successCriteria: [
-    "User's destination identified",
-    'At least 3 hotel options presented',
-    'Flights checked and presented',
-    'Total trip cost estimated',
-  ],
-});
-
-await withSession(sessionId, async () => {
-  const result = await runTravelAgent(userRequest);
-
-  if (allCriteriaMet(result)) {
-    await sdk.sessions.rate(sessionId, 'positive');
-  } else {
-    await sdk.sessions.rate(sessionId, 'negative', { reason: 'Some criteria not met' });
-  }
-});
-```
-
-When `successCriteria` is provided, a `SESSION_CRITERIA` event is emitted and the criteria are stored on the session state for dashboard display.
-
----
-
-### Session vs. Run vs. Trace
-
-Three complementary scopes:
-
-| Scope | Set via | Represents | Persists across |
-|-------|---------|------------|-----------------|
-| Session | `withSession(sessionId, ...)` | A user's interaction window | Multiple agent runs |
-| Run | `withAgent(agentId, ...)` | A single agent execution | The duration of the function |
-| Trace | Auto-generated | The full distributed call tree | All nested agent runs |
-
-A session can contain many runs. A trace spans the full nested call stack.
-
----
-
-### Getting the Current Session ID
-
-```typescript
-import { getSessionId, withSession } from '@syrin/sdk';
+import { getSessionId, withSession } from "@syrin/sdk";
 
 // Inside a withSession block — returns the active session ID
-await withSession('u:alice:2026-04-24', async () => {
+await withSession("u:alice:2026-04-24", async () => {
   const sessionId = getSessionId();  // "u:alice:2026-04-24"
   console.log(sessionId);
 });
@@ -302,85 +199,137 @@ await withSession('u:alice:2026-04-24', async () => {
 const sessionId = getSessionId();  // "ses_a1b2c3..."
 ```
 
-`getSessionId()` reads from `AsyncLocalStorage`, so it correctly resolves the innermost active session in nested or concurrent calls.
+`getSessionId()` reads from `AsyncLocalStorage` — correctly resolves the innermost active session in nested or concurrent calls.
 
 ---
 
-### Multi-Server Session Continuity
+## Session Metadata
 
-Because session IDs are plain strings you compute deterministically, any replica of your service handling requests for the same user on the same day will produce the same session ID — no session state needs to be shared between processes. The Syrin backend merges all events from the same session ID into one timeline automatically.
+Attach arbitrary metadata to the `SESSION_STARTED` event:
 
 ```typescript
-// Replica 1 — handles alice's first request
-const sessionId = `u:alice:${new Date().toISOString().slice(0, 10)}`;
-// sessionId = "u:alice:2026-04-24"
-
 await withSession(sessionId, async () => {
-  await openai.chat.completions.create({ ... });
-});
+  sdk.emit("SESSION_STARTED", {
+    plan: "premium",
+    ab_variant: "control",
+    region: "us-east-1",
+    app_version: "2.3.1",
+  }, sessionId);
 
-// Replica 2 — handles alice's second request (different process, same day)
-const sessionId2 = `u:alice:${new Date().toISOString().slice(0, 10)}`;
-// sessionId2 = "u:alice:2026-04-24" — same! Events merge in the dashboard.
-
-await withSession(sessionId2, async () => {
-  await openai.chat.completions.create({ ... });
+  const response = await client.chat.completions.create({ ... });
 });
 ```
 
 ---
 
-### Common Patterns
+## Success Criteria
 
-#### HTTP Request Handler
+Record expected outcomes for a session — useful for automated quality measurement:
 
 ```typescript
-import express from 'express';
-import { init, withSession } from '@syrin/sdk';
+const { sessionId, feedback } = await sdk.sessions.start({
+  sessionId: `u:alice:${new Date().toISOString().slice(0, 10)}`,
+  successCriteria: [
+    "User's destination identified",
+    "At least 3 hotel options presented",
+    "Flights checked and presented",
+    "Total trip cost estimated",
+  ],
+});
 
-const sdk = await init({ apiKey: 'syrin_...', agentId: 'chat-bot' });
+await withSession(sessionId, async () => {
+  const result = await runTravelAgent(userRequest);
+
+  if (allCriteriaMet(result)) {
+    await sdk.sessions.rate(sessionId, "positive");
+  } else {
+    await sdk.sessions.rate(sessionId, "negative", { reason: "Some criteria not met" });
+  }
+});
+```
+
+When `successCriteria` is provided, a `SESSION_CRITERIA` event is emitted and the criteria are stored on the session for dashboard display.
+
+---
+
+## Multi-Server Session Continuity
+
+Deterministic session IDs mean any replica of your service handling requests for the same user on the same day produces the same session ID — no session state needs to be shared between processes:
+
+```typescript
+// Replica 1 — handles alice's first request
+await withSession(`u:alice:${new Date().toISOString().slice(0, 10)}`, async () => {
+  await client.chat.completions.create({ ... });
+});
+// Session: "u:alice:2026-04-24"
+
+// Replica 2 — handles alice's second request (different process, same day)
+await withSession(`u:alice:${new Date().toISOString().slice(0, 10)}`, async () => {
+  await client.chat.completions.create({ ... });
+});
+// Session: "u:alice:2026-04-24" — same! Events merge in the dashboard automatically.
+```
+
+---
+
+## Session vs. Run vs. Trace
+
+| Scope | Set via | Represents |
+|-------|---------|------------|
+| Session | `withSession(sessionId, ...)` | A user's interaction window across multiple agent runs |
+| Run | `withAgent(agentId, ...)` | A single agent execution |
+| Trace | Auto-generated | The full distributed call tree spanning all nested agent runs |
+
+---
+
+## Common Patterns
+
+### HTTP Request Handler
+
+```typescript
+import express from "express";
+import { init, withSession } from "@syrin/sdk";
+import OpenAI from "openai";
+
+const sdk = await init({ apiKey: "syrin_pk_...", agentId: "chat-bot" });
+const client = new OpenAI();
 const app = express();
+app.use(express.json());
 
-app.post('/chat', async (req, res) => {
+app.post("/chat", async (req, res) => {
   const { userId, messages } = req.body;
   const sessionId = `u:${userId}:${new Date().toISOString().slice(0, 10)}`;
 
   await withSession(sessionId, async () => {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages,
-    });
+    const response = await client.chat.completions.create({ model: "gpt-4o", messages });
     res.json({ sessionId, content: response.choices[0].message.content });
   });
 });
 ```
 
-#### Batch Job
+### Batch Job
 
 ```typescript
-// Each batch run gets its own explicit session ID
 const batchSessionId = `batch:nightly-report:${new Date().toISOString().slice(0, 10)}`;
 
 await withSession(batchSessionId, async () => {
   for (const item of items) {
-    await openai.chat.completions.create({ ... });
+    await client.chat.completions.create({ ... });
   }
 });
 ```
 
-#### Explicit Session ID for Backend Correlation
+### Explicit Session ID for Backend Correlation
 
 ```typescript
-// Tie the Syrin session to your order ID for easy cross-system correlation
+// Tie the Syrin session to your order ID for easy cross-system lookup
 async function handleOrderChat(orderId: string, message: string): Promise<string> {
-  const sessionId = `order-${orderId}`;
-
-  return withSession(sessionId, async () => {
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages: [{ role: 'user', content: message }],
+  return withSession(`order-${orderId}`, async () => {
+    const response = await client.chat.completions.create({
+      model: "gpt-4o",
+      messages: [{ role: "user", content: message }],
     });
-    return response.choices[0].message.content ?? '';
+    return response.choices[0].message.content ?? "";
   });
 }
 ```

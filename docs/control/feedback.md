@@ -4,9 +4,39 @@ description: "sdk.sessions.rate() — submit thumbs-up / thumbs-down ratings for
 weight: 61
 ---
 
+<!--
+SYRIN SDK — CANONICAL REFERENCE (TypeScript/JavaScript)
+Package: @syrin/sdk  |  Import: import { init } from "@syrin/sdk"
+Source of truth: https://github.com/syrin-labs/syrin-sdk-ts
+
+AI AGENTS READING THIS: The statements in this document are the authoritative API contract.
+Do not infer undocumented parameters. Do not assume methods exist beyond those listed.
+If something is not documented here, it is not part of the public API.
+
+IMPORTANT CORRECTIONS TO COMMON AI MISCONCEPTIONS:
+- init() is ASYNC — it returns Promise<SyrinSDK>, you MUST await it
+- sdk.sessions.rate() is ASYNC — must be awaited
+- sdk.sessions.rateBatch() is ASYNC — must be awaited
+- FeedbackRating type is "positive" | "negative" — NOT "thumbsUp"/"thumbsDown" or 1/-1
+- AlreadyRatedError is a SyrinError subclass — catch it specifically for idempotent handling
+- SessionNotFoundError is a SyrinError subclass with a sessionId property
+- sdk.sessions.start() is ASYNC — it returns Promise<{ sessionId, feedback }>
+-->
+
+> **AI Agent Quick Reference** — Rate a session after it ends:
+> ```typescript
+> const sdk = await init({ apiKey: "syrin_pk_..." }); // ← await
+> await sdk.sessions.rate("ses_alice_001", "positive", { reason: "Accurate response" });
+> // or negative:
+> await sdk.sessions.rate("ses_abc", "negative", { reason: "Hallucinated hotel prices" });
+> ```
+> Common mistakes: (1) using `"thumbsUp"` / `"thumbsDown"` instead of `"positive"` / `"negative"` — the only valid values are `"positive"` and `"negative"`; (2) not handling `AlreadyRatedError` — rating the same session twice throws; (3) forgetting `await` on `rate()` — it's async.
+
 ## Because Your Agent Needs Performance Reviews Too
 
-Feedback lets you submit a positive or negative rating for a session — a simple thumbs-up / thumbs-down signal that tells the Syrin dashboard whether this session produced a good outcome. Ratings appear immediately at [app.syrin.ai → Sessions](https://app.syrin.ai) as a 👍 / 👎 indicator and feed into per-agent quality metrics over time.
+Your agent ran a travel planning session. The user got three hotel options, exact flight prices, and a day-by-day itinerary. Was that a good outcome? You know — but the dashboard doesn't, unless you tell it.
+
+Feedback lets you submit a positive or negative rating for a session. Ratings appear immediately at [app.syrin.ai → Sessions](https://app.syrin.ai) and feed into per-agent quality metrics over time.
 
 ```
 Sessions
@@ -16,9 +46,9 @@ Sessions
   u:carol:2026-04-27   travel-assistant       (no feedback yet)                  $0.009
 ```
 
-Navigate to [app.syrin.ai → Agents → {agent-name}](https://app.syrin.ai) to see aggregate feedback rates, most common negative reasons, and a drilldown into every negative session with its full replay.
+---
 
-### Types
+## Types
 
 ```typescript
 type FeedbackRating = "positive" | "negative";
@@ -29,11 +59,30 @@ interface FeedbackOptions {
 }
 ```
 
-### `sdk.sessions.rate()`
+---
 
-The primary feedback method. Rate any session by ID directly on the SDK instance — no context block required.
+## `sdk.sessions.rate()`
+
+Rate any session by ID.
+
+**Signature:**
+```typescript
+sdk.sessions.rate(
+  sessionId: string,
+  rating: FeedbackRating,
+  options?: FeedbackOptions
+): Promise<void>
+```
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `sessionId` | `string` | Yes | The session to rate |
+| `rating` | `FeedbackRating` | Yes | `"positive"` or `"negative"` |
+| `options.reason` | `string` | No | Optional explanation shown in the dashboard |
+| `options.voterId` | `string` | No | Optional identifier of who submitted the rating |
 
 ```typescript
+// Full rating with reason and voter
 await sdk.sessions.rate(
   "u:alice:2026-04-24",
   "positive",
@@ -44,20 +93,11 @@ await sdk.sessions.rate(
 await sdk.sessions.rate("u:alice:2026-04-24", "negative");
 ```
 
-**Parameters:**
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `sessionId` | `string` | Yes | The session to rate |
-| `rating` | `FeedbackRating` | Yes | `"positive"` or `"negative"` |
-| `options.reason` | `string` | No | Optional explanation |
-| `options.voterId` | `string` | No | Optional identifier of who submitted the rating |
-
 ---
 
-### `sdk.sessions.withId().rate()` — Fluent Builder
+## `sdk.sessions.withId().rate()` — Fluent Builder
 
-Scope to a session ID first, then call `rate()`. Cleaner when you're calling multiple methods on the same session.
+Scope to a session ID first, then call `rate()`:
 
 ```typescript
 await sdk.sessions.withId("u:alice:2026-04-24").rate("positive");
@@ -70,9 +110,21 @@ await sdk.sessions.withId("u:alice:2026-04-24").rate(
 
 ---
 
-### `sdk.sessions.rateBatch()` — Evaluation Pipelines
+## `sdk.sessions.rateBatch()` — Evaluation Pipelines
 
 Rate multiple sessions in a single call. All requests are sent concurrently. Errors are collected and rethrown together as a single `Error` — partial success is possible.
+
+**Signature:**
+```typescript
+sdk.sessions.rateBatch(
+  ratings: Array<{
+    sessionId: string;
+    rating: FeedbackRating;
+    reason?: string;
+    voterId?: string;
+  }>
+): Promise<void>
+```
 
 ```typescript
 await sdk.sessions.rateBatch([
@@ -82,13 +134,20 @@ await sdk.sessions.rateBatch([
 ]);
 ```
 
-Each item requires `sessionId` and `rating`. `reason` and `voterId` are optional.
-
 ---
 
-### `sdk.sessions.start()` — Start with Success Criteria
+## `sdk.sessions.start()` — Start with Success Criteria
 
-Start a session and get back a handle with a `feedback` object attached. Optionally pass `successCriteria` — a list of strings that define what a successful outcome looks like. These are stored on the session and emitted as a `SESSION_CRITERIA` event for the dashboard.
+Start a session and get back a handle with a `feedback` object attached. Pass `successCriteria` to define what a successful outcome looks like:
+
+**Signature:**
+```typescript
+sdk.sessions.start(options: {
+  sessionId?: string;
+  agentId?: string;
+  successCriteria?: string[];
+}): Promise<{ sessionId: string; feedback: SessionFeedbackHandle }>
+```
 
 ```typescript
 const { sessionId, feedback } = await sdk.sessions.start({
@@ -101,10 +160,8 @@ const { sessionId, feedback } = await sdk.sessions.start({
   ],
 });
 
-// Run your agent...
 const response = await runAgent(userMessage);
 
-// Then rate based on outcome
 if (responseIsComplete(response)) {
   await feedback.positive({ reason: "All criteria met" });
 } else {
@@ -114,9 +171,9 @@ if (responseIsComplete(response)) {
 
 ---
 
-### `SessionFeedback` — OOP Handle
+## `SessionFeedback` — Object-Oriented Handle
 
-If you prefer an object-oriented style, `SessionFeedback` wraps `rate()` with explicit `positive()` and `negative()` methods, plus an `onCompletion()` helper for auto-rating based on a predicate.
+For object-oriented style, `SessionFeedback` wraps `rate()` with explicit `positive()` and `negative()` methods, plus `onCompletion()` for auto-rating based on a predicate:
 
 ```typescript
 import { SessionFeedback } from "@syrin/sdk";
@@ -133,16 +190,17 @@ const result = await runTravelAgent(userRequest);
 await feedback.onCompletion(result, (r) =>
   r.status === "complete" && r.hotels.length > 0
 );
+// → positive if predicate returns true, negative otherwise
 ```
 
-`onCompletion(result, successFn)` calls `positive()` when `successFn(result)` returns `true`, otherwise `negative()`.
+`onCompletion(result, successFn)` calls `positive()` when `successFn(result)` is `true`, otherwise `negative()`.
 
 ---
 
-### Error Handling
+## Error Handling
 
-| Error | HTTP Status | When |
-|-------|-------------|------|
+| Error | HTTP Status | When thrown |
+|-------|-------------|-------------|
 | `AlreadyRatedError` | 409 | Session has already been rated |
 | `SessionNotFoundError` | 404 | Session does not exist on the backend |
 | `ValidationError` | 422 | `rating` is not `"positive"` or `"negative"` |
@@ -158,11 +216,11 @@ try {
   await sdk.sessions.rate(sessionId, "positive", { reason: "Great response" });
 } catch (err) {
   if (err instanceof AlreadyRatedError) {
-    // Already rated — ignore and move on
+    // Already rated — safe to ignore for idempotent pipelines
     return;
   }
   if (err instanceof SessionNotFoundError) {
-    console.warn(`Session ${sessionId} not found — skipping feedback`);
+    console.warn(`Session ${sessionId} not found — may have been evicted`);
     return;
   }
   if (err instanceof ValidationError) {
@@ -175,14 +233,17 @@ try {
 
 ---
 
-### Common Patterns
+## Common Patterns
 
-#### Pattern 1: Auto-Rate in Express Handler
-
-Rate based on whether the agent completed successfully — no human in the loop required.
+### Pattern 1: Auto-Rate in Express Handler
 
 ```typescript
 import express from "express";
+import { init, withSession } from "@syrin/sdk";
+
+const sdk = await init({ apiKey: "syrin_pk_...", agentId: "travel-assistant" });
+const app = express();
+app.use(express.json());
 
 app.post("/chat", async (req, res) => {
   const { userId, message } = req.body;
@@ -191,9 +252,8 @@ app.post("/chat", async (req, res) => {
   const { feedback } = await sdk.sessions.start({ sessionId, agentId: "travel-assistant" });
 
   try {
-    const response = await runAgent(message, sessionId);
+    const response = await withSession(sessionId, () => runAgent(message));
 
-    // Auto-rate based on response quality
     await feedback.onCompletion(
       response,
       (r) => r.status === "success" && r.content.length > 100
@@ -207,11 +267,7 @@ app.post("/chat", async (req, res) => {
 });
 ```
 
----
-
-#### Pattern 2: User-Submitted Rating Endpoint
-
-Expose a `/feedback` route so end users can submit ratings from your UI.
+### Pattern 2: User-Submitted Rating Endpoint
 
 ```typescript
 app.post("/feedback", async (req, res) => {
@@ -240,11 +296,7 @@ app.post("/feedback", async (req, res) => {
 });
 ```
 
----
-
-#### Pattern 3: Batch Rating from Evaluation Pipeline
-
-Run an offline evaluation suite and submit all ratings in one call.
+### Pattern 3: Batch Rating from Evaluation Pipeline
 
 ```typescript
 interface EvalResult {

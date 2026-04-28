@@ -252,5 +252,6 @@ export const HEADER_AUTHORIZATION = 'Authorization';
 export const HEADER_SDK_VERSION = 'X-Syrin-SDK';
 export const CONTENT_TYPE_JSON = 'application/json';
 
-// Re-export SDK version from one place
-export const SDK_VERSION = '1.1.0';
+// Derived from package.json — never hardcode this value
+import { version as _pkgVersion } from '../package.json';
+export const SDK_VERSION: string = _pkgVersion;

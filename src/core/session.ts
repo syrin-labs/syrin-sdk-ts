@@ -162,11 +162,11 @@ export class SessionStore {
         if (ALLOWED_CONFIG_KEYS.has(lastSegment)) key = lastSegment;
       }
       if (!ALLOWED_CONFIG_KEYS.has(key)) {
-        console.warn(`[Syrin] Ignoring unknown remote config key: "${rawKey}"`);
+        console.warn(`[Syrin SDK] Ignoring unknown remote config key: "${rawKey}"`);
         continue;
       }
       if (!_validateConfigValue(key, value)) {
-        console.warn(`[Syrin] Remote config key "${key}" has unexpected type (${typeof value}) — dropping`);
+        console.warn(`[Syrin SDK] Remote config key "${key}" has unexpected type (${typeof value}) — dropping`);
         continue;
       }
       if (value === null || value === undefined) {

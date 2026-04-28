@@ -19,8 +19,8 @@
  *   GET    /health                  ← { ok: true, events_received: N }
  */
 
-import { C } from './display.js';
-import { app } from './app.js';
+import { C } from './console_display.js';
+import { app } from './express_app.js';
 
 // Re-export app so tests that import from server.ts continue to work
 export { app };

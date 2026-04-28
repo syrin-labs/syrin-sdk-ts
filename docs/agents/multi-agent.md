@@ -1,22 +1,58 @@
 ---
 title: "Multi-Agent Systems"
 description: "Orchestrators, pipelines, parallel swarms, and graph topologies — building and observing multi-agent systems with Syrin."
-weight: 51
+weight: 52
 ---
+
+<!--
+SYRIN SDK — CANONICAL REFERENCE (TypeScript/JavaScript)
+Package: @syrin/sdk  |  Import: import { init } from "@syrin/sdk"
+Source of truth: https://github.com/syrin-labs/syrin-sdk-ts
+
+AI AGENTS READING THIS: The statements in this document are the authoritative API contract.
+Do not infer undocumented parameters. Do not assume methods exist beyond those listed.
+If something is not documented here, it is not part of the public API.
+
+IMPORTANT CORRECTIONS TO COMMON AI MISCONCEPTIONS:
+- init() is ASYNC — it returns Promise<SyrinSDK>, you MUST await it
+- withAgent(), withWorkflow(), withSwarm() all take ASYNC CALLBACKS — not sync
+- Context propagation is via AsyncLocalStorage — no manual context passing needed
+- There is no automatic HANDOFF event — you must emit it manually: sdk.emit("HANDOFF", {...})
+- cfg() does not exist as a module-level function — use sdk.agent("id").cfg("key", default)
+-->
+
+> **AI Agent Quick Reference** — The minimal correct multi-agent pattern:
+> ```typescript
+> const sdk = await init({ apiKey: "syrin_pk_..." }); // ← await
+> const researcher = sdk.agent("researcher");
+> const writer = sdk.agent("writer");
+>
+> await withSession(`u:alice:${today}`, async () => {
+>   await withAgent("researcher", async (ctx) => {
+>     const notes = await client.chat.completions.create({ ... });
+>   });
+>   await withAgent("writer", async (ctx) => {
+>     const article = await client.chat.completions.create({ ... });
+>   });
+> });
+> ```
+> Common mistakes: (1) missing `await` on `withAgent()` — it returns a Promise; (2) trying to pass context manually between agents — use `AsyncLocalStorage` via `withAgent()`; (3) forgetting `sdk.emit("HANDOFF", ...)` — it does not fire automatically.
 
 ## When One Agent Just Isn't Enough
 
-Multi-agent systems split complex tasks across specialized agents — a researcher that gathers information, a writer that drafts content, an editor that refines it. Syrin provides first-class support for orchestration patterns: sequential pipelines, parallel swarms, hierarchical orchestrators, and arbitrary graphs.
+Multi-agent systems split complex tasks across specialized agents. Syrin provides first-class support for orchestration patterns: sequential pipelines, parallel swarms, hierarchical orchestrators, and arbitrary graphs — with full per-agent telemetry and independent config namespaces.
 
-### Registering Sub-Agents
+---
 
-Tell Syrin which agents exist in your system so the dashboard can show the full topology:
+## Registering Sub-Agents
 
-```ts
+Tell Syrin which agents exist in your system so the dashboard shows the full topology:
+
+```typescript
 import { init } from "@syrin/sdk";
 
-const sdk = init({
-  apiKey: "...",
+const sdk = await init({
+  apiKey: "syrin_pk_...",
   agentId: "travel-orchestrator",           // the orchestrator
   agents: {                                  // sub-agents
     "researcher": { description: "Web research and data gathering" },
@@ -26,11 +62,11 @@ const sdk = init({
 });
 ```
 
-You can also pass a plain array if you don't need descriptions at init time:
+Or as a plain array if you don't need descriptions at init time:
 
-```ts
-const sdk = init({
-  apiKey: "...",
+```typescript
+const sdk = await init({
+  apiKey: "syrin_pk_...",
   agentId: "travel-orchestrator",
   agents: ["researcher", "writer", "editor"],
 });
@@ -40,22 +76,22 @@ Each sub-agent gets its own config namespace in the dashboard (e.g., `agents.res
 
 ---
 
-### Topology Types
+## Topology Types
 
 Define the relationship between agents explicitly:
 
-```ts
+```typescript
 sdk.defineTopology({
-  type: "orchestrator",        // orchestrator | pipeline | parallel | graph | swarm | hierarchical | mesh
+  type: "pipeline",  // "orchestrator" | "pipeline" | "parallel" | "graph" | "conditional_graph" | "hybrid"
   nodes: {
     "travel-orchestrator": { role: "orchestrator" },
-    "researcher":           { role: "worker", execMode: "parallel" },
+    "researcher":           { role: "worker", execMode: "sequential" },
     "writer":               { role: "worker", execMode: "sequential" },
     "editor":               { role: "worker", execMode: "sequential" },
   },
   edges: [
     { from: "travel-orchestrator", to: "researcher" },
-    { from: "travel-orchestrator", to: "writer" },
+    { from: "researcher",          to: "writer" },
     { from: "writer",              to: "editor" },
   ],
   entryPoint: "travel-orchestrator",
@@ -65,9 +101,9 @@ sdk.defineTopology({
 
 Or pass topology directly to `init()`:
 
-```ts
-const sdk = init({
-  apiKey: "...",
+```typescript
+const sdk = await init({
+  apiKey: "syrin_pk_...",
   agentId: "travel-orchestrator",
   agents: ["researcher", "writer", "editor"],
   topology: {
@@ -91,215 +127,161 @@ const sdk = init({
 
 ---
 
-### Pattern 1: Sequential Pipeline
+## Pattern 1: Sequential Pipeline with `withAgent()`
 
-Agents run one after another. Each passes its output to the next.
+Agents run one after another. `withAgent()` scopes each agent's LLM calls and emits `AGENT_RUN_STARTED` / `AGENT_RUN_ENDED` lifecycle events automatically.
 
-```ts
-import { init } from "@syrin/sdk";
+```typescript
+import { init, withSession, withAgent, withWorkflow } from "@syrin/sdk";
 import OpenAI from "openai";
 
 const client = new OpenAI();
-const sdk = init({ apiKey: "...", agentId: "travel-orchestrator" });
+const sdk = await init({ apiKey: "syrin_pk_...", agentId: "travel-orchestrator" });
 
 const researcher = sdk.agent("researcher");
 const writer     = sdk.agent("writer");
 const editor     = sdk.agent("editor");
 
-async function runResearcher(topic: string): Promise<string> {
-  const resp = await client.chat.completions.create({
-    model: researcher.cfg("llm.model", "gpt-4o-mini"),
-    messages: [{ role: "user", content: `Research: ${topic}` }],
-  });
-  return resp.choices[0].message.content ?? "";
-}
+researcher
+  .field("llm.model", "gpt-4o-mini", { enum: ["gpt-4o", "gpt-4o-mini"] })
+  .field("llm.temperature", 0.3, { ge: 0, le: 1 });
 
-async function runWriter(researchNotes: string): Promise<string> {
-  const resp = await client.chat.completions.create({
-    model: writer.cfg("llm.model", "gpt-4o"),
-    messages: [{ role: "user", content: `Write article from: ${researchNotes}` }],
-  });
-  return resp.choices[0].message.content ?? "";
-}
+writer
+  .field("llm.model", "gpt-4o")
+  .field("llm.temperature", 0.7, { ge: 0, le: 2 });
 
-async function runEditor(draft: string): Promise<string> {
-  const resp = await client.chat.completions.create({
-    model: editor.cfg("llm.model", "gpt-4o-mini"),
-    messages: [{ role: "user", content: `Edit for clarity and tone: ${draft}` }],
-  });
-  return resp.choices[0].message.content ?? "";
-}
+editor
+  .field("llm.model", "gpt-4o-mini")
+  .field("llm.temperature", 0.2, { ge: 0, le: 1 });
 
 async function runPipeline(userId: string, topic: string): Promise<string> {
-  return sdk.withSession({ userId, window: "day" }, async (sess) => {
-    sdk.emit("HANDOFF", { from_agent: "travel-orchestrator", to_agent: "researcher" });
-    const notes = await runResearcher(topic);
-    sdk.emit("CHECKPOINT", { name: "research-done" });
+  const today = new Date().toISOString().slice(0, 10);
 
-    sdk.emit("HANDOFF", { from_agent: "researcher", to_agent: "writer" });
-    const draft = await runWriter(notes);
-    sdk.emit("CHECKPOINT", { name: "draft-done" });
+  return withSession(`u:${userId}:${today}`, () =>
+    withWorkflow("research-write-edit", async () => {
+      // withAgent() emits AGENT_RUN_STARTED / AGENT_RUN_ENDED automatically
+      const notes = await withAgent("researcher", async (ctx) => {
+        sdk.emit("HANDOFF", { from_agent: "orchestrator", to_agent: "researcher" });
+        const resp = await client.chat.completions.create({
+          model: researcher.cfg("llm.model", "gpt-4o-mini") as string,
+          temperature: researcher.cfg("llm.temperature", 0.3) as number,
+          messages: [{ role: "user", content: `Research: ${topic}` }],
+        });
+        return resp.choices[0].message.content ?? "";
+      });
 
-    sdk.emit("HANDOFF", { from_agent: "writer", to_agent: "editor" });
-    const final = await runEditor(draft);
-    sdk.emit("CHECKPOINT", { name: "edit-done" });
+      sdk.emit("CHECKPOINT", { name: "research-done" });
 
-    sess.feedback.positive({ reason: "Pipeline completed" });
-    return final;
-  });
+      const draft = await withAgent("writer", async (ctx) => {
+        sdk.emit("HANDOFF", { from_agent: "researcher", to_agent: "writer" });
+        const resp = await client.chat.completions.create({
+          model: writer.cfg("llm.model", "gpt-4o") as string,
+          temperature: writer.cfg("llm.temperature", 0.7) as number,
+          messages: [{ role: "user", content: `Write article from: ${notes}` }],
+        });
+        return resp.choices[0].message.content ?? "";
+      });
+
+      const final = await withAgent("editor", async (ctx) => {
+        sdk.emit("HANDOFF", { from_agent: "writer", to_agent: "editor" });
+        const resp = await client.chat.completions.create({
+          model: editor.cfg("llm.model", "gpt-4o-mini") as string,
+          temperature: editor.cfg("llm.temperature", 0.2) as number,
+          messages: [{ role: "user", content: `Edit for clarity: ${draft}` }],
+        });
+        return resp.choices[0].message.content ?? "";
+      });
+
+      return final;
+    })
+  );
 }
 ```
 
 ---
 
-### Pattern 2: Parallel with Promise.all
+## Pattern 2: Parallel with Promise.all and `withSwarm()`
 
-Agents run concurrently. Emit `AGENT_FORK` before launching and `AGENT_JOIN` after all settle.
+Agents run concurrently. Emit `AGENT_FORK` before launching and `AGENT_JOIN` after all settle so the dashboard renders them as a parallel band.
 
-```ts
-import { init } from "@syrin/sdk";
+```typescript
+import { init, withSession, withSwarm, withAgent } from "@syrin/sdk";
 import OpenAI from "openai";
 
 const client = new OpenAI();
-const sdk = init({ apiKey: "...", agentId: "travel-orchestrator" });
+const sdk = await init({ apiKey: "syrin_pk_...", agentId: "travel-orchestrator" });
 
 async function researchAspect(aspect: string, destination: string): Promise<string> {
-  const handle = sdk.agent(`researcher-${aspect}`);
-  const resp = await client.chat.completions.create({
-    model: handle.cfg("llm.model", "gpt-4o-mini"),
-    messages: [{ role: "user", content: `Research ${aspect} for ${destination}` }],
+  return withAgent(`researcher-${aspect}`, async () => {
+    const resp = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [{ role: "user", content: `Research ${aspect} for ${destination}` }],
+    });
+    return resp.choices[0].message.content ?? "";
   });
-  return resp.choices[0].message.content ?? "";
 }
 
 async function runParallelResearch(userId: string, destination: string): Promise<string[]> {
-  return sdk.withSession({ userId, window: "day" }, async () => {
-    const aspects = ["climate", "hotels", "food", "transport", "culture"];
+  const today = new Date().toISOString().slice(0, 10);
+  const aspects = ["climate", "hotels", "food", "transport", "culture"];
 
-    sdk.emit("AGENT_FORK", {
-      agents: aspects.map((a) => `researcher-${a}`),
-      reason: `Parallel research for ${destination}`,
-    });
+  return withSession(`u:${userId}:${today}`, () =>
+    withSwarm("research-swarm", async () => {
+      sdk.emit("AGENT_FORK", {
+        agents: aspects.map((a) => `researcher-${a}`),
+        reason: `Parallel research for ${destination}`,
+      });
 
-    const results = await Promise.all(
-      aspects.map((aspect) => researchAspect(aspect, destination))
-    );
+      const results = await Promise.all(
+        aspects.map((aspect) => researchAspect(aspect, destination))
+      );
 
-    sdk.emit("AGENT_JOIN", {
-      agents: aspects.map((a) => `researcher-${a}`),
-      reason: "All researchers completed",
-    });
+      sdk.emit("AGENT_JOIN", {
+        agents: aspects.map((a) => `researcher-${a}`),
+        reason: "All researchers completed",
+      });
 
-    return results;
-  });
+      return results;
+    })
+  );
 }
 ```
 
 ---
 
-### Pattern 3: Orchestrator with AgentHandle
+## Context Propagation via AsyncLocalStorage
 
-Use `sdk.agent()` to get a handle for each agent, declare their config fields at startup, then use `handle.cfg()` inside request handlers:
+`withAgent()` uses `AsyncLocalStorage` — every `cfg()`, `emit()`, and LLM call inside the callback automatically inherits the agent context. No manual context passing is needed.
 
-```ts
-import { init } from "@syrin/sdk";
-import OpenAI from "openai";
-
-const client = new OpenAI();
-const sdk = init({ apiKey: "...", agentId: "orchestrator" });
-
-// Declare fields at startup — they appear in the dashboard immediately
-const researcher = sdk.agent("researcher");
-researcher.field("llm.model", "gpt-4o-mini", { enum: ["gpt-4o", "gpt-4o-mini"] });
-researcher.field("llm.temperature", 0.3, { ge: 0, le: 1, label: "Research Temperature" });
-researcher.field("prompt.systemPrompt", "You research topics thoroughly.", { multiline: true });
-
-const writer = sdk.agent("writer");
-writer.field("llm.model", "gpt-4o");
-writer.field("llm.temperature", 0.7, { ge: 0, le: 2 });
-writer.field("prompt.systemPrompt", "You write clear, engaging articles.", { multiline: true });
-
-async function runWithHandles(userId: string, topic: string): Promise<string> {
-  return sdk.withSession({ userId, window: "day" }, async () => {
-    sdk.emit("HANDOFF", { from_agent: "orchestrator", to_agent: "researcher" });
-
-    // researcher.cfg() always reads from agents.researcher.* namespace
-    const researchResp = await client.chat.completions.create({
-      model: researcher.cfg("llm.model", "gpt-4o-mini"),
-      temperature: researcher.cfg("llm.temperature", 0.3) as number,
-      messages: [{ role: "user", content: `Research: ${topic}` }],
+```typescript
+await withSession("ses_alice", async () => {
+  await withWorkflow("research-pipeline", async (ctx) => {
+    await withAgent("researcher", async (ctx) => {
+      // All events here carry:
+      // session_id  = "ses_alice"
+      // workflow_id = "research-pipeline"
+      // agent_id    = "researcher"
+      // run_id      = auto-generated
+      await client.chat.completions.create({ ... });
     });
-    const notes = researchResp.choices[0].message.content ?? "";
 
-    sdk.emit("HANDOFF", { from_agent: "researcher", to_agent: "writer" });
-
-    const writeResp = await client.chat.completions.create({
-      model: writer.cfg("llm.model", "gpt-4o"),
-      temperature: writer.cfg("llm.temperature", 0.7) as number,
-      messages: [{ role: "user", content: `Write article from: ${notes}` }],
+    await withAgent("writer", async (ctx) => {
+      // session_id  = "ses_alice"
+      // workflow_id = "research-pipeline"
+      // agent_id    = "writer"
+      await client.chat.completions.create({ ... });
     });
-    return writeResp.choices[0].message.content ?? "";
   });
-}
-```
-
----
-
-### Pattern 4: HTTP Router with `createAgentRouter`
-
-For microservice-style deployments where each agent runs as its own HTTP handler:
-
-```ts
-import express from "express";
-import { init, createAgentRouter } from "@syrin/sdk";
-
-const sdk = init({ apiKey: "...", agentId: "orchestrator" });
-
-// Express
-const app = express();
-app.use(express.json());
-
-const agentRouter = createAgentRouter({
-  "researcher-agent": async (task: string) => {
-    const handle = sdk.agent("researcher-agent");
-    // ... call LLM with handle.cfg() ...
-    return `Research result for: ${task}`;
-  },
-  "writer-agent": async (task: string) => {
-    const handle = sdk.agent("writer-agent");
-    // ... call LLM with handle.cfg() ...
-    return `Article draft: ${task}`;
-  },
 });
-
-app.post("/agent/:agentId", agentRouter);
-app.listen(3000);
-```
-
-For Fastify:
-
-```ts
-import Fastify from "fastify";
-import { createAgentRouter } from "@syrin/sdk";
-
-const fastify = Fastify();
-
-fastify.post("/agent/:agentId", createAgentRouter({
-  "researcher-agent": async (task) => { /* ... */ return ""; },
-  "writer-agent":     async (task) => { /* ... */ return ""; },
-}));
-
-fastify.listen({ port: 3000 });
 ```
 
 ---
 
-### HANDOFF Events
+## HANDOFF Events
 
-There is no automatic context-tracking in TypeScript the way Python's async context vars work. Emit `HANDOFF` explicitly when transferring control between agents:
+There is no automatic HANDOFF event in TypeScript. Emit it explicitly when transferring control between agents:
 
-```ts
-// Manual emit — always preferred for clarity
+```typescript
 sdk.emit("HANDOFF", {
   from_agent: "orchestrator",
   to_agent: "researcher",
@@ -312,11 +294,11 @@ Emit before the receiving agent's first LLM call so the dashboard records the ha
 
 ---
 
-### AGENT_FORK / AGENT_JOIN for Parallel Patterns
+## AGENT_FORK / AGENT_JOIN for Parallel Patterns
 
-Wrap parallel branches with fork/join events so the dashboard renders them as a parallel band rather than sequential steps:
+Wrap parallel branches with fork/join events so the dashboard renders them as a parallel band:
 
-```ts
+```typescript
 sdk.emit("AGENT_FORK", {
   agents: ["researcher-climate", "researcher-hotels", "researcher-food"],
   reason: "Parallel destination research",
@@ -336,65 +318,48 @@ sdk.emit("AGENT_JOIN", {
 
 ---
 
-### Config Isolation Per Agent
+## Config Isolation Per Agent
 
-Each agent in your system gets its own config namespace in the dashboard. Changes to `agents.researcher.llm.temperature` don't affect `agents.writer.llm.temperature`:
+Each agent in your system gets its own config namespace. Changes to `agents.researcher.llm.temperature` never affect `agents.writer.llm.temperature`:
 
-```ts
+```typescript
 // researcher handle always scoped to agents.researcher.*
-const researchModel = researcher.cfg("llm.model", "gpt-4o-mini");  // agents.researcher.llm.model
-const researchTemp  = researcher.cfg("llm.temperature", 0.3);       // agents.researcher.llm.temperature
+const researchModel = researcher.cfg("llm.model", "gpt-4o-mini") as string;  // agents.researcher.llm.model
+const researchTemp  = researcher.cfg("llm.temperature", 0.3) as number;       // agents.researcher.llm.temperature
 
 // writer handle always scoped to agents.writer.*
-const writeModel = writer.cfg("llm.model", "gpt-4o");               // agents.writer.llm.model
-const writeTemp  = writer.cfg("llm.temperature", 0.8);              // agents.writer.llm.temperature
+const writeModel = writer.cfg("llm.model", "gpt-4o") as string;               // agents.writer.llm.model
+const writeTemp  = writer.cfg("llm.temperature", 0.8) as number;              // agents.writer.llm.temperature
 ```
 
-The dashboard shows each agent's section independently — you can tune the researcher and writer with completely different sliders.
+The dashboard shows each agent's section independently — you can tune researcher and writer with completely different sliders.
 
 ---
 
-### Remote Tool Toggling
+## Remote Tool Toggling
 
-Each agent can declare the tools it uses via `handle.tools()`. These appear as on/off switches in the dashboard (Agents → agent → Config → Tools section) and can be disabled at runtime without any code changes.
+Each agent can declare the tools it uses via `handle.tools()`. These appear as on/off switches in the dashboard and can be disabled at runtime without code changes.
 
-```ts
+```typescript
 const researcher = sdk.agent("researcher");
 researcher
   .field("llm.model", "gpt-4o-mini")
   .field("llm.temperature", 0.3, { ge: 0, le: 1 })
   .tools(["search_destinations", "get_weather", "check_flights", "find_hotels"]);
 
-const writer = sdk.agent("writer");
-writer
-  .field("llm.model", "gpt-4o")
-  .tools(["format_markdown", "generate_itinerary"]);
-```
-
-**Dashboard toggle → SDK filtering flow:**
-
-1. `tools()` registers tool names under the agent's schema section on startup.
-2. The dashboard shows each tool as a toggle switch per agent.
-3. Toggle a tool off and click Push — backend records `agents.researcher.tools.get_weather: false`.
-4. The SDK receives the update via SSE and marks that tool as disabled for that session.
-5. The next LLM call with `tools` has `get_weather` stripped automatically.
-
-```ts
 // SDK intercepts the tools parameter and strips any tool toggled off in the dashboard
 const resp = await client.chat.completions.create({
   model: researcher.cfg("llm.model", "gpt-4o-mini") as string,
   messages,
-  tools: ALL_RESEARCHER_TOOLS,  // full list — disabled tools are stripped before the call
+  tools: ALL_RESEARCHER_TOOLS,  // full list — disabled tools stripped automatically
 });
 ```
 
-Tool states are per-session and per-agent — toggling `researcher`'s `get_weather` off does not affect `writer`'s tools or any other agent.
-
 ---
 
-### Observing Multi-Agent Systems in the Dashboard
+## Observing Multi-Agent Systems in the Dashboard
 
-Open [app.syrin.ai → Sessions](https://app.syrin.ai) and click any multi-agent session to see the full handoff timeline:
+Open [app.syrin.ai > Sessions](https://app.syrin.ai) and click any multi-agent session to see the full timeline:
 
 ```
 Session: u:alice:2026-04-27   [workflow: research-write-edit-pipeline]
@@ -402,22 +367,20 @@ Session: u:alice:2026-04-27   [workflow: research-write-edit-pipeline]
   ● SESSION_STARTED       14:32:00.001
   ● WORKFLOW_STARTED      14:32:00.002   workflow=research-write-edit-pipeline
   ● AGENT_RUN_STARTED     14:32:00.003   agentId=researcher
+  ● HANDOFF               14:32:00.004   orchestrator → researcher
   ● LLM_CALL              14:32:01.243   gpt-4o-mini  in=82 out=384  $0.002
   ● CHECKPOINT            14:32:01.250   research-done
-  ● HANDOFF               14:32:01.251   researcher → writer
+  ● AGENT_RUN_ENDED       14:32:01.251   agentId=researcher
   ● AGENT_RUN_STARTED     14:32:01.252   agentId=writer
+  ● HANDOFF               14:32:01.253   researcher → writer
   ● LLM_CALL              14:32:03.810   gpt-4o  in=512 out=621  $0.012
-  ● HANDOFF               14:32:03.821   writer → editor
-  ● AGENT_RUN_STARTED     14:32:03.822   agentId=editor
-  ● LLM_CALL              14:32:05.100   gpt-4o-mini  in=743 out=187  $0.004
-  ● WORKFLOW_ENDED        14:32:05.112   totalCost=$0.018
+  ● AGENT_RUN_ENDED       14:32:03.820   agentId=writer
+  ● WORKFLOW_ENDED        14:32:05.112   totalCost=$0.014
   ● SESSION_ENDED         14:32:05.115
 ```
 
-Navigate to [app.syrin.ai → Agents](https://app.syrin.ai) to see per-agent:
+Navigate to [app.syrin.ai > Agents](https://app.syrin.ai) to see per-agent:
 
 - **Topology graph** — visual representation of your agent architecture
-- **Per-agent config** — independent sliders for researcher, writer, and editor — completely separate controls
+- **Per-agent config** — independent sliders for each agent
 - **Agent timeline** — per-agent cost, call count, and latency breakdown
-- **Handoff trace** — visualizes the handoff chain with timestamps
-- **Session replay** — see exactly which agent handled which part of the conversation

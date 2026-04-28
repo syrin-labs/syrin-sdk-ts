@@ -28,6 +28,7 @@ export interface AgentTopology {
   edges: TopologyEdge[];
   entryPoint?: string;
   terminalNodes?: string[];
+  [key: string]: unknown;
 }
 
 export interface SyrinConfig {
@@ -294,13 +295,6 @@ export interface SyrinDiagnostics {
   lastDriftScore?: number;
   /** Backend incident ID of the last governance action, if any. */
   lastIncidentId?: string;
-}
-
-export interface SyrinSDK {
-  readonly sessionId: string;
-  readonly config: SyrinConfig;
-  flush(): Promise<void>;
-  shutdown(): Promise<void>;
 }
 
 export interface CallInfo {
