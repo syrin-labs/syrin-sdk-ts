@@ -30,7 +30,7 @@ function makeConfig(overrides: Partial<SyrinConfig> = {}): SyrinConfig {
     debug: false,
     captureContent: false,
     offline: false,
-    batchIntervalMs: 60000, // Large so it doesn't auto-fire
+    idleFlushMs: 60000, // Large so it doesn't auto-fire
     batchSize: 50,
     ...overrides,
   };

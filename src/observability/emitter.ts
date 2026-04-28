@@ -103,6 +103,9 @@ export class Emitter {
   }
 
   async flush(): Promise<void> {
+    // Cancel any pending idle timer — we're flushing now.
+    this._cancelIdleTimer();
+
     if (this.config.offline) {
       if (this.config.debug) {
         console.log('[Syrin SDK] Offline mode — skipping flush.');
