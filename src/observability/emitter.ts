@@ -137,6 +137,12 @@ export class Emitter {
       this.flushPromise = null;
     });
     await this.flushPromise;
+
+    // _doFlush may have added secondary events (EXPERIMENT_ASSIGNED, CONTEXT_INJECTION)
+    // via _queueDirect. Schedule an idle flush so they're sent without further delay.
+    if (this.queue.length > 0) {
+      this._scheduleIdleFlush();
+    }
   }
 
   private _scheduleIdleFlush(): void {
@@ -455,8 +461,26 @@ export class Emitter {
         variant_name: assignment.variantName,
         overrides: assignment.overrides,
       };
-      this.emit(expEvent as unknown as SyrinEvent, sessionId);
+      this._queueDirect(expEvent as unknown as SyrinEvent, sessionId);
     }
+  }
+
+  /**
+   * Push an event directly onto the queue without scheduling any flush.
+   * Use this from within _doFlush to emit secondary events (e.g. EXPERIMENT_ASSIGNED,
+   * CONTEXT_INJECTION) — calling emit() there would create re-entrancy races.
+   * flush() schedules an idle flush after _doFlush completes if the queue is non-empty.
+   */
+  private _queueDirect(event: SyrinEvent, sessionId: string): void {
+    if (this.queue.length >= MAX_QUEUE_SIZE) {
+      const [dropped] = this.queue.splice(0, 1);
+      console.warn(
+        `[Syrin SDK] Event queue full (${MAX_QUEUE_SIZE}): dropped event ` +
+        `type=${dropped.event.event_type} id=${String(dropped.event.event_id)}. ` +
+        'Increase SYRIN_MAX_QUEUE_SIZE or reduce event rate.'
+      );
+    }
+    this.queue.push({ event, sessionId });
   }
 
   private _requeue(batch: QueuedEvent[]): void {
