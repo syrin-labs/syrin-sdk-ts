@@ -1,7 +1,7 @@
 /**
  * Syrin SDK — Configuration management.
  *
- * All defaults are sourced from constants.ts — never hardcode values here.
+ * All defaults are sourced from constants/ — never hardcode values here.
  */
 
 import type { SyrinConfig } from '@/types.js';
@@ -10,7 +10,7 @@ import {
   DEFAULT_BATCH_SIZE,
   DEFAULT_IDLE_FLUSH_MS,
   SDK_VERSION,
-} from '@/constants.js';
+} from '@/constants/index.js';
 
 export { SDK_VERSION };
 

@@ -44,6 +44,7 @@ import {
   stableHash,
 } from '@/utils/helpers.js';
 import { detectProvider } from '@/utils/provider.js';
+import { redactContent } from '@/utils/redact.js';
 import { unpatch as unpatchOpenAI } from '@/interceptors/openai.js';
 
 // Re-export for convenience
@@ -645,7 +646,13 @@ export class SyrinCore implements ICallTarget {
       agent_id: agentId,
       ..._runCtxFields(),
       // tool_calls arguments are sensitive — only captured when captureContent is on
-      ...(this.config.captureContent && toolCalls?.length ? { tool_calls: toolCalls } : {}),
+      ...(this.config.captureContent && toolCalls?.length ? {
+        tool_calls: redactContent(toolCalls, {
+          redactFields: this.config.redactFields,
+          redactPatterns: this.config.redactPatterns,
+          autoRedactPii: this.config.autoRedactPii,
+        }) as typeof toolCalls,
+      } : {}),
       // tool_definitions are metadata (names + schemas only), always captured
       ...(toolDefinitions?.length ? { tool_definitions: toolDefinitions } : {}),
       call_index: updatedSession?.callIndex ?? 0,
@@ -667,10 +674,21 @@ export class SyrinCore implements ICallTarget {
       has_refusal: detectRefusal(responseText),
       last_checkpoint_id: updatedSession?.lastCheckpointId,
       // Full content — only when capture_content=true (off by default for privacy)
-      ...(this.config.captureContent ? {
-        prompt_messages: modifiedMessages,
-        ...(responseText != null ? { completion_text: responseText } : {}),
-      } : {}),
+      ...(this.config.captureContent ? (() => {
+        const redactCfg = {
+          redactFields: this.config.redactFields,
+          redactPatterns: this.config.redactPatterns,
+          autoRedactPii: this.config.autoRedactPii,
+        };
+        const redactedMessages = redactContent(modifiedMessages, redactCfg);
+        const redactedText = responseText != null
+          ? redactContent(responseText, redactCfg) as string
+          : null;
+        return {
+          prompt_messages: redactedMessages,
+          ...(redactedText != null ? { completion_text: redactedText } : {}),
+        };
+      })() : {}),
     };
 
     // Guard: if init() hasn't resolved yet, queue the event for replay instead of emitting
@@ -697,7 +715,11 @@ export class SyrinCore implements ICallTarget {
         if (this.config.captureContent) {
           let parsedArgs: unknown;
           try { parsedArgs = JSON.parse(tc.arguments); } catch { parsedArgs = { _raw: tc.arguments }; }
-          tcEvent['arguments'] = parsedArgs;
+          tcEvent['arguments'] = redactContent(parsedArgs, {
+            redactFields: this.config.redactFields,
+            redactPatterns: this.config.redactPatterns,
+            autoRedactPii: this.config.autoRedactPii,
+          });
         }
         this._emitter.emit(tcEvent as unknown as SyrinEvent, sessionId);
       }
@@ -712,7 +734,12 @@ export class SyrinCore implements ICallTarget {
         const toolCallId = (m as unknown as Record<string, unknown>)['tool_call_id'] as string | undefined;
         const content = m.content;
         if (content == null) continue;
-        const resultStr = typeof content === 'string' ? content : JSON.stringify(content);
+        const rawResultStr = typeof content === 'string' ? content : JSON.stringify(content);
+        const resultStr = redactContent(rawResultStr, {
+          redactFields: this.config.redactFields,
+          redactPatterns: this.config.redactPatterns,
+          autoRedactPii: this.config.autoRedactPii,
+        }) as string;
         const trEvent = {
           event_id: generateId('evt_'),
           event_type: 'TOOL_RESULT',

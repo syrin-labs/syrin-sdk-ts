@@ -15,6 +15,7 @@ import { GovernanceCheckpointRestoredError } from '@/errors.js';
 import { fireConfigChange, fireAlert } from '@/observability/hooks.js';
 import { generateId, nowIso, stableHash } from '@/utils/helpers.js';
 import { parseBilling, logBillingOnIngest } from '@/billing.js';
+import { createLogger } from '@/utils/logger.js';
 
 const MAX_QUEUE_SIZE = 1000;
 
@@ -34,10 +35,13 @@ export class Emitter {
   private retryAfterUntil = 0;
   /** Registered callbacks for context injections. */
   private injectionCallbacks: Set<(injection: ContextInjection) => void> = new Set();
+  /** Structured logger (routes to custom logger or console). */
+  private _log: ReturnType<typeof createLogger>;
 
   constructor(config: SyrinConfig, sessionStore: SessionStore) {
     this.config = config;
     this.sessionStore = sessionStore;
+    this._log = createLogger(config);
   }
 
   /**
@@ -173,17 +177,17 @@ export class Emitter {
         signal: AbortSignal.timeout(5_000),
       });
       if (!response.ok) {
-        console.warn(
-          `[Syrin SDK] Backend health check failed (HTTP ${response.status}). ` +
-          'Check your backendUrl setting.'
+        this._log.warn(
+          `[Syrin SDK] Backend health check failed (HTTP ${response.status}). Check your backendUrl setting.`,
+          { status: response.status, backendUrl: this.config.backendUrl },
         );
-      } else if (this.config.debug) {
-        console.log('[Syrin SDK] Backend health check OK.');
+      } else {
+        this._log.info('[Syrin SDK] Backend health check OK.');
       }
     } catch {
-      console.warn(
-        `[Syrin SDK] Syrin backend unreachable at ${this.config.backendUrl}. ` +
-        'Events will be queued locally. Check your backendUrl setting.'
+      this._log.warn(
+        `[Syrin SDK] Syrin backend unreachable at ${this.config.backendUrl}. Events will be queued locally. Check your backendUrl setting.`,
+        { backendUrl: this.config.backendUrl },
       );
     }
   }
@@ -219,9 +223,10 @@ export class Emitter {
       if (!response.ok) {
         if (response.status === 401 || response.status === 403) {
           // Auth errors won't resolve themselves — drop the batch and warn loudly.
-          console.warn(
-            `[Syrin SDK] ⚠ Backend returned HTTP ${response.status} — check your API key and backend URL. ` +
-            `${batch.length} event(s) dropped. Correct the key and restart the process.`
+          this._log.warn(
+            `[Syrin SDK] Backend returned HTTP ${response.status} — check your API key and backend URL. ` +
+            `${batch.length} event(s) dropped. Correct the key and restart the process.`,
+            { status: response.status, events_dropped: batch.length },
           );
           // No requeue
         } else if (response.status === 429) {
@@ -230,24 +235,27 @@ export class Emitter {
           const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 60;
           const backoffMs = (isNaN(retryAfterSec) ? 60 : retryAfterSec) * 1000;
           this.retryAfterUntil = Date.now() + backoffMs;
-          console.warn(
+          this._log.warn(
             `[Syrin SDK] Rate limit exceeded (HTTP 429). ` +
-            `Pausing ingest for ${(backoffMs / 1000).toFixed(0)}s. Events re-queued.`
+            `Pausing ingest for ${(backoffMs / 1000).toFixed(0)}s. Events re-queued.`,
+            { status: 429, backoff_ms: backoffMs, events_requeued: batch.length },
           );
           this._requeue(batch);
         } else if (response.status === 402) {
           // Billing limit — drop and warn; retrying won't help until the plan is upgraded.
           const body = await response.json().catch(() => ({} as Record<string, unknown>)) as Record<string, unknown>;
           const code = String(body['code'] ?? 'PLAN_LIMIT_EXCEEDED');
-          console.warn(
-            `[Syrin SDK] ⚠ Billing limit reached (HTTP 402, code=${code}). ` +
-            `${batch.length} event(s) dropped. Upgrade at https://app.syrin.ai/billing`
+          this._log.warn(
+            `[Syrin SDK] Billing limit reached (HTTP 402, code=${code}). ` +
+            `${batch.length} event(s) dropped. Upgrade at https://app.syrin.ai/billing`,
+            { status: 402, code, events_dropped: batch.length },
           );
           // No requeue
         } else {
           // 5xx or unexpected — requeue for retry
-          console.warn(
-            `[Syrin SDK] Ingest failed (HTTP ${response.status}). Re-queuing ${batch.length} event(s).`
+          this._log.warn(
+            `[Syrin SDK] Ingest failed (HTTP ${response.status}). Re-queuing ${batch.length} event(s).`,
+            { status: response.status, events_requeued: batch.length },
           );
           this._requeue(batch);
         }
@@ -342,11 +350,10 @@ export class Emitter {
         }
       }
     } catch (err) {
-      if (this.config.debug) {
-        console.warn('[Syrin SDK] Ingest network error (detail):', err);
-      } else {
-        console.warn('[Syrin SDK] Failed to reach Syrin backend. Events re-queued.');
-      }
+      this._log.warn(
+        '[Syrin SDK] Failed to reach Syrin backend. Events re-queued.',
+        this.config.debug ? { error: String(err), events_requeued: batch.length } : { events_requeued: batch.length },
+      );
       this._requeue(batch);
     }
   }

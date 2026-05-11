@@ -59,10 +59,39 @@ function _validateConfigValue(key: string, value: unknown): boolean {
   }
 }
 
+export interface SessionStoreOptions {
+  /** Interval in ms at which stale sessions are automatically evicted. 0 = disabled. */
+  autoEvictIntervalMs?: number;
+  /** Sessions older than this many ms are considered stale for auto-eviction. */
+  sessionTtlMs?: number;
+}
+
 export class SessionStore {
   private sessions: Map<string, SessionState> = new Map();
   private mutex = new AsyncMutex();
   private _globalConfig: Record<string, unknown> = {};
+  private _evictTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(options?: SessionStoreOptions) {
+    const { autoEvictIntervalMs, sessionTtlMs } = options ?? {};
+    if (autoEvictIntervalMs && autoEvictIntervalMs > 0) {
+      const ttl = sessionTtlMs ?? 3_600_000;
+      this._evictTimer = setInterval(() => {
+        this.clearStaleSessions(ttl);
+      }, autoEvictIntervalMs);
+    }
+  }
+
+  /**
+   * Stop the auto-eviction timer (if running). Safe to call when no timer is active.
+   * Always call this when the SessionStore is no longer needed to avoid dangling timers.
+   */
+  destroy(): void {
+    if (this._evictTimer !== null) {
+      clearInterval(this._evictTimer);
+      this._evictTimer = null;
+    }
+  }
 
   /**
    * Get existing session or create a new one.

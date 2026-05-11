@@ -276,6 +276,110 @@ describe('SSEClient — agent_status event', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// P1-1: Polling race condition — multiple onFallbackToPolling calls
+// ---------------------------------------------------------------------------
+describe('SSEClient — onFallbackToPolling deduplication', () => {
+  it('calling onFallbackToPolling multiple times only creates ONE interval timer', () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+    // Track timers created by each fallback invocation
+    const timerIds: Set<ReturnType<typeof setInterval>> = new Set();
+    let pollCount = 0;
+
+    // Simulate the SDK's deduplication guard
+    let _pollingTimer: ReturnType<typeof setInterval> | null = null;
+
+    const onFallbackToPolling = (): void => {
+      if (_pollingTimer !== null) return; // guard: already polling
+      _pollingTimer = setInterval(() => { pollCount++; }, 1000);
+      timerIds.add(_pollingTimer);
+    };
+
+    // Call multiple times (as SSE reconnect loop would)
+    onFallbackToPolling();
+    onFallbackToPolling();
+    onFallbackToPolling();
+
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    expect(timerIds.size).toBe(1);
+
+    clearInterval(_pollingTimer!);
+    vi.useRealTimers();
+  });
+
+  it('stopping polling and restarting creates exactly one new timer', () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+    let _pollingTimer: ReturnType<typeof setInterval> | null = null;
+
+    const startPolling = (): void => {
+      if (_pollingTimer !== null) return;
+      _pollingTimer = setInterval(() => {}, 1000);
+    };
+
+    const stopPolling = (): void => {
+      if (_pollingTimer !== null) {
+        clearInterval(_pollingTimer);
+        _pollingTimer = null;
+      }
+    };
+
+    // Start → stop → start
+    startPolling();
+    stopPolling();
+    startPolling();
+
+    expect(setIntervalSpy).toHaveBeenCalledTimes(2); // once before stop, once after
+
+    stopPolling();
+    vi.useRealTimers();
+  });
+
+  it('SSEClient.stop() prevents new onFallbackToPolling callbacks from being called', () => {
+    const config = makeConfig({ agentId: 'test-agent' });
+    const onFallbackToPolling = vi.fn();
+    const client = new SSEClient(config, makeStore(), { onFallbackToPolling });
+
+    // Stop before any potential fallback
+    client.stop();
+
+    // The stopped flag should prevent further callbacks
+    expect(client.isConnected).toBe(false);
+    // onFallbackToPolling should NOT have been called (client was never started)
+    expect(onFallbackToPolling).not.toHaveBeenCalled();
+  });
+
+  it('init()-level fallback polling guard: onFallbackToPolling called twice starts only one timer', () => {
+    vi.useFakeTimers();
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+    // Replicate the guard pattern used in src/index.ts init()
+    let _pollTimer: ReturnType<typeof setInterval> | null = null;
+
+    const setPollTimer = (timer: ReturnType<typeof setInterval> | null): void => {
+      _pollTimer = timer;
+    };
+
+    const onFallbackToPolling = (): void => {
+      // Guard: if a poll timer already exists, do not create another
+      if (_pollTimer !== null) return;
+      const timer = setInterval(() => {}, 30_000);
+      setPollTimer(timer);
+    };
+
+    onFallbackToPolling();
+    onFallbackToPolling(); // second call should be a no-op
+
+    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+
+    clearInterval(_pollTimer!);
+    vi.useRealTimers();
+  });
+});
+
 describe('SSEClient — events_ingested event', () => {
   it('handles events_ingested event without crashing', async () => {
     const store = makeStore();

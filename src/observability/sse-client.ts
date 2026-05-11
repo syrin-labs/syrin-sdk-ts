@@ -23,7 +23,7 @@ import {
   SSE_RECONNECT_BACKOFF_MAX_MS,
   SSEEventName,
   agentStreamUrl,
-} from '@/constants.js';
+} from '@/constants/index.js';
 import { fireConfigChange } from '@/observability/hooks.js';
 
 interface SSEFrame {

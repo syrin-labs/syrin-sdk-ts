@@ -43,7 +43,7 @@ const GEMINI_API_KEY = process.env['GEMINI_API_KEY'] ?? '';
 const SYRIN_API_KEY = process.env['SYRIN_LOCAL_API_KEY'] || process.env['SYRIN_API_KEY'] || '';
 const OPENAI_MODEL = process.env['OPENAI_MODEL'] ?? 'gpt-4o-mini';
 const ANTHROPIC_MODEL = process.env['ANTHROPIC_MODEL'] ?? 'claude-haiku-4-5';
-const GEMINI_MODEL = process.env['GEMINI_MODEL'] ?? 'gemini-2.0-flash';
+const GEMINI_MODEL = process.env['GEMINI_MODEL'] ?? 'gemini-2.5-flash';
 
 const BACKEND_URL = 'http://localhost:4000';
 

@@ -75,6 +75,31 @@ export interface SyrinConfig {
    * When not provided, the SDK auto-infers orchestrator topology from agents list.
    */
   topology?: AgentTopology;
+  /**
+   * Field paths to redact from captured content (e.g. ["messages[].content", "tool_calls[].arguments.password"]).
+   * Only applies when captureContent=true.
+   */
+  redactFields?: string[];
+  /**
+   * Regex patterns — any matched substring is replaced with [REDACTED].
+   * Only applies when captureContent=true.
+   */
+  redactPatterns?: RegExp[];
+  /**
+   * Auto-detect and redact common PII: emails, phone numbers, credit cards, SSNs.
+   * Only applies when captureContent=true.
+   */
+  autoRedactPii?: boolean;
+  /**
+   * Custom logger. If not provided, falls back to console.
+   * Compatible with pino, winston, bunyan interfaces.
+   */
+  logger?: {
+    debug?: (msg: string, meta?: Record<string, unknown>) => void;
+    info?: (msg: string, meta?: Record<string, unknown>) => void;
+    warn?: (msg: string, meta?: Record<string, unknown>) => void;
+    error?: (msg: string, meta?: Record<string, unknown>) => void;
+  };
 }
 
 export interface SyrinEvent {

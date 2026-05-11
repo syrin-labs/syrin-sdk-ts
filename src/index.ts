@@ -34,9 +34,13 @@ import type { Checkpoint } from '@/core/checkpoint.js';
 import type { SyrinDiagnostics } from '@/types.js';
 import { SSEClient } from '@/observability/sse-client.js';
 import { setRegisteredEmitter, clearRegisteredEmitter } from '@/agent/emitter-registry.js';
+import { WorkflowClient } from '@/core/workflow-client.js';
+import type { RegisterWorkflowOptions, HandoffResult, RecoveryAction } from '@/core/workflow-client.js';
 
 
 export type { SyrinConfig, SyrinEvent, IngestPayload, IngestResponse, SessionState, SyrinDiagnostics, CallInfo, RunContext, GovernanceAction, GovernanceData, ContextInjection, SessionType } from '@/types.js';
+export { WorkflowClient } from '@/core/workflow-client.js';
+export type { RegisterWorkflowOptions, HandoffResult, RecoveryAction } from '@/core/workflow-client.js';
 export type { BillingInfo, UsageSummary } from '@/billing.js';
 export { AgentServer } from '@/agent/server.js';
 export type { AgentHandler, AgentServerOptions } from '@/agent/server.js';
@@ -212,6 +216,8 @@ export interface SyrinSDK {
 /** @internal — Use the {@link SyrinSDK} interface for all type annotations. */
 export class SyrinSDKInstance implements SyrinSDK {
   private _sessionId: string;
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-expect-error — assigned non-enumerably via Object.defineProperty in constructor
   private _config: SyrinConfig;
   private _sessionStore: SessionStore;
   private _emitter: Emitter;
@@ -231,7 +237,23 @@ export class SyrinSDKInstance implements SyrinSDK {
     core: SyrinCore,
     heartbeat: Heartbeat,
   ) {
-    this._config = config;
+    // Store _config as a non-enumerable property so it is invisible to
+    // JSON.stringify(sdk), Object.keys(sdk), and spread {...sdk}.
+    // The getter below still exposes it for internal SDK use.
+    Object.defineProperty(this, '_config', {
+      value: config,
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
+    // Override toJSON on the config object so JSON.stringify(sdk.config)
+    // also masks the apiKey — protects against accidental direct logging.
+    Object.defineProperty(config, 'toJSON', {
+      value: () => ({ ...config, apiKey: '****' }),
+      enumerable: false,
+      writable: true,
+      configurable: true,
+    });
     this._sessionStore = sessionStore;
     this._emitter = emitter;
     this._otelBridge = otelBridge;
@@ -750,6 +772,7 @@ export class SyrinSDKInstance implements SyrinSDK {
     }
     this._sseClient?.stop();
     this._sseClient = null;
+    this._sessionStore.destroy();
     await this._heartbeat.stop();
     await this._emitter.stop();
     this._core.uninstallAll();
@@ -1000,6 +1023,13 @@ export async function init(options: SyrinInitOptions = {}): Promise<SyrinSDK> {
     const sseClient = new SSEClient(config, sessionStore, {
       onConfigUpdate: undefined,
       onFallbackToPolling: (): void => {
+        // Guard: if a poll timer already exists (e.g. from a previous fallback
+        // call or from configPollIntervalMs), do not create a second one.
+        // onFallbackToPolling can be called multiple times by the SSE reconnect
+        // loop before it fully exhausts its retries, so this guard is critical
+        // to prevent multiple concurrent polling intervals (memory leak + redundant
+        // API calls).
+        if (instance['_pollTimer'] !== null) return;
         const pollIntervalMs = options.configPollIntervalMs ?? config.configPollIntervalMs ?? 0;
         if (pollIntervalMs <= 0) {
           // SSE failed and polling wasn't configured — start with a sensible default
@@ -1453,4 +1483,113 @@ export function checkpoint(
   sessionId?: string,
 ): void {
   _primaryInstance?.checkpoint(label, metadata, sessionId);
+}
+
+// ── Workflow Recovery Pipeline ─────────────────────────────────────────────
+
+/** Lazily-created WorkflowClient singleton for the default SDK instance. */
+let _workflowClient: WorkflowClient | null = null;
+
+function _getWorkflowClient(): WorkflowClient | null {
+  if (!_primaryInstance) return null;
+  if (!_workflowClient) {
+    _workflowClient = new WorkflowClient(_primaryInstance.config);
+  }
+  return _workflowClient;
+}
+
+/**
+ * Register a multi-agent workflow with the SAGE recovery backend.
+ *
+ * Call once before any agents start executing. Idempotent — safe to call
+ * on each workflow run (backend upserts on conflict).
+ *
+ * @example
+ * await registerWorkflow({
+ *   workflowId: 'research-pipeline',
+ *   name: 'Research Pipeline',
+ *   goal: 'Produce a comprehensive research report',
+ *   agents: [
+ *     { agentId: 'researcher', role: 'Research Agent', goal: 'Gather info', stageIndex: 0 },
+ *     { agentId: 'analyst', role: 'Analysis Agent', goal: 'Analyze', stageIndex: 1 },
+ *     { agentId: 'writer', role: 'Writing Agent', goal: 'Write report', stageIndex: 2 },
+ *   ],
+ *   sageMode: 'between-all',
+ * });
+ */
+export async function registerWorkflow(options: RegisterWorkflowOptions): Promise<void> {
+  const client = _getWorkflowClient();
+  if (!client) {
+    console.warn('[Syrin SDK] registerWorkflow() called before init() — skipping');
+    return;
+  }
+  await client.registerWorkflow(options);
+}
+
+/**
+ * Notify SAGE of an agent handoff. SAGE detects drift asynchronously.
+ *
+ * Returns a HandoffResult immediately. Recovery injection (if needed) is
+ * stored and available via getPendingRecovery() before the next agent starts.
+ *
+ * @example
+ * const result = await handoff({
+ *   sessionId: 'ses_abc',
+ *   workflowId: 'research-pipeline',
+ *   fromAgentId: 'researcher',
+ *   toAgentId: 'analyst',
+ *   stageOutput: researcherOutput,
+ *   fromStage: 0,
+ *   toStage: 1,
+ * });
+ *
+ * // Before running the analyst:
+ * const injection = getRecoveryInjection('ses_abc', 'analyst');
+ * if (injection) systemPrompt = injection + '\n\n' + systemPrompt;
+ */
+export async function handoff(opts: {
+  sessionId: string;
+  workflowId: string;
+  fromAgentId: string;
+  toAgentId: string;
+  stageOutput: string;
+  fromStage: number;
+  toStage: number;
+}): Promise<HandoffResult> {
+  const client = _getWorkflowClient();
+  if (!client) {
+    return { handoffId: null, sageStatus: 'skipped', driftDetected: null, recoveryAction: null };
+  }
+  return client.handoff(
+    opts.sessionId,
+    opts.workflowId,
+    opts.fromAgentId,
+    opts.toAgentId,
+    opts.stageOutput,
+    opts.fromStage,
+    opts.toStage,
+  );
+}
+
+/**
+ * Get any pending recovery injection for an agent before it executes.
+ * Returns the injection text to prepend to the agent's system prompt, or null.
+ * Consumes the injection (returns null on subsequent calls for same agent).
+ *
+ * @example
+ * const injection = getRecoveryInjection(sessionId, 'analyst');
+ * if (injection) {
+ *   systemPrompt = injection + '\n\n' + originalSystemPrompt;
+ * }
+ */
+export function getRecoveryInjection(sessionId: string, agentId: string): string | null {
+  return _getWorkflowClient()?.buildInjectionPrompt(sessionId, agentId) ?? null;
+}
+
+/**
+ * Clear session state after workflow completes.
+ */
+export function clearWorkflowSession(sessionId: string): void {
+  _getWorkflowClient()?.clearSession(sessionId);
+  _workflowClient = null; // Reset so next init() gets fresh client
 }
